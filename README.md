@@ -276,6 +276,15 @@ npx playwright install --with-deps chromium firefox webkit
 
 `umb doctor` checks that the configured engine can launch headlessly; it does not install browsers or fall back to another engine. Locally installed binaries must match the locked Playwright version. Generated workflow specs select an engine with `UMB_PLAYWRIGHT_ENGINE=chromium|firefox|webkit` and default to Chromium; unknown values fail.
 
+HTTPS certificate verification is enabled by default. For trusted local development with a self-signed certificate, you may explicitly opt out:
+
+```yaml
+browser:
+  ignore_https_errors: true # default: false
+```
+
+This is a Playwright browser-context-wide setting: it disables HTTPS certificate verification for **all HTTPS traffic from that browser context**, not just localhost. It does not bypass UMB's configured navigation-origin checks, but it can expose connections to untrusted or intercepted servers. Use it only in trusted local development and leave it unset (or `false`) otherwise.
+
 The adapter uses common Playwright browser/context/page/locator APIs. The engine smoke suite verifies launch, context/page lifecycle, navigation origin routing, locator interaction/assertions, accessibility snapshots, screenshots, and cleanup for each available browser. Engine-specific browser behavior can still differ; this is not a claim that every site, CSS feature, or API behaves identically across engines. CDP remains deferred and Chromium-only if added later. CI installs all three engines on Linux and sets `UMB_REQUIRE_ALL_ENGINES=1`; local focused runs skip only engines whose executable is absent.
 
 ## Release bundles
