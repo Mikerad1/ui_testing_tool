@@ -1,0 +1,19 @@
+version: 1
+project:
+  id: demo-web
+  name: Demo Web
+  base_url: http://127.0.0.1:3000
+server:
+  host: 127.0.0.1
+  port: 7317
+  auth:
+    mode: token
+    token_env: UMB_MCP_TOKEN
+browser:
+  headless: true
+  allowed_origins:
+    - http://127.0.0.1:3000
+memory:
+  database: ./.umb/memory.sqlite
+knowledge:
+  path: ./umb-knowledge

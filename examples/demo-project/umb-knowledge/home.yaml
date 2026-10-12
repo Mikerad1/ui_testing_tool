@@ -1,0 +1,7 @@
+schema_version: 1
+kind: screen
+id: home
+name: Home
+route: /
+landmarks: []
+elements: []

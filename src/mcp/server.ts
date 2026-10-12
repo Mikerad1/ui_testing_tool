@@ -1,0 +1,207 @@
+import { randomUUID, timingSafeEqual } from 'node:crypto';
+import path from 'node:path';
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { z } from 'zod';
+import type { Config } from '../config/config.js';
+import { safePath } from '../config/config.js';
+import type { Store } from '../memory/store.js';
+import type { BrowserController } from '../browser/controller.js';
+import { runWorkflow } from '../workflow/runner.js';
+import { reconcile } from '../knowledge/reconcile.js';
+import { startKnowledgeWatcher, type KnowledgeWatchEvent, type KnowledgeWatchHandle } from '../knowledge/watcher.js';
+
+export function originAllowed(origin: string | undefined, tokenMode: boolean, port: number): boolean {
+  if (!origin) return true;
+  if (!tokenMode) return false;
+  try {
+    const u = new URL(origin), effectivePort = Number(u.port || (u.protocol === 'https:' ? '443' : '80'));
+    return ['http:', 'https:'].includes(u.protocol) && ['127.0.0.1', 'localhost', '[::1]'].includes(u.hostname) && !u.username && !u.password && effectivePort === port;
+  } catch { return false; }
+}
+
+type Session = { id: string; server: McpServer; transport: StreamableHTTPServerTransport; timer?: NodeJS.Timeout; closed: boolean };
+const MAX_BODY = 1024 * 1024;
+const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60_000;
+
+async function readJsonBody(req: IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = []; let size = 0;
+  for await (const chunk of req) { const b = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk); size += b.length; if (size > MAX_BODY) throw new Error('Request body too large'); chunks.push(b); }
+  try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw new Error('Invalid JSON request body'); }
+}
+function reply(res: ServerResponse, status: number, message: string) { if (!res.headersSent) { res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' }); res.end(message); } }
+
+export type ServeOptions={idleTimeoutMs?:number;approver?:(prompt:string)=>Promise<boolean>;knowledgeRoot?:string;projectRoot?:string;watchKnowledge?:boolean;watcherFactory?:(root:string,listener:KnowledgeWatchEvent)=>KnowledgeWatchHandle;watchDebounceMs?:number};
+export async function serve(config: Config, store: Store, browser: BrowserController, options: ServeOptions = {}) {
+  const token = config.server.auth.mode === 'token' ? process.env[config.server.auth.token_env] : undefined;
+  if (config.server.auth.mode === 'token' && !token) throw Error(`Set ${config.server.auth.token_env} before starting server`);
+  if (!['127.0.0.1', '::1', 'localhost'].includes(config.server.host)) throw Error('Only loopback server binding is permitted');
+  if (config.server.auth.mode === 'none') console.warn('WARNING: MCP HTTP authentication disabled');
+  const sessions = new Map<string, Session>();
+  const knowledgeRoot=options.knowledgeRoot??path.resolve(config.knowledge.path);
+  const idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
+  if (!Number.isFinite(idleTimeoutMs) || idleTimeoutMs < 1) throw Error('idleTimeoutMs must be a positive finite number');
+  let closing = false, pendingInitializers = 0, initializerReserved = false, initializationDrain: (() => void) | undefined, activePosts=0,postDrain:(()=>void)|undefined;
+  let browserQueue: Promise<void> = Promise.resolve();
+  const runBrowser = <T>(fn: () => Promise<T>): Promise<T> => {
+    const next = browserQueue.then(fn, fn);
+    browserQueue = next.then(() => undefined, () => undefined);
+    return next;
+  };
+  const armIdle = (session: Session) => {
+    if (session.timer) clearTimeout(session.timer);
+    session.timer = setTimeout(() => { void closeSession(session); }, idleTimeoutMs);
+    session.timer.unref();
+  };
+  const closeSession = async (session: Session) => {
+    if (session.closed) return;
+    session.closed = true;
+    if (session.timer) clearTimeout(session.timer);
+    sessions.delete(session.id);
+    try { await session.transport.close(); } finally { await session.server.close(); }
+  };
+
+  function createSession(): Session {
+    const mcp = new McpServer({ name: 'ui-memory-browser', version: '0.1.0' });
+    const session: Session = { id: '', server: mcp, transport: undefined as unknown as StreamableHTTPServerTransport, closed: false };
+    const setRequestHandler = mcp.server.setRequestHandler.bind(mcp.server);
+    (mcp.server as any).setRequestHandler = (schema: unknown, handler: (request: any, extra: any) => Promise<any> | any) =>
+      setRequestHandler(schema as any, async (request: any, extra: any) => {
+        const result = await handler(request, extra);
+        if (schema !== CallToolRequestSchema || !result?.isError || result.structuredContent) return result;
+        const text = result.content?.find((item: any) => item.type === 'text')?.text ?? 'Invalid tool input';
+        if (!/input validation error/i.test(text)) return result;
+        const envelope = { ok: false, project_id: config.project.id, session_id: session.id, error: { code: 'invalid_input', message: text }, state_revision: browser.revision };
+        return { ...result, isError: true, structuredContent: envelope, content: [{ type: 'text', text: JSON.stringify(envelope) }] };
+      });
+    const tool = (name: string, description: string, schema: any, fn: (args: any) => unknown | Promise<unknown>) =>
+      mcp.tool(name, description, schema, async (args: any) => {
+        let result: any;
+        try { result = { ok: true, project_id: config.project.id, session_id: session.id, data: await fn(args), state_revision: browser.revision }; }
+        catch (error) {
+          const message = error instanceof Error ? error.message : 'Operation failed';
+          const code = /revision_conflict/i.test(message)?'revision_conflict':/approval_denied/i.test(message)?'approval_denied':/revision conflict/i.test(message) ? 'revision_conflict' : /expired snapshot reference|stale ref/i.test(message) ? 'stale_ref' : /ambiguous|matches: 0|no match/i.test(message) ? 'ambiguous_or_missing_target' : /origin not allowed|navigation.*denied/i.test(message) ? 'navigation_denied' : /timeout|timed out/i.test(message) ? 'timeout' : /invalid|must be|requires/i.test(message) ? 'invalid_input' : 'internal';
+          result = { ok: false, project_id: config.project.id, session_id: session.id, error: { code, message }, state_revision: browser.revision };
+          return { isError: true, structuredContent: result, content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
+        }
+        return { structuredContent: result, content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
+      });
+    const browserTool = (name: string, description: string, schema: any, fn: (args: any) => unknown | Promise<unknown>) =>
+      tool(name, description, schema, args => runBrowser(() => Promise.resolve(fn(args))));
+     const target = z.object({ by: z.enum(['ref', 'role', 'label', 'placeholder', 'test_id', 'text', 'css']), value: z.string().max(1000).optional(), role: z.string().max(100).optional(), name: z.string().max(500).optional() }).strict();
+    browserTool('memory_recall','Bounded route/role-aware workflow recommendations',{goal:z.string().max(200),role:z.string().max(120).optional(),environment:z.string().max(100).optional()},async a=>{const result:any=await store.recallWorkflowCandidates({goal:a.goal,currentUrl:browser.page.url(),...(a.role!==undefined?{role:a.role}:{}),...(a.environment!==undefined?{environment:a.environment}:{}),limit:3});const candidates=Array.isArray(result)?result:Array.isArray(result?.candidates)?result.candidates:[];const reasons=new Set(['current_screen_is_start','directed_path_to_start','safe_goal_match','role_match','role_context_missing','environment_match','environment_context_missing']);const safeCandidates=candidates.slice(0,3).flatMap((candidate:any)=>{if(!candidate||typeof candidate.workflow_id!=='string'||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$/.test(candidate.workflow_id))return[];const citations=Array.isArray(candidate.citations)?candidate.citations.slice(0,5).flatMap((c:any)=>c&&typeof c.run_id==='string'&&typeof c.evidence_id==='string'&&['passed','failed','other'].includes(c.status)?[{run_id:c.run_id.slice(0,100),evidence_id:c.evidence_id.slice(0,100),status:c.status}]:[]):[];const counts=candidate.outcome_counts&&typeof candidate.outcome_counts==='object'?{passed:Number.isInteger(candidate.outcome_counts.passed)?Math.max(0,Math.min(100000,candidate.outcome_counts.passed)):0,failed:Number.isInteger(candidate.outcome_counts.failed)?Math.max(0,Math.min(100000,candidate.outcome_counts.failed)):0,other:Number.isInteger(candidate.outcome_counts.other)?Math.max(0,Math.min(100000,candidate.outcome_counts.other)):0}:undefined;return[{workflow_id:candidate.workflow_id,...(typeof candidate.score==='number'&&Number.isFinite(candidate.score)?{score:candidate.score}:{}),...(typeof candidate.confidence==='number'&&Number.isFinite(candidate.confidence)?{confidence:Math.max(0,Math.min(1,candidate.confidence))}:{}),...(Number.isInteger(candidate.step_count)?{step_count:Math.max(0,Math.min(100,candidate.step_count))}:{}),...(Array.isArray(candidate.reason_codes)?{reason_codes:candidate.reason_codes.filter((reason:unknown)=>typeof reason==='string'&&reasons.has(reason)).slice(0,10)}:{}),...(counts?{outcome_counts:counts}:{}),citations,...(candidate.uncertainty!==undefined&&typeof candidate.uncertainty==='string'?{uncertainty:candidate.uncertainty.slice(0,200)}:{})}];});return{candidates:safeCandidates,...(result&&!Array.isArray(result)&&typeof result.uncertainty==='string'?{uncertainty:result.uncertainty.slice(0,200)}:{})};});
+     browserTool('browser_status', 'Current browser state', {}, () => browser.status());
+     browserTool('browser_errors','Read bounded safe browser diagnostics',{after:z.number().int().nonnegative().optional(),limit:z.number().int().min(1).max(100).optional()},a=>browser.browserErrors(a.after??0,a.limit??100));
+    browserTool('browser_navigate', 'Navigate to an allowed origin', { url: z.string().max(4096), wait_until: z.enum(['load','domcontentloaded','networkidle','commit']).optional(), timeout_ms:z.number().int().min(1).max(60000).optional(), expected_revision:z.number().int().nonnegative().optional() }, a => {if(a.expected_revision!==undefined&&a.expected_revision!==browser.revision)throw Error('State revision conflict');return browser.navigate(a.url,a.wait_until,a.timeout_ms);});
+    browserTool('browser_screenshot','Capture a screenshot',{full_page:z.boolean().optional(),file_name:z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/).optional()},a=>browser.takeScreenshot(a.full_page,a.file_name));
+    browserTool('browser_snapshot', 'Visible page controls', { mode: z.enum(['interactive','compact','full']).optional(), depth: z.number().int().min(1).max(8).optional(), scope: z.object({role:z.string().max(100),name:z.string().max(500).optional()}).optional() }, a => browser.snapshot(a));
+    browserTool('browser_find', 'Check semantic locator', { by: z.enum(['role', 'label', 'placeholder', 'test_id', 'text', 'css']), value: z.string().max(1000).optional(), role: z.string().max(100).optional(), name: z.string().max(500).optional() }, a => browser.find(a));
+    const authorize=async(action:string,t:any,revision:number|undefined,session:Session)=>{const rules=config.security?.high_risk??[];if((action==='keyboard'||rules.some(r=>r.action==='any'))&&!t&&rules.some(r=>r.action==='any'||r.action==='keyboard'))throw Error('approval_denied: explicit target required');if(!t)return undefined;const requested=await browser.captureVisibleTarget(t);if(!requested)return undefined;let retained=false;try{const origin=new URL(browser.page.url()).origin;const matched=[] as typeof rules;for(const r of rules){if((r.action!=='any'&&r.action!==action)||r.origin&&r.origin!==origin)continue;if(await browser.sameElement(requested,r.target))matched.push(r);}if(!matched.length)return undefined;if(revision===undefined||revision!==browser.revision)throw Error('revision_conflict: current expected_revision required');const rule=matched[0]!;if(!options.approver)throw Error('approval_denied: local TTY approval unavailable');const yes=await options.approver(`Approve ${action} on configured target (${rule.description}) at ${origin}, revision ${revision}, session ${session.id}? [y/N] `);if(!yes)throw Error('approval_denied: request declined');if(session.closed||!sessions.has(session.id)||revision!==browser.revision||origin!==new URL(browser.page.url()).origin||!await browser.capturedTargetUsable(requested)||!await browser.sameElement(requested,t)||!await browser.sameElement(requested,rule.target))throw Error('approval_denied: browser state or target changed');retained=true;return{handle:requested,release:()=>requested.dispose()};}finally{if(!retained)await requested.dispose();}};
+    for (const action of ['click', 'fill', 'press', 'select','type']) browserTool(`browser_${action}`, `Perform unique visible ${action}`, { target, value: z.string().max(10000).optional(), delay:z.number().int().min(0).max(1000).optional(), expected_revision: z.number().int().nonnegative().optional() }, async a => {
+      if (a.expected_revision !== undefined && a.expected_revision !== browser.revision) throw Error('State revision conflict');const approval=await authorize(action,a.target,a.expected_revision,session);try{return approval?await browser.performCaptured(action,approval.handle,a.value,a.delay):action==='type'?browser.type(a.target,a.value??'',a.delay):browser.act(action, a.target, a.value);}finally{await approval?.release();}
+    });
+    browserTool('browser_keyboard','Press a keyboard key',{key:z.string().min(1).max(100),target:target.optional(),expected_revision:z.number().int().nonnegative().optional()},async a=>{if(a.expected_revision!==undefined&&a.expected_revision!==browser.revision)throw Error('State revision conflict');const approval=await authorize('keyboard',a.target,a.expected_revision,session);try{return approval?await browser.performCaptured('keyboard',approval.handle,a.key):browser.keyboard(a.key,a.target);}finally{await approval?.release();}});
+    browserTool('browser_upload','Upload a project file to a target',{target,project_relative_path:z.string().min(1).max(1024),expected_revision:z.number().int().nonnegative().optional()},async a=>{if(a.expected_revision!==undefined&&a.expected_revision!==browser.revision)throw Error('State revision conflict');const approval=await authorize('upload',a.target,a.expected_revision,session);try{return approval?await browser.uploadCaptured(approval.handle,a.project_relative_path):browser.upload(a.target,a.project_relative_path);}finally{await approval?.release();}});
+    tool('test_run_workflow','Run a YAML-authored deterministic workflow',{workflow_id:z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$/),role:z.string().max(125).optional(),environment:z.string().max(100).optional(),expected_revision:z.number().int().nonnegative()},a=>runBrowser(()=>runWorkflow({store,browser,session,workflowId:a.workflow_id,role:a.role,environment:a.environment,expectedRevision:a.expected_revision,knowledgeRoot,authorize:(action,target,revision)=>authorize(action,target,revision,session)})));
+    browserTool('browser_scroll', 'Scroll page', { direction: z.enum(['up', 'down']), amount: z.number().int().min(1).max(3000).optional() }, a => browser.scroll(a.direction, a.amount));
+    browserTool('browser_wait_for','Wait for a bounded browser condition',{condition:z.enum(['visible','hidden','attached','detached','enabled','url']),target:z.union([target,z.string().max(2048)]).optional(),timeout_ms:z.number().int().min(1).max(10000).optional()},a=>browser.waitFor(a.condition,a.target,a.timeout_ms));
+    browserTool('browser_tabs','List open tabs',{},()=>browser.listTabs());browserTool('browser_tab_select','Select a tab',{id:z.string().max(100)},a=>browser.selectTab(a.id));browserTool('browser_tab_create','Create a tab',{url:z.string().max(4096).optional()},a=>browser.createTab(a.url));browserTool('browser_tab_close','Close a tab',{id:z.string().max(100).optional()},a=>browser.closeTab(a.id));browserTool('browser_back','Go back',{},()=>browser.back());browserTool('browser_forward','Go forward',{},()=>browser.forward());
+    tool('memory_context', 'Project knowledge context', {}, () => store.context()); tool('memory_search', 'Search knowledge', { query: z.string().max(200) }, a => store.search(a.query));
+    tool('memory_get_node', 'Read knowledge node', { id: z.string().max(100) }, a => store.get(a.id));
+    tool('memory_propose', 'Propose a knowledge node', { type: z.string().max(50), stable_key: z.string().max(200), display_name: z.string().max(500), attributes: z.record(z.unknown()).optional() }, a => { if (JSON.stringify(a.attributes ?? {}).length > 16000) throw Error('Attributes too large'); return store.propose(a); });
+     tool('memory_verify', 'Verify proposed knowledge using passing assertion evidence', { id: z.string().max(100), run_id: z.string().max(100) }, a => ({ verified: store.verify(a.id,a.run_id) }));
+      tool('test_assert','Evaluate and record a safe browser assertion',{condition:z.enum(['visible','hidden','enabled','text','url_matches','count','value','present']),target:target.optional(),expected:z.union([z.string().max(1000),z.number()]).optional(),match:z.enum(['contains','exact']).optional(),timeout_ms:z.number().int().min(1).max(30000).optional(),subject_node_id:z.string().min(1).max(100).optional()},a=>runBrowser(async()=>{const subject=a.subject_node_id??store.applicationSubject()?.id;if(!subject||!store.get(subject))throw Error('Assertion subject must belong to this project');const result=await (browser as any).assertCondition(a.condition,a.target,a.expected,a.timeout_ms??5000,a.match??'contains');let artifact:string|undefined,capture:{status:'captured'|'failed';code?:string}|undefined;let safeSummary:Record<string,number>={};let actions:unknown[]=[];if(!result.passed){try{artifact=(await browser.takeScreenshot(false)).artifactPath;capture={status:'captured'};}catch(error){capture={status:'failed',code:/quota|limit/i.test(String(error))?'quota_exceeded':'capture_failed'};}try{const snapshot=await browser.snapshot({mode:'interactive'}) as any;for(const element of snapshot.elements??[])safeSummary[element.role??'unknown']=(safeSummary[element.role??'unknown']??0)+1;}catch{}actions=(browser as any).actionSequence(30).map((x:any)=>({action:x.action,at:x.at,target_by:x.target_by,revision:x.revision}));}const record=store.recordAssertion({session_id:session.id,subject_node_id:subject,passed:result.passed,observed_count:result.observedCount,artifact_ref:artifact,actions});const evidence=record.evidence as any;if(!result.passed){const metadata=JSON.parse(evidence.metadata_json);metadata.role_counts=safeSummary;metadata.capture=capture;store.db.prepare('UPDATE evidence SET metadata_json=? WHERE project_id=? AND id=?').run(JSON.stringify(metadata).slice(0,4096),config.project.id,evidence.id);}return{status:result.passed?'PASS':'FAIL',run_id:record.id,passed:result.passed,observed_count:result.observedCount,capture,evidence_refs:[{id:evidence.id,artifact_ref:artifact??null}]};}));
+     tool('test_report','Read a project-scoped safe test report',{run_id:z.string().min(1).max(100)},a=>store.getRunReport(a.run_id));
+    tool('memory_add_edge','Add a project-scoped relationship',{from_id:z.string().min(1).max(100),to_id:z.string().min(1).max(100),relation:z.string().min(1).max(100),attributes:z.record(z.unknown()).optional()},a=>{if(JSON.stringify(a.attributes??{}).length>4096)throw Error('Attributes too large');return store.addEdge(a.from_id,a.to_id,a.relation,a.attributes);});
+    tool('memory_neighbors','List neighboring project nodes',{id:z.string().min(1).max(100),limit:z.number().int().min(1).max(200).optional()},a=>store.neighbors(a.id,a.limit));
+    tool('memory_path','Find a bounded project graph path',{from_id:z.string().min(1).max(100),to_id:z.string().min(1).max(100),max_depth:z.number().int().min(0).max(10).optional()},a=>store.path(a.from_id,a.to_id,a.max_depth));
+    tool('memory_supersede','Supersede a project node',{old_id:z.string().min(1).max(100),new_id:z.string().min(1).max(100)},a=>({superseded:store.supersede(a.old_id,a.new_id)}));
+     tool('memory_record_outcome','Record a bounded run outcome for a node',{subject_node_id:z.string().min(1).max(100),outcome:z.enum(['passed','failed','observed','skipped']),metadata:z.object({environment:z.enum(['local','staging','production']).optional(),browser:z.enum(['chromium','firefox','webkit']).optional(),duration_ms:z.number().int().min(0).max(10000000).optional(),attempt:z.number().int().min(1).max(100).optional()}).strict().optional(),artifact_ref:z.string().max(1000).optional()},a=>{const metadata=a.metadata??{};const runId=store.createRun();try{const evidence=store.addEvidence({run_id:runId,subject_node_id:a.subject_node_id,kind:'outcome',outcome:a.outcome,metadata,artifact_ref:a.artifact_ref});store.finishRun(runId);return{run_id:runId,evidence};}catch(error){store.finishRun(runId,'failed');throw error;}});
+    tool('memory_stats','Project memory statistics',{},()=>store.stats());
+    tool('memory_conflicts','List bounded project memory conflicts',{limit:z.number().int().min(1).max(200).optional()},()=>store.listConflicts().slice(0,200));
+    tool('memory_export', 'Export sanitized graph', {}, () => store.export());
+    const jsonResource=(uri:string,data:unknown)=>({contents:[{uri,mimeType:'application/json',text:JSON.stringify(data).slice(0,64000)}]});
+    mcp.registerResource('project-current','umb://project/current',{mimeType:'application/json'},uri=>jsonResource(uri.href,{project_id:config.project.id,name:config.project.name,base_url:config.project.base_url}));
+    mcp.registerResource('browser-current','umb://browser/current',{mimeType:'application/json'},async uri=>jsonResource(uri.href,await browser.status()));
+    for(const kind of ['screen','workflow']){const template=new ResourceTemplate(`umb://memory/${kind}/{id}`,{list:undefined});mcp.registerResource(`memory-${kind}`,template,{mimeType:'application/json'},(uri,vars)=>{const record=store.getByTypeKey(kind,String(vars.id));if(!record)throw Error('Unknown memory resource');return jsonResource(uri.href,record);});}
+    session.transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: randomUUID,
+      onsessioninitialized: id => { session.id = id; sessions.set(id, session); armIdle(session); },
+      onsessionclosed: async id => { if (session.timer) clearTimeout(session.timer); session.closed = true; sessions.delete(id); await mcp.close(); }
+    });
+    return session;
+  }
+
+  const http = createServer(async (req, res) => {
+    if(req.method==='POST')activePosts++;
+    try {
+      if (closing) { reply(res, 503, 'Server is shutting down'); return; }
+      const expectedHost = `${config.server.host === '::1' ? '[::1]' : config.server.host}:${config.server.port}`;
+      if ((req.headers.host ?? '').toLowerCase() !== expectedHost.toLowerCase()) { reply(res, 403, 'Forbidden Host'); return; }
+      if (!originAllowed(req.headers.origin, Boolean(token), config.server.port)) { reply(res, 403, 'Forbidden Origin'); return; }
+      if (token) {
+        const auth = req.headers.authorization ?? '', provided = Buffer.from(auth.startsWith('Bearer ') ? auth.slice(7) : ''), expected = Buffer.from(token);
+        if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) { reply(res, 401, 'Unauthorized'); return; }
+      }
+      if (req.url?.split('?')[0] !== '/mcp') { reply(res, 404, 'Not found'); return; }
+      if (req.method === 'POST') {
+        const accepted = (req.headersDistinct.accept ?? []).join(',').toLowerCase();
+        if (!accepted.includes('application/json') || !accepted.includes('text/event-stream')) { reply(res, 406, 'MCP clients must accept application/json and text/event-stream'); return; }
+        const sessionId = req.headers['mcp-session-id'];
+        if (typeof sessionId !== 'string') {
+          pendingInitializers++;
+          try {
+            let body: any;
+            try { body = await readJsonBody(req); } catch (e) { reply(res, (e as Error).message === 'Request body too large' ? 413 : 400, (e as Error).message); return; }
+            const messages = Array.isArray(body) ? body : [body];
+            if (messages.length !== 1 || messages[0]?.method !== 'initialize') { reply(res, 400, 'A valid MCP session is required'); return; }
+            if (closing) { reply(res, 503, 'Server is shutting down'); return; }
+            if (sessions.size > 0 || initializerReserved) { reply(res, 409, 'The shared browser already has an active MCP writer session'); return; }
+            initializerReserved = true;
+            const session = createSession(); await session.server.connect(session.transport);
+            try { await session.transport.handleRequest(req, res, body); }
+            finally { if (!session.id) { await session.transport.close(); await session.server.close(); } }
+          } finally {
+            initializerReserved = false;
+            pendingInitializers--;
+            if (pendingInitializers === 0) { initializationDrain?.(); initializationDrain = undefined; }
+          }
+          return;
+        }
+        let body: any;
+        try { body = await readJsonBody(req); } catch (e) { reply(res, (e as Error).message === 'Request body too large' ? 413 : 400, (e as Error).message); return; }
+        const session = sessions.get(sessionId); if (!session || session.closed) { reply(res, 404, 'Unknown MCP session'); return; }
+        armIdle(session); await session.transport.handleRequest(req, res, body);
+        return;
+      }
+      const sessionId = req.headers['mcp-session-id'];
+      if (typeof sessionId !== 'string') { reply(res, 400, 'Mcp-Session-Id is required'); return; }
+      const session = sessions.get(sessionId); if (!session) { reply(res, 404, 'Unknown MCP session'); return; }
+      if (req.method !== 'GET' && req.method !== 'DELETE') { reply(res, 405, 'Method not allowed'); return; }
+      armIdle(session);
+      await session.transport.handleRequest(req, res);
+    } catch (error) {
+      console.error('MCP request failed', error);
+      reply(res, 500, 'MCP request failed');
+    } finally {
+      if(req.method==='POST'){activePosts--;if(activePosts===0){postDrain?.();postDrain=undefined;}}
+    }
+  });
+  await new Promise<void>((resolve, reject) => { http.once('error', reject); http.listen(config.server.port, config.server.host, resolve); });
+  let knowledgeWatcher:ReturnType<typeof startKnowledgeWatcher>|undefined;
+  if(options.watchKnowledge){try{const watcherRoot=await safePath(options.projectRoot??process.cwd(),knowledgeRoot);knowledgeWatcher=startKnowledgeWatcher(watcherRoot,async()=>{if(closing)return;await runBrowser(async()=>{try{await reconcile(watcherRoot,store);}catch{console.error('Knowledge reload failed; the last valid graph remains active.');}});},{factory:options.watcherFactory,debounceMs:options.watchDebounceMs,onError:message=>console.error(message)});}catch{closing=true;await new Promise<void>(resolve=>http.close(()=>resolve()));throw Error('Knowledge watcher could not start safely');}}
+  return async () => {
+    closing = true;
+    const listenerClosed = new Promise<void>((resolve, reject) => http.close(e => e ? reject(e) : resolve()));
+    await knowledgeWatcher?.close();
+    if (pendingInitializers > 0) await new Promise<void>(resolve => { initializationDrain = resolve; });
+    if(activePosts>0)await new Promise<void>(resolve=>{postDrain=resolve;});
+    for (;;) { const queued=browserQueue; await queued; if(queued===browserQueue)break; }
+    const active = [...sessions.values()];
+    await Promise.all(active.map(async s => { try { await closeSession(s); } catch (e) { console.error('MCP session shutdown failed', e); } }));
+    await listenerClosed;
+  };
+}

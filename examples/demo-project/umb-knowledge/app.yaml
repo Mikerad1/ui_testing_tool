@@ -1,0 +1,6 @@
+schema_version: 1
+kind: application
+id: demo-web
+name: Demo Web
+base_url: http://127.0.0.1:3000
+start_screen: screen:home

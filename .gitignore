@@ -1,0 +1,6 @@
+.slim/deepwork/
+node_modules/
+dist/
+.umb/
+*.umb-lock
+coverage/

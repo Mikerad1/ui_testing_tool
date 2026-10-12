@@ -1,0 +1,4 @@
+import{test}from'node:test';import{strict as assert}from'node:assert';import{originAllowed}from'../src/mcp/server.js';import{visibleSnapshotIndexes}from'../src/browser/controller.js';
+test('unauthenticated MCP rejects every browser Origin, including implied default ports',()=>{assert.equal(originAllowed('http://localhost',false,7317),false);assert.equal(originAllowed('http://localhost:7317',false,7317),false);assert.equal(originAllowed(undefined,false,7317),true);});
+test('token mode compares normalized effective Origin port',()=>{assert.equal(originAllowed('http://localhost',true,7317),false);assert.equal(originAllowed('http://localhost:7317',true,7317),true);assert.equal(originAllowed('http://localhost:80',true,7317),false);});
+test('snapshot indexes retain complete locator-set positions',()=>{assert.deepEqual(visibleSnapshotIndexes([false,true,false,true]),[1,3]);});
