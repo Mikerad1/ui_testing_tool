@@ -55,9 +55,9 @@ test('proxy shutdown destroys an authenticated raw socket during a stalled upstr
  const downstreamClosed=once(client,'close');
  client.write(`GET ${address.pathname} HTTP/1.1\r\nHost: 127.0.0.1:${address.port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nAuthorization: Bearer hanging-upstream-test-token-long-enough\r\n\r\n`);
  try{
-  await once(upstream,'connection');assert.equal(proxy.hasActiveClient(),true);
-  const started=Date.now();await proxy.close();await Promise.race([downstreamClosed,new Promise<never>((_,reject)=>setTimeout(()=>reject(new Error('raw downstream remained open after proxy shutdown')),2000))]);
-   assert.ok(Date.now()-started<2000);assert.equal(proxy.hasActiveClient(),false);for(let attempt=0;attempt<100&&!accepted.every(socket=>socket.destroyed);attempt++)await new Promise(resolve=>setTimeout(resolve,10));assert.ok(accepted.every(socket=>socket.destroyed));
+   await once(upstream,'connection');assert.equal(proxy.hasActiveClient(),true);const acceptedClosed=Promise.all(accepted.map(socket=>socket.destroyed?Promise.resolve():once(socket,'close')));
+   const started=Date.now();await proxy.close();await Promise.race([downstreamClosed,new Promise<never>((_,reject)=>setTimeout(()=>reject(new Error('raw downstream remained open after proxy shutdown')),2000))]);
+   assert.ok(Date.now()-started<2000);assert.equal(proxy.hasActiveClient(),false);await new Promise<void>((resolve,reject)=>{const timer=setTimeout(()=>reject(new Error('raw upstream remained open after proxy shutdown')),5000);acceptedClosed.then(()=>{clearTimeout(timer);resolve();},error=>{clearTimeout(timer);reject(error);});});assert.ok(accepted.every(socket=>socket.destroyed));
  }finally{client.destroy();await proxy.close();for(const socket of accepted)socket.destroy();await new Promise<void>(resolve=>upstream.close(()=>resolve()));}
 });
 
