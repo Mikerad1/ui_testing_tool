@@ -37,7 +37,7 @@ steps:
     action: wait
     condition: visible
     target: {screen: home, element: delayed}
-    timeout_ms: 40
+    timeout_ms: 500
     max_attempts: 3
   - id: fill
     action: fill
