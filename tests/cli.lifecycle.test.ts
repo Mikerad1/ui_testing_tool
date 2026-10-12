@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, writeFile, unlink, readFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile, unlink, readFile, realpath, rename } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -17,7 +17,7 @@ async function freePort(): Promise<number> {
  const port = (server.address() as import('node:net').AddressInfo).port; await new Promise<void>(resolve => server.close(() => resolve())); return port;
 }
 function child(config: string, _cwd: string): { process: ChildProcess; stderr: () => string; stdout: () => string } {
- const proc = spawn(process.execPath, ['--import', 'tsx/esm', path.join(repo, 'src/cli/index.ts'), 'serve', '--config', config], { cwd: repo, env: { ...process.env, UMB_MCP_TOKEN: 'test-token' }, stdio: ['ignore', 'pipe', 'pipe'] });
+ const proc = spawn(process.execPath, [path.join(repo, 'dist/src/cli/index.js'), 'serve', '--config', config], { cwd: repo, env: { ...process.env, UMB_MCP_TOKEN: 'test-token' }, stdio: ['ignore', 'pipe', 'pipe'] });
  let out = '', err = ''; proc.stdout?.on('data', b => { out += b.toString(); }); proc.stderr?.on('data', b => { err += b.toString(); });
  return { process: proc, stderr: () => err, stdout: () => out };
 }
@@ -61,11 +61,16 @@ test('dead same-host owner is recovered; malformed and foreign owners fail close
  const root = await mkdtemp(path.join(os.tmpdir(), 'umb-stale-'));
  const lockDir = path.join(root, '.umb', 'locks'); await mkdir(lockDir, { recursive: true });
  const { createHash } = await import('node:crypto');
- const project = path.join(lockDir, `${createHash('sha256').update(`project:${path.resolve(root)}:test`).digest('hex')}.lock`);
+  const project = path.join(lockDir, `${createHash('sha256').update(`project:${await realpath(root)}:test`).digest('hex')}.lock`);
  try {
   await writeFile(project, JSON.stringify({ token: 'old', pid: 2147483647, host: os.hostname(), acquiredAt: new Date().toISOString() }));
-  const lock = await acquireProjectLock(root, 'test', './db.sqlite'); await lock.release();
-  await writeFile(project, '{broken'); await assert.rejects(acquireProjectLock(root, 'test', './db.sqlite'), /malformed/);
+   const lock = await acquireProjectLock(root, 'test', './db.sqlite'); await lock.release();
+   const original = `${project}.original`;
+   await writeFile(project, '{broken');
+   await rename(project, original);
+   try {
+    await writeFile(project, '{broken'); await assert.rejects(acquireProjectLock(root, 'test', './db.sqlite'), /malformed/);
+   } finally { await unlink(project).catch(() => undefined); await rename(original, project); }
   await writeFile(project, JSON.stringify({ token: 'other', pid: 2147483647, host: 'remote-host', acquiredAt: new Date().toISOString() }));
   await assert.rejects(acquireProjectLock(root, 'test', './db.sqlite'), /host/);
  } finally { await rm(root, { recursive: true, force: true }); }
@@ -99,7 +104,7 @@ test('concurrent stale-lock reclaim preserves the winning owner token', async ()
  try {
   const lockDir = path.join(root, '.umb', 'locks'); await mkdir(lockDir, { recursive: true });
   const { createHash } = await import('node:crypto');
-  const projectLock = path.join(lockDir, `${createHash('sha256').update(`project:${path.resolve(root)}:race`).digest('hex')}.lock`);
+   const projectLock = path.join(lockDir, `${createHash('sha256').update(`project:${await realpath(root)}:race`).digest('hex')}.lock`);
   await writeFile(projectLock, JSON.stringify({ token: 'stale-owner', pid: 2147483647, host: os.hostname(), acquiredAt: new Date(0).toISOString() }));
   const attempts = await Promise.allSettled([
    acquireProjectLock(root, 'race', './.umb/memory.sqlite'),
@@ -140,14 +145,14 @@ test('post-create cleanup preserves a malformed replacement file', async () => {
   await assert.rejects(acquireProjectLock(root, 'replace', './.umb/memory.sqlite', {
    async afterMainLockCreate(file) {
     lockPath = file;
-    await unlink(file);
-    await writeFile(file, replacement);
+     await rename(file, `${file}.original`);
+     await writeFile(file, replacement);
     throw new Error('injected failure after replacement');
    },
   }), /injected failure after replacement/);
   assert.ok(lockPath);
   assert.equal(await readFile(lockPath, 'utf8'), replacement, 'cleanup must not delete malformed content at a replaced path');
- } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test('shutdown requested during startup waits for readiness and runs ordered cleanup once', async () => {
@@ -177,7 +182,7 @@ test('serve child locks, cleans up on startup failure and signal, then restarts'
  const app = createServer((_req, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<html><title>fixture</title><body>ready</body></html>'); });
  app.listen(0, '127.0.0.1'); await once(app, 'listening');
  const appPort = (app.address() as import('node:net').AddressInfo).port;
- const port = await freePort(); const config = path.join(root, 'umb.config.yaml');
+  const port = await freePort(); const config = path.join(root, 'umb.config.yaml');
  const yaml = (db = './.umb/memory.sqlite') => `version: 1\nproject:\n  id: lifecycle\n  name: lifecycle\n  base_url: http://127.0.0.1:${appPort}\nserver:\n  host: 127.0.0.1\n  port: ${port}\n  auth:\n    mode: token\n    token_env: UMB_MCP_TOKEN\nbrowser:\n  headless: true\n  allowed_origins:\n    - http://127.0.0.1:${appPort}\nmemory:\n  database: ${db}\nknowledge:\n  path: ./knowledge\n`;
  await mkdir(path.join(root, 'knowledge'), { recursive: true }); await writeFile(config, yaml());
  let running: ReturnType<typeof child> | undefined;
@@ -190,7 +195,7 @@ test('serve child locks, cleans up on startup failure and signal, then restarts'
   assert.notEqual(failed.process.exitCode, 0, `startup failure exit expected; stderr=${failed.stderr()}`);
   await unlink(blocker); await writeFile(config, yaml());
 
-  running = child(config, root); await waitReady(running, 'first serve');
+   running = child(config, root); await waitReady(running, 'first serve');
   const duplicate = child(config, root); await once(duplicate.process, 'exit');
   assert.notEqual(duplicate.process.exitCode, 0, `duplicate serve should fail; stderr=${duplicate.stderr()}`);
   assert.match(duplicate.stderr(), /locked by PID|already locked/i, `duplicate must show lock diagnostic: ${duplicate.stderr()}`);
@@ -203,9 +208,11 @@ test('serve child locks, cleans up on startup failure and signal, then restarts'
    // Node's Windows child-process signal API terminates the child rather than delivering a catchable POSIX signal.
    // Continue with restart/recovery assertions; the graceful-handler assertion is unavailable on this platform.
    assert.equal(first.process.signalCode, signal, `Windows termination signal observed; stderr=${first.stderr()}`);
-  } else assert.equal(first.process.exitCode, 0, `graceful signal exit; stderr=${first.stderr()}`);
-  running = undefined;
-  const probe = createServer(); probe.listen(port, '127.0.0.1'); await once(probe, 'listening'); await new Promise<void>(resolve => probe.close(() => resolve()));
+   } else assert.equal(first.process.exitCode, 0, `graceful signal exit; stderr=${first.stderr()}`);
+   running = undefined;
+   const probe = createServer(); probe.listen(port, '127.0.0.1'); await once(probe, 'listening'); await new Promise<void>(resolve => probe.close(() => resolve()));
+   const recoveredLock = await acquireProjectLock(root, 'lifecycle', './.umb/memory.sqlite');
+   await recoveredLock.release();
 
   running = child(config, root); await waitReady(running, 'restart after signal');
   await exitChild(running, 'final cleanup', signal); running = undefined;
