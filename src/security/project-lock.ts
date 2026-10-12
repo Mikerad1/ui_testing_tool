@@ -7,7 +7,7 @@ type Owner = { token: string; pid: number; host: string; acquiredAt: string };
 export type ProjectLock = { release(): Promise<void> };
 /** Per-call fault injection seam for lifecycle tests; omit in production. */
 export type ProjectLockTestHooks = { afterMainLockCreate?: (file: string) => void | Promise<void> };
-type OwnedFile = { file: string; token: string; dev?: number; ino?: number };
+type OwnedFile = { file: string; token: string; dev?: number; ino?: number; metadataWritten?: boolean };
 
 function key(value: string): string { return createHash('sha256').update(value).digest('hex'); }
 function processIsAlive(pid: number): boolean {
@@ -92,7 +92,9 @@ async function acquireOne(file: string, owner: Owner, created: OwnedFile[], test
           created.push(owned);
           try {
             const stat = await handle.stat(); owned.dev = stat.dev; owned.ino = stat.ino;
-            await handle.writeFile(JSON.stringify(owner)); await handle.sync();
+            await handle.writeFile(JSON.stringify(owner));
+            owned.metadataWritten = true;
+            await handle.sync();
           } finally { await handle.close(); }
           if (testHooks?.afterMainLockCreate) await testHooks.afterMainLockCreate(file);
           return;
@@ -148,7 +150,7 @@ async function removeOwned(owned: OwnedFile): Promise<void> {
       if (data.token !== owned.token) return;
     } catch (error) {
       // Before complete metadata write, the exclusive-create identity is the ownership proof.
-      if (owned.dev === undefined || owned.ino === undefined || stat.dev !== owned.dev || stat.ino !== owned.ino || (error as NodeJS.ErrnoException).code === 'ENOENT') throw error;
+      if (owned.metadataWritten || owned.dev === undefined || owned.ino === undefined || stat.dev !== owned.dev || stat.ino !== owned.ino || (error as NodeJS.ErrnoException).code === 'ENOENT') throw error;
     }
     await rm(owned.file, { force: true });
   } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
