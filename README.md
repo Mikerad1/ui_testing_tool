@@ -1,19 +1,226 @@
 # UI Memory Browser
 
-A local TypeScript CLI that serves browser and durable knowledge tools over authenticated MCP Streamable HTTP. Requires Node.js 20+ and the locally installed Playwright browser binary selected by configuration (Chromium by default).
+A local TypeScript CLI that serves browser automation and durable knowledge tools over authenticated MCP Streamable HTTP. For most users, download a prebuilt Windows or Linux bundle from [GitHub Releases](https://github.com/Mikerad1/ui_testing_tool/releases/latest); it includes a private Node.js runtime and production dependencies. The bundle is prebuilt, but is not a single-file executable: Windows uses `umb.cmd`, while Linux uses `umb`. Playwright browser binaries are installed separately. Building from source requires Node.js 20+ and a source checkout.
+
+## Quick start with a prebuilt bundle
+
+Download `umb-windows-x64.zip` or `umb-linux-x64.tar.gz` from [the latest release](https://github.com/Mikerad1/ui_testing_tool/releases/latest) and extract it. Open a terminal in the extracted bundle directory. These steps do not need `npm install`, `npm run build`, `npm link`, or `tsconfig.json`; the app and its Node runtime are already included.
+
+First, create a project config and knowledge directory. Then copy and adapt the starter knowledge documents from [Copyable knowledge starter set](#copyable-knowledge-starter-set) into the created `umb-knowledge/` directory.
+
+**Windows PowerShell**
+
+```powershell
+.\umb.cmd init --project demo --url http://127.0.0.1:3000
+.\runtime\node.exe .\node_modules\playwright\cli.js install chromium
+$env:UMB_MCP_TOKEN = '<set-a-long-random-secret>'
+.\umb.cmd knowledge validate --config .\umb.config.yaml
+.\umb.cmd doctor --config .\umb.config.yaml
+.\umb.cmd serve --config .\umb.config.yaml
+```
+
+**Linux x64 shell**
 
 ```sh
-npm install
+./umb init --project demo --url http://127.0.0.1:3000
+./runtime/bin/node ./node_modules/playwright/cli.js install chromium
+export UMB_MCP_TOKEN='<set-a-long-random-secret>'
+./umb knowledge validate --config ./umb.config.yaml
+./umb doctor --config ./umb.config.yaml
+./umb serve --config ./umb.config.yaml
+```
+
+`umb init` does not create knowledge documents; validation will report an empty tree as valid. To use a browser, install Chromium as shown. Linux may also need Playwright system libraries; see [Release bundles](#release-bundles). For a local source checkout and contributor commands, see [Build from source](#build-from-source).
+
+## Build from source
+
+These commands are for the repository checkout, which contains `tsconfig.json` and TypeScript source. Do not run `npm run build` inside a prebuilt release bundle; it intentionally contains the compiled app, not the TypeScript build configuration.
+
+```sh
+npm ci
 npx playwright install chromium
 npm run build
 npm link
 umb init --project demo --url http://127.0.0.1:3000
-$env:UMB_MCP_TOKEN = 'use-a-long-random-secret' # PowerShell; use export on POSIX
-umb doctor
-umb serve
 ```
 
+Set `UMB_MCP_TOKEN` to a long random secret before `umb serve`; use `$env:UMB_MCP_TOKEN = '<secret>'` in PowerShell or `export UMB_MCP_TOKEN='<secret>'` on POSIX. Then run `umb doctor` and `umb serve`.
+
 Connect an MCP client to `http://127.0.0.1:7317/mcp` with `Authorization: Bearer <token>`. For a local subprocess MCP transport instead, run `umb mcp --stdio --config ./umb.config.yaml`; the parent MCP client launches UMB and communicates over stdin/stdout (stdout carries protocol messages only). `umb init` refuses to overwrite existing configuration. Set `server.auth.mode: none` only for explicitly trusted loopback development; it emits a warning. Target page origins are restricted to the configured base URL and `browser.allowed_origins`; each redirect hop is checked before it loads. Upload paths and screenshot artifacts are confined to the project root; screenshots mask form fields by default. Knowledge is validated as a complete tree before transactional upsert; YAML-owned removals become tombstones and agent knowledge is preserved.
+
+## First-time setup and CLI reference
+
+UMB uses two different kinds of YAML, and they are not interchangeable:
+
+- **Configuration YAML** (normally `umb.config.yaml`) tells UMB how to run: project ID/base URL, server/auth settings, browser engine/origin allowlist, database, artifacts, and the knowledge directory. It is parsed against a strict config schema. `umb init` creates this file and a knowledge directory; it does not create the knowledge documents below.
+- **Knowledge YAML** is a recursive tree of one strict document per `.yaml`/`.yml` file beneath `knowledge.path` (default `./umb-knowledge`). Each file must be one supported application, role, screen, workflow, or `navigation_rules` document. Documents reference other documents by IDs; workflow `{screen, element}` targets reference element IDs local to a screen. Unknown keys, malformed documents, duplicate IDs, or unresolved references reject the complete validation/reconcile operation.
+
+The repository's `examples/demo-project/` directory contains a sample config and knowledge tree. A typical setup is:
+
+```sh
+umb init --project demo --url http://127.0.0.1:3000
+# Review/edit umb.config.yaml, then place knowledge documents under umb-knowledge/.
+umb knowledge validate --config ./umb.config.yaml
+umb doctor --config ./umb.config.yaml
+```
+
+Implemented CLI commands:
+
+| Command | What it does |
+| --- | --- |
+| `umb init [--project <id>] [--url <url>]` | Creates `umb.config.yaml` and `umb-knowledge/` in the current directory. Defaults: project `demo-web`, URL `http://127.0.0.1:3000`. Refuses to overwrite the config file. |
+| `umb doctor [--config <path>]` | Read-only checks for config/path safety, full knowledge schema/references, auth settings, an existing DB's integrity/schema, MCP port availability, and whether the configured browser engine launches headlessly. Does not migrate/create a DB or navigate to the application. |
+| `umb serve [--config <path>] [--watch-knowledge]` | Starts Streamable HTTP MCP, reconciles knowledge, launches the configured browser, and holds project/database locks for the process lifetime. `--watch-knowledge` opts into debounced full-tree reconciliation. Token auth defaults to environment variable `UMB_MCP_TOKEN`. |
+| `umb mcp --stdio --config <path>` | Starts the MCP service over local subprocess stdin/stdout; `--stdio` is required and there is no HTTP listener. Stdout contains protocol only. Holds the same project/database locks as `serve`. |
+| `umb playwright endpoint [--config <path>] [--token-env <name>]` | Launches a separate Playwright BrowserServer behind a loopback, Bearer-authenticated, single-client proxy. Token variable defaults to `UMB_PLAYWRIGHT_ENDPOINT_TOKEN` and must contain at least 32 bytes. It is not the browser page used by `serve`/stdio and holds the project lock, so those modes cannot co-run for this project. |
+| `umb knowledge validate [--config <path>]` | Read-only validation of the complete knowledge tree; does not open/migrate Store or mutate graph state. |
+| `umb knowledge reload [--config <path>]` | Takes the project/database lock, opens Store, and reconciles the entire knowledge tree into the graph. This mutates graph/ownership state; stop `serve`, stdio, or endpoint first. Removing a previously imported YAML document can tombstone its YAML-owned graph nodes/edges. |
+| `umb knowledge proposals [--config <path>]` | Lists workflow locator proposals while holding the project/database lock. Stop other UMB processes for that project first. |
+| `umb knowledge confirm-locator <proposalId> [--config <path>]` | Requires an interactive local TTY and project lock. Confirms a reviewed manual YAML locator edit; it does not edit YAML for you. Stop other UMB processes first. |
+| `umb workflow verify <workflowId> --run-id <runId> [--config <path>]` | Requires an interactive local TTY, current YAML, and a successful matching workflow run. Under lock, asks for explicit confirmation and records current-snapshot export eligibility. |
+| `umb workflow export <workflowId> --output <relativePath> [--config <path>]` | Under lock, revalidates current knowledge and writes a new project-relative `.spec.ts` only if current-snapshot verification exists. Its parent directory must already exist; it refuses overwrite and never executes the generated file. |
+
+Options shown are the implemented options; `--config` defaults to `umb.config.yaml`. Lock-taking commands fail while another UMB process owns the same project/database. `validate` and `doctor` are read-only; `reload` mutates graph reconciliation. The confirmation commands fail closed without an interactive local TTY. Use `umb --help` or `<command> --help` for generated usage; PRD-only/unsupported commands are not available.
+
+`npm run build` compiles to `dist/`; `npm run typecheck` checks types without output; `npm test` runs Node tests through `tsx`; `npm run lint` runs ESLint on `src` and `tests`; `npm run benchmark` runs the benchmark (see Benchmarking). `npm run` lists scripts.
+
+## Copyable knowledge starter set
+
+Create each block as its own file beneath `knowledge.path` (default `./umb-knowledge/`). Keep the config file at the project root; config YAML is not knowledge YAML. Every file below is one document. Knowledge schemas are strict, so an unsupported or misspelled field rejects validation of the whole tree.
+
+`umb-knowledge/application.yaml`
+
+```yaml
+schema_version: 1
+kind: application
+id: demo-app
+name: Demo application
+base_url: http://127.0.0.1:3000
+start_screen: sign-in
+route_patterns:
+  - screen: sign-in
+    path: /login
+  - screen: dashboard
+    path: /dashboard
+```
+
+`umb-knowledge/role.yaml`
+
+```yaml
+schema_version: 1
+kind: role
+id: member
+name: Member
+permissions:
+  - sign-in
+  - view-dashboard
+```
+
+`umb-knowledge/sign-in.yaml`
+
+```yaml
+schema_version: 1
+kind: screen
+id: sign-in
+name: Sign in
+elements:
+  - id: username
+    description: Username field
+    locator:
+      by: label
+      value: Username
+  - id: password
+    description: Password field
+    locator:
+      by: label
+      value: Password
+    sensitive: true
+  - id: submit
+    description: Submit sign-in form
+    locator:
+      by: role
+      role: button
+      name: Sign in
+actions:
+  - id: submit-sign-in
+    element: submit
+    effect:
+      navigates_to: dashboard
+```
+
+`umb-knowledge/dashboard.yaml`
+
+```yaml
+schema_version: 1
+kind: screen
+id: dashboard
+name: Dashboard
+elements:
+  - id: welcome
+    description: Welcome message
+    locator:
+      by: test_id
+      value: welcome-message
+```
+
+`umb-knowledge/member-sign-in.yaml`
+
+```yaml
+schema_version: 1
+kind: workflow
+id: member-sign-in
+name: Sign in as a member
+requires:
+  role: member
+  environment:
+    - local
+variables:
+  USERNAME:
+    from_env: DEMO_USERNAME
+    sensitive: true
+  PASSWORD:
+    from_env: DEMO_PASSWORD
+    sensitive: true
+steps:
+  - id: open-login
+    action: navigate
+    path: /login
+  - id: enter-username
+    action: fill
+    target:
+      screen: sign-in
+      element: username
+    value: '${{ variables.USERNAME }}'
+  - id: enter-password
+    action: fill
+    target:
+      screen: sign-in
+      element: password
+    value: '${{ variables.PASSWORD }}'
+  - id: submit
+    action: click
+    target:
+      screen: sign-in
+      element: submit
+  - id: wait-for-dashboard
+    action: wait
+    condition: visible
+    target:
+      screen: dashboard
+      element: welcome
+    timeout_ms: 10000
+  - id: check-dashboard
+    action: assert
+    condition: text
+    target:
+      screen: dashboard
+      element: welcome
+    expected: Welcome
+    match: contains
+end_screen: dashboard
+```
+
+The IDs/references are intentionally consistent: application routes and workflow targets use screen IDs; screen actions point to an element in that same screen; the workflow's role and elements reference the other YAML documents. Workflow navigation paths are safe app-relative paths beginning with `/`. Exported/replayed environment values should be declared as whole-field `variables` references, not written as secrets in YAML. Check the whole tree with `umb knowledge validate --config ./umb.config.yaml` before serving. Reload always reconciles the whole tree: removing a previously owned YAML file can tombstone its YAML-owned graph entities, so keep every document you still intend to own under `knowledge.path`.
 
 MCP provides browser status, navigation, popup-aware tab management, interactive/compact/full snapshots, semantic locators, click/fill/type/press/keyboard/select/scroll/wait, file upload, screenshot, back/forward, and project/browser/screen/workflow resources. The read-only `browser_errors` tool returns bounded diagnostic metadata when enabled. Tool responses include structured success/error envelopes. Memory context/search/get/propose/verify/export, graph edges/neighbors/path/conflicts/stats, deterministic `test_assert`, and `test_report` are available. Assertion outcomes and evidence are project-scoped in SQLite; failure screenshots mask form fields and report metadata omits input values. No raw SQL or page JavaScript interface is exposed. Never place credentials in knowledge YAML.
 
@@ -37,6 +244,7 @@ After a workflow has a successful project-scoped `test_run_workflow` run, explic
 
 ```sh
 umb workflow verify <workflow-id> --run-id <run-id> --config ./umb.config.yaml
+mkdir -p specs
 umb workflow export <workflow-id> --output specs/<name>.spec.ts --config ./umb.config.yaml
 npx tsx --test specs/<name>.spec.ts
 ```
