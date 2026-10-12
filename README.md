@@ -70,9 +70,23 @@ npx playwright install --with-deps chromium firefox webkit
 
 The adapter uses common Playwright browser/context/page/locator APIs. The engine smoke suite verifies launch, context/page lifecycle, navigation origin routing, locator interaction/assertions, accessibility snapshots, screenshots, and cleanup for each available browser. Engine-specific browser behavior can still differ; this is not a claim that every site, CSS feature, or API behaves identically across engines. CDP remains deferred and Chromium-only if added later. CI installs all three engines on Linux and sets `UMB_REQUIRE_ALL_ENGINES=1`; local focused runs skip only engines whose executable is absent.
 
-Firefox/WebKit CI coverage currently runs on Linux with Node 24; the broader Windows/macOS and Node 20 matrix remains Chromium-only. Approval capture, file upload, diagnostics, popup/tab handling, and endpoint attachment are not individually cross-engine validated yet.
+## Release bundles
 
-Firefox/WebKit CI coverage currently runs on Linux with Node 24; the broader Windows/macOS and Node 20 matrix remains Chromium-only. High-risk approvals, uploads, diagnostics, popup/tab handling, and endpoint attachment are not individually cross-engine validated yet.
+Tagged releases publish `umb-windows-x64.zip` and `umb-linux-x64.tar.gz` platform bundles. These are directories containing the private Node 24 runtime used to build them, compiled `dist`, production `node_modules` (including the target-built native `better-sqlite3` addon), package metadata/lockfile, this README, the license, and a launcher. They are platform archives, not single-file binaries. Extract the archive and launch from its directory:
+
+```powershell
+.\umb.cmd serve --config .\umb.config.yaml
+.\runtime\node.exe .\node_modules\playwright\cli.js install chromium
+```
+
+```sh
+./umb serve --config ./umb.config.yaml
+./runtime/bin/node ./node_modules/playwright/cli.js install chromium
+```
+
+The Playwright browser binaries are intentionally not included. Install them with the bundle's Node runtime and bundled Playwright CLI; choose `firefox` or `webkit` instead of `chromium` when configured. On Linux, browser installation may require system libraries; use `--with-deps` on a supported Debian/Ubuntu system with package-install privileges (or install the documented Playwright OS dependencies separately). Binary versions must match the Playwright package in the bundle lockfile.
+
+Pushing a tag exactly matching the package version, for example `v1.2.3`, from a commit reachable from `main` runs native Windows x64 and Ubuntu 22.04 x64 build/test/package jobs and publishes both archives with SHA-256 checksums and generated release notes. Release publishing is tag-triggered; it does not change repository visibility or branch protection.
 
 ## Benchmarking
 

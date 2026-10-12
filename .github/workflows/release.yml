@@ -1,0 +1,170 @@
+name: Release bundles
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  windows-x64:
+    name: Build Windows x64 bundle
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Verify tag matches package version
+        shell: bash
+        run: node --input-type=module -e "import fs from 'node:fs'; const version=JSON.parse(fs.readFileSync('package.json','utf8')).version; if(process.env.GITHUB_REF_NAME !== 'v'+version) { console.error('Tag must be v'+version); process.exit(1); }"
+      - name: Require release tag commit to be reachable from main
+        shell: bash
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - name: Install dependencies
+        run: npm ci
+      - name: Install matching Playwright Chromium for validation
+        run: npx playwright install chromium
+      - name: Typecheck, build, lint, and test
+        run: |
+          npm run typecheck
+          npm run build
+          npm run lint
+          npm test
+      - name: Download matching private Node runtime
+        shell: pwsh
+        run: |
+          $version = node -p "process.version"
+          "NODE_RUNTIME_VERSION=$version" >> $env:GITHUB_ENV
+          $archive = Join-Path $env:RUNNER_TEMP 'node-runtime.zip'
+          $runtimeRoot = Join-Path $env:RUNNER_TEMP 'node-runtime'
+          $archiveName = "node-$version-win-x64.zip"
+          Invoke-WebRequest -UseBasicParsing "https://nodejs.org/dist/$version/$archiveName" -OutFile $archive
+          $checksums = Join-Path $env:RUNNER_TEMP 'SHASUMS256.txt'
+          Invoke-WebRequest -UseBasicParsing "https://nodejs.org/dist/$version/SHASUMS256.txt" -OutFile $checksums
+          $line = Get-Content -LiteralPath $checksums | Where-Object { $_ -match ("\s" + [regex]::Escape($archiveName) + "$") } | Select-Object -First 1
+          if (!$line) { throw 'Node runtime checksum entry was not found' }
+          $expected = ($line.Trim() -split '\s+')[0].ToLowerInvariant()
+          $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw 'Node runtime checksum verification failed' }
+          Expand-Archive -LiteralPath $archive -DestinationPath $runtimeRoot
+          "NODE_RUNTIME_DIR=$(Join-Path $runtimeRoot "node-$version-win-x64")" >> $env:GITHUB_ENV
+      - name: Stage production dependencies and bundle
+        shell: pwsh
+        run: |
+          npm prune --omit=dev
+          $bundle = Join-Path $env:RUNNER_TEMP 'umb-windows-x64'
+          node scripts/package-release.mjs --platform windows --node-runtime "$env:NODE_RUNTIME_DIR" --output "$bundle"
+          Push-Location $bundle
+          try {
+            & .\umb.cmd --help
+            if ($LASTEXITCODE -ne 0) { throw 'umb.cmd --help failed' }
+            & .\runtime\node.exe -e "const Database=require('./node_modules/better-sqlite3');const db=new Database(':memory:');if(db.prepare('select 7 as value').get().value!==7)process.exit(1);db.close()"
+            if ($LASTEXITCODE -ne 0) { throw 'Bundled Node SQLite smoke failed' }
+          } finally { Pop-Location }
+          $archive = Join-Path $env:RUNNER_TEMP 'umb-windows-x64.zip'
+          Compress-Archive -Path "$bundle\*" -DestinationPath $archive -Force
+          $checksum = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          Set-Content -Path "$archive.sha256" -Value "$checksum  umb-windows-x64.zip" -Encoding ascii
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle-windows-x64
+          path: |
+            ${{ runner.temp }}/umb-windows-x64.zip
+            ${{ runner.temp }}/umb-windows-x64.zip.sha256
+          if-no-files-found: error
+
+  linux-x64:
+    name: Build Linux x64 bundle
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Verify tag matches package version
+        run: node --input-type=module -e "import fs from 'node:fs'; const version=JSON.parse(fs.readFileSync('package.json','utf8')).version; if(process.env.GITHUB_REF_NAME !== 'v'+version) { console.error('Tag must be v'+version); process.exit(1); }"
+      - name: Require release tag commit to be reachable from main
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - name: Install dependencies
+        run: npm ci
+      - name: Install matching Playwright Chromium and Linux system dependencies for validation
+        run: npx playwright install --with-deps chromium
+      - name: Typecheck, build, lint, and test
+        run: |
+          npm run typecheck
+          npm run build
+          npm run lint
+          npm test
+      - name: Download matching private Node runtime
+        shell: bash
+        run: |
+          NODE_RUNTIME_VERSION="$(node -p 'process.version')"
+          echo "NODE_RUNTIME_VERSION=$NODE_RUNTIME_VERSION" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/node-runtime"
+          NODE_ARCHIVE="node-${NODE_RUNTIME_VERSION}-linux-x64.tar.xz"
+          curl --fail --location --silent --show-error "https://nodejs.org/dist/${NODE_RUNTIME_VERSION}/${NODE_ARCHIVE}" --output "$RUNNER_TEMP/$NODE_ARCHIVE"
+          curl --fail --location --silent --show-error "https://nodejs.org/dist/${NODE_RUNTIME_VERSION}/SHASUMS256.txt" --output "$RUNNER_TEMP/SHASUMS256.txt"
+          EXPECTED_SHA="$(awk -v file="$NODE_ARCHIVE" '$2 == file || $2 == "*"file { print $1; exit }' "$RUNNER_TEMP/SHASUMS256.txt")"
+          if [ -z "$EXPECTED_SHA" ]; then echo 'Node runtime checksum entry was not found' >&2; exit 1; fi
+          echo "$EXPECTED_SHA  $RUNNER_TEMP/$NODE_ARCHIVE" | sha256sum --check --status
+          tar -xJf "$RUNNER_TEMP/$NODE_ARCHIVE" -C "$RUNNER_TEMP/node-runtime"
+          echo "NODE_RUNTIME_DIR=$RUNNER_TEMP/node-runtime/node-${NODE_RUNTIME_VERSION}-linux-x64" >> "$GITHUB_ENV"
+      - name: Stage production dependencies and bundle
+        shell: bash
+        run: |
+          npm prune --omit=dev
+          BUNDLE="$RUNNER_TEMP/umb-linux-x64"
+          node scripts/package-release.mjs --platform linux --node-runtime "$NODE_RUNTIME_DIR" --output "$BUNDLE"
+          cd "$BUNDLE"
+          ./umb --help
+          ./runtime/bin/node -e "const Database=require('./node_modules/better-sqlite3');const db=new Database(':memory:');if(db.prepare('select 7 as value').get().value!==7)process.exit(1);db.close()"
+          tar -czf "$RUNNER_TEMP/umb-linux-x64.tar.gz" -C "$RUNNER_TEMP" umb-linux-x64
+          cd "$RUNNER_TEMP"
+          sha256sum umb-linux-x64.tar.gz > umb-linux-x64.tar.gz.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle-linux-x64
+          path: |
+            ${{ runner.temp }}/umb-linux-x64.tar.gz
+            ${{ runner.temp }}/umb-linux-x64.tar.gz.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: [windows-x64, linux-x64]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bundle-*
+          path: release-assets
+          merge-multiple: true
+      - name: Create or update release with generated notes and bundles
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          gh api "repos/{owner}/{repo}/releases/generate-notes" -f tag_name="$TAG" -q .body > release-notes.md
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release-assets/* --clobber
+            gh release edit "$TAG" --notes-file release-notes.md
+          else
+            gh release create "$TAG" release-assets/* --title "$TAG" --notes-file release-notes.md
+          fi
