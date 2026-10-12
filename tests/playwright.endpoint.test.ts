@@ -48,7 +48,7 @@ test('authenticated local Playwright endpoint enforces one client and releases l
 });
 
 test('proxy shutdown destroys an authenticated raw socket during a stalled upstream handshake',{timeout:10000},async()=>{
- const upstream=createTcpServer();const accepted:Socket[]=[];upstream.on('connection',socket=>accepted.push(socket));upstream.listen(0,'127.0.0.1');await once(upstream,'listening');
+  const upstream=createTcpServer();const accepted:Socket[]=[];upstream.on('connection',socket=>{accepted.push(socket);socket.resume();});upstream.listen(0,'127.0.0.1');await once(upstream,'listening');
  const upstreamPort=(upstream.address() as import('node:net').AddressInfo).port;
  const proxy=await startAuthenticatedWebSocketProxy(`ws://127.0.0.1:${upstreamPort}/hang`,'hanging-upstream-test-token-long-enough');
  const address=new URL(proxy.endpoint);const client=connectTcp(Number(address.port),'127.0.0.1');let received='';client.on('data',chunk=>{received+=chunk.toString();});
