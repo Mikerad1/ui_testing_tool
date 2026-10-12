@@ -4,6 +4,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { Config } from '../config/config.js';
@@ -23,7 +24,7 @@ export function originAllowed(origin: string | undefined, tokenMode: boolean, po
   } catch { return false; }
 }
 
-type Session = { id: string; server: McpServer; transport: StreamableHTTPServerTransport; timer?: NodeJS.Timeout; closed: boolean };
+type Session = { id: string; server: McpServer; transport: any; timer?: NodeJS.Timeout; closed: boolean };
 const MAX_BODY = 1024 * 1024;
 const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60_000;
 
@@ -34,12 +35,12 @@ async function readJsonBody(req: IncomingMessage): Promise<unknown> {
 }
 function reply(res: ServerResponse, status: number, message: string) { if (!res.headersSent) { res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' }); res.end(message); } }
 
-export type ServeOptions={idleTimeoutMs?:number;approver?:(prompt:string)=>Promise<boolean>;knowledgeRoot?:string;projectRoot?:string;watchKnowledge?:boolean;watcherFactory?:(root:string,listener:KnowledgeWatchEvent)=>KnowledgeWatchHandle;watchDebounceMs?:number};
+export type ServeOptions={stdio?:boolean;idleTimeoutMs?:number;approver?:(prompt:string)=>Promise<boolean>;knowledgeRoot?:string;projectRoot?:string;watchKnowledge?:boolean;watcherFactory?:(root:string,listener:KnowledgeWatchEvent)=>KnowledgeWatchHandle;watchDebounceMs?:number};
 export async function serve(config: Config, store: Store, browser: BrowserController, options: ServeOptions = {}) {
-  const token = config.server.auth.mode === 'token' ? process.env[config.server.auth.token_env] : undefined;
-  if (config.server.auth.mode === 'token' && !token) throw Error(`Set ${config.server.auth.token_env} before starting server`);
-  if (!['127.0.0.1', '::1', 'localhost'].includes(config.server.host)) throw Error('Only loopback server binding is permitted');
-  if (config.server.auth.mode === 'none') console.warn('WARNING: MCP HTTP authentication disabled');
+  const token = !options.stdio && config.server.auth.mode === 'token' ? process.env[config.server.auth.token_env] : undefined;
+  if (!options.stdio && config.server.auth.mode === 'token' && !token) throw Error(`Set ${config.server.auth.token_env} before starting server`);
+  if (!options.stdio && !['127.0.0.1', '::1', 'localhost'].includes(config.server.host)) throw Error('Only loopback server binding is permitted');
+  if (!options.stdio && config.server.auth.mode === 'none') console.warn('WARNING: MCP HTTP authentication disabled');
   const sessions = new Map<string, Session>();
   const knowledgeRoot=options.knowledgeRoot??path.resolve(config.knowledge.path);
   const idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
@@ -133,6 +134,25 @@ export async function serve(config: Config, store: Store, browser: BrowserContro
       onsessionclosed: async id => { if (session.timer) clearTimeout(session.timer); session.closed = true; sessions.delete(id); await mcp.close(); }
     });
     return session;
+  }
+
+  if (options.stdio) {
+    const session = createSession();
+    session.id = randomUUID();
+    sessions.set(session.id, session);
+    const transport = new StdioServerTransport();
+    session.transport = transport;
+    await session.server.connect(transport);
+    let stopped = false;
+    return async () => {
+      if (stopped) return;
+      stopped = true;
+      closing = true;
+      sessions.delete(session.id);
+      session.closed = true;
+      await transport.close();
+      await session.server.close();
+    };
   }
 
   const http = createServer(async (req, res) => {

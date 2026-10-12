@@ -1,8 +1,8 @@
 import { access } from 'node:fs/promises';
 import net from 'node:net';
 import Database from 'better-sqlite3';
-import { chromium } from 'playwright';
 import { loadConfig, safePath } from '../config/config.js';
+import { browserTypeFor } from '../browser/engine.js';
 import { validateKnowledge } from '../knowledge/reconcile.js';
 import { CURRENT_SCHEMA_VERSION } from '../memory/store.js';
 
@@ -17,7 +17,7 @@ export async function runDoctor(configPath:string):Promise<{ok:boolean;checks:Do
  if(config.server.auth.mode==='token'&&!process.env[config.server.auth.token_env])add('token','fail','Required authentication token environment variable is not set.');else add('token','ok','Authentication configuration is available.');
  try{await validateKnowledge(await safePath(root,config.knowledge.path));add('knowledge','ok','Knowledge YAML documents and references are valid.');}catch{add('knowledge','fail','Knowledge YAML validation failed; inspect document syntax, schemas, and references.');}
  let dbPath='';try{dbPath=await safePath(root,config.memory.database);await access(dbPath);const db=new Database(dbPath,{readonly:true,fileMustExist:true});try{const quick=db.pragma('quick_check') as any[];const fk=db.pragma('foreign_key_check') as any[];const version=db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get() as {version:number|null};if(quick.length!==1||quick[0].quick_check!=='ok')add('database-integrity','fail','SQLite quick_check reported a problem.');else add('database-integrity','ok','SQLite quick_check passed.');if(fk.length)add('database-foreign-keys','fail','SQLite foreign key check reported violations.');else add('database-foreign-keys','ok','SQLite foreign key check passed.');if(version.version!==CURRENT_SCHEMA_VERSION)add('database-schema','fail','Database schema is not at the current migration version.');else add('database-schema','ok','Database schema is current.');}finally{db.close();}}catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')add('database','warning','Database is not initialized.');else add('database','fail','Database could not be checked.');}
- try{const browser=await chromium.launch({headless:true});try{const context=await browser.newContext();try{const page=await context.newPage();await page.close();}finally{await context.close();}}finally{await browser.close();}add('browser','ok','Headless Chromium launched successfully.');}catch{add('browser','fail','Headless Chromium could not be launched; verify its executable installation.');}
+  const engine=config.browser.engine??'chromium';try{const browser=await browserTypeFor(engine).launch({headless:true});try{const context=await browser.newContext();try{const page=await context.newPage();await page.close();}finally{await context.close();}}finally{await browser.close();}add('browser','ok',`Headless ${engine} launched successfully.`);}catch{add('browser','fail',`Headless ${engine} could not be launched; install the matching Playwright ${engine} binary.`);}
  try{await new Promise<void>((resolve,reject)=>{const server=net.createServer();server.once('error',reject);server.listen(config.server.port,config.server.host,()=>server.close(e=>e?reject(e):resolve()));});add('mcp-port','ok','Configured MCP port is available.');}catch{add('mcp-port','fail','Configured MCP port is busy or unavailable; stop its current listener or choose another port.');}
  return{ok:!checks.some(c=>c.status==='fail'),checks};
 }

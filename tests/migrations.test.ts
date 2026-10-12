@@ -107,7 +107,7 @@ test('populated v1 database upgrades without losing graph or YAML source data', 
     assert.equal((store.get('v1-screen') as any).content_hash, 'screen-hash');
     assert.equal((store.listEdges() as any[]).find(e => e.id === 'v1-edge').relation_type, 'HAS_SCREEN');
     assert.equal((store.db.prepare('SELECT hash FROM yaml_sources WHERE path=?').get('screens/home.yaml') as any).hash, 'source-hash');
-    assert.equal((store.db.prepare('SELECT max(version) version FROM schema_migrations').get() as any).version, 9);
+    assert.equal((store.db.prepare('SELECT max(version) version FROM schema_migrations').get() as any).version, 10);
     assert.deepEqual(store.db.pragma('foreign_key_check'), []);
   } finally {
     store?.close();
@@ -126,7 +126,7 @@ test('populated v3 database upgrades preserving runs, evidence, ownership and ed
     assert.equal((store.listEdges() as any[]).find(e => e.id === 'v3-edge').relation_type, 'HAS_SCREEN');
     assert.equal((store.readEvidence('v3-screen', 'v3-run') as any[])[0].id, 'v3-evidence');
     assert.equal((store.db.prepare('SELECT hash FROM yaml_ownership WHERE entity_id=?').get('v3-screen') as any).hash, 'v3-source-hash');
-    assert.equal((store.db.prepare('SELECT max(version) version FROM schema_migrations').get() as any).version, 9);
+    assert.equal((store.db.prepare('SELECT max(version) version FROM schema_migrations').get() as any).version, 10);
     assert.deepEqual(store.db.pragma('foreign_key_check'), []);
   } finally {
     store?.close();
