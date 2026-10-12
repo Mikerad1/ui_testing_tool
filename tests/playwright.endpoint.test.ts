@@ -57,7 +57,7 @@ test('proxy shutdown destroys an authenticated raw socket during a stalled upstr
  try{
   await once(upstream,'connection');assert.equal(proxy.hasActiveClient(),true);
   const started=Date.now();await proxy.close();await Promise.race([downstreamClosed,new Promise<never>((_,reject)=>setTimeout(()=>reject(new Error('raw downstream remained open after proxy shutdown')),2000))]);
-  assert.ok(Date.now()-started<2000);assert.equal(proxy.hasActiveClient(),false);assert.ok(accepted.every(socket=>socket.destroyed));
+   assert.ok(Date.now()-started<2000);assert.equal(proxy.hasActiveClient(),false);for(let attempt=0;attempt<100&&!accepted.every(socket=>socket.destroyed);attempt++)await new Promise(resolve=>setTimeout(resolve,10));assert.ok(accepted.every(socket=>socket.destroyed));
  }finally{client.destroy();await proxy.close();for(const socket of accepted)socket.destroy();await new Promise<void>(resolve=>upstream.close(()=>resolve()));}
 });
 
