@@ -16,8 +16,15 @@ import { startPlaywrightEndpoint } from '../playwright/endpoint.js';
 import { generateWorkflowSpec, writeWorkflowSpec } from '../workflow/export.js';
 import { stringify } from 'yaml';
 import { access, rmdir, unlink } from 'node:fs/promises';
+import { checkForUpdate, updateBundle, updateCheckEnabled } from './updater.js';
 
-const cli = new Command().name('umb').description('UI Memory Browser').addHelpText('after', '\nExamples:\n  $ umb init\n  $ umb knowledge validate --json\n  $ umb doctor --json');
+const cli = new Command().name('umb').description('UI Memory Browser').option('--update','Update an official prebuilt UMB bundle').action(async options => {
+ if (!options.update) cli.help();
+ try { console.error(await updateBundle()); } catch (error) { console.error(`Update failed safely: ${(error as Error).message}`); process.exitCode = 1; }
+}).addHelpText('after', '\nExamples:\n  $ umb init\n  $ umb knowledge validate --json\n  $ umb doctor --json');
+cli.command('update').description('Update an official prebuilt UMB bundle from GitHub Releases').action(async () => {
+ try { console.error(await updateBundle()); } catch (error) { console.error(`Update failed safely: ${(error as Error).message}`); process.exitCode = 1; }
+});
 cli.command('init').description('Safely create starter project configuration and knowledge directory').option('--project <id>', 'Project id', 'demo-web').option('--url <url>', 'Application base URL', 'http://127.0.0.1:3000').option('--yes','Skip interactive confirmation').option('--starter-knowledge','Generate sample application.yaml and home.yaml documents').action(async o => {
  try {
   const url=new URL(o.url); if(!/^https?:$/.test(url.protocol)) throw Error('Use an http or https base URL.');
@@ -84,7 +91,7 @@ knowledge.command('reload').option('--config <path>','Config file','umb.config.y
    await writeWorkflowSpec(root,relative,source);console.log(`Generated ${relative}. Review the static source before running it; no test was executed.`);
   }catch(error){console.error(`Workflow export failed: ${(error as Error).message}`);process.exitCode=1;}finally{store?.close();await lock?.release().catch(()=>{});}
  });
-  cli.command('serve').option('--config <path>', 'Config file', 'umb.config.yaml').option('--watch-knowledge','Watch YAML knowledge and reconcile validated changes').action(async o => {
+   cli.command('serve').option('--config <path>', 'Config file', 'umb.config.yaml').option('--watch-knowledge','Watch YAML knowledge and reconcile validated changes').option('--no-update-check','Disable the non-blocking release check').action(async o => {
  let store: Store | undefined, browser: BrowserController | undefined, stop: (() => Promise<void>) | undefined;
  let lock: Awaited<ReturnType<typeof acquireProjectLock>> | undefined;
  const lifecycle = new ShutdownLifecycle(async () => {
@@ -93,7 +100,8 @@ knowledge.command('reload').option('--config <path>','Config file','umb.config.y
  const signal = () => { lifecycle.requestStop(); };
  process.on('SIGINT', signal); process.on('SIGTERM', signal);
  try {
-  const { config, root } = await loadConfig(o.config);
+   const { config, root } = await loadConfig(o.config);
+    if (updateCheckEnabled(o.updateCheck === false)) void checkForUpdate().then(version => { if (version) console.error(`A newer UMB release (${version}) is available. Run "umb update" to update this official bundle.`); }).catch(() => undefined);
    if (lifecycle.stopRequested) throw Error('Shutdown requested during startup');
   if (config.server.auth.mode === 'none' && !['127.0.0.1', 'localhost', '::1'].includes(config.server.host)) throw Error('Unauthenticated mode must be loopback');
   const db = await safePath(root, config.memory.database);
