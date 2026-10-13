@@ -15,8 +15,10 @@ async function fixture(version = '0.2.1') {
   await writeFile(path.join(root, 'dist/src/cli/index.js'), '');
   await writeFile(path.join(root, 'node_modules/better-sqlite3/package.json'), '{}');
   await writeFile(path.join(root, 'umb'), '');
+  await writeFile(path.join(root, 'umb.cmd'), '');
   return root;
 }
+const supportsBundleUpdate = (process.platform === 'linux' || process.platform === 'win32') && process.arch === 'x64';
 function response(data: unknown, ok = true): Response {
   return new Response(typeof data === 'string' ? data : JSON.stringify(data), { status: ok ? 200 : 500 });
 }
@@ -72,7 +74,7 @@ test('incomplete payload rollback reports failure instead of hiding a missing ba
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test('update no-op and startup check opt-out do not need network access', async () => {
+test('update no-op and startup check opt-out do not need network access', { skip: !supportsBundleUpdate }, async () => {
   const root = await fixture();
   let requests = 0;
   try {
@@ -85,7 +87,7 @@ test('update no-op and startup check opt-out do not need network access', async 
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test('update fails closed on a malformed checksum without changing payload', async () => {
+test('update fails closed on a malformed checksum without changing payload', { skip: !supportsBundleUpdate }, async () => {
   const root = await fixture();
   const url = (name: string) => `https://assets.invalid/${name}`;
   const assets = ['umb-linux-x64.tar.gz', 'umb-linux-x64.tar.gz.sha256'].map(name => ({ name, browser_download_url: url(name) }));
