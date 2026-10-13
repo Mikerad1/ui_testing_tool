@@ -27,6 +27,7 @@ export function originAllowed(origin: string | undefined, tokenMode: boolean, po
 type Session = { id: string; server: McpServer; transport: any; timer?: NodeJS.Timeout; closed: boolean };
 const MAX_BODY = 1024 * 1024;
 const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60_000;
+function sanitizeErrorMessage(message:string){return message.replace(/\b(?:https?|wss?):\/\/[^\s"'<>]+/gi,token=>{const suffix=token.match(/[),.;]+$/)?.[0]??'',candidate=suffix?token.slice(0,-suffix.length):token;try{const url=new URL(candidate);url.username='';url.password='';url.search='';url.hash='';return `${url.origin}${url.pathname}${suffix}`;}catch{return candidate.replace(/^([a-z][a-z\d+.-]*:\/\/)[^/@\s]+@/i,'$1').replace(/[?#].*$/,'')+suffix;}}).slice(0,500);}
 
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = []; let size = 0;
@@ -78,18 +79,19 @@ export async function serve(config: Config, store: Store, browser: BrowserContro
         const envelope = { ok: false, project_id: config.project.id, session_id: session.id, error: { code: 'invalid_input', message: text }, state_revision: browser.revision };
         return { ...result, isError: true, structuredContent: envelope, content: [{ type: 'text', text: JSON.stringify(envelope) }] };
       });
-    const tool = (name: string, description: string, schema: any, fn: (args: any) => unknown | Promise<unknown>) =>
-      mcp.tool(name, description, schema, async (args: any) => {
+    const invokeTool = (fn: (args: any) => unknown | Promise<unknown>) => async (args: any) => {
         let result: any;
         try { result = { ok: true, project_id: config.project.id, session_id: session.id, data: await fn(args), state_revision: browser.revision }; }
         catch (error) {
-          const message = error instanceof Error ? error.message : 'Operation failed';
+          const message = sanitizeErrorMessage(error instanceof Error ? error.message : 'Operation failed');
           const code = /revision_conflict/i.test(message)?'revision_conflict':/approval_denied/i.test(message)?'approval_denied':/revision conflict/i.test(message) ? 'revision_conflict' : /expired snapshot reference|stale ref/i.test(message) ? 'stale_ref' : /ambiguous|matches: 0|no match/i.test(message) ? 'ambiguous_or_missing_target' : /origin not allowed|navigation.*denied/i.test(message) ? 'navigation_denied' : /timeout|timed out/i.test(message) ? 'timeout' : /invalid|must be|requires/i.test(message) ? 'invalid_input' : 'internal';
           result = { ok: false, project_id: config.project.id, session_id: session.id, error: { code, message }, state_revision: browser.revision };
           return { isError: true, structuredContent: result, content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
         }
         return { structuredContent: result, content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
-      });
+      };
+    const tool = (name: string, description: string, schema: any, fn: (args: any) => unknown | Promise<unknown>) => mcp.tool(name, description, schema, invokeTool(fn));
+    const strictTool = (name: string, description: string, schema: z.ZodTypeAny, fn: (args: any) => unknown | Promise<unknown>) => mcp.registerTool(name, { description, inputSchema: schema }, invokeTool(fn));
     const browserTool = (name: string, description: string, schema: any, fn: (args: any) => unknown | Promise<unknown>) =>
       tool(name, description, schema, args => runBrowser(() => Promise.resolve(fn(args))));
      const target = z.object({ by: z.enum(['ref', 'role', 'label', 'placeholder', 'test_id', 'text', 'css']), value: z.string().max(1000).optional(), role: z.string().max(100).optional(), name: z.string().max(500).optional() }).strict();
@@ -106,7 +108,10 @@ export async function serve(config: Config, store: Store, browser: BrowserContro
     });
     browserTool('browser_keyboard','Press a keyboard key',{key:z.string().min(1).max(100),target:target.optional(),expected_revision:z.number().int().nonnegative().optional()},async a=>{if(a.expected_revision!==undefined&&a.expected_revision!==browser.revision)throw Error('State revision conflict');const approval=await authorize('keyboard',a.target,a.expected_revision,session);try{return approval?await browser.performCaptured('keyboard',approval.handle,a.key):browser.keyboard(a.key,a.target);}finally{await approval?.release();}});
     browserTool('browser_upload','Upload a project file to a target',{target,project_relative_path:z.string().min(1).max(1024),expected_revision:z.number().int().nonnegative().optional()},async a=>{if(a.expected_revision!==undefined&&a.expected_revision!==browser.revision)throw Error('State revision conflict');const approval=await authorize('upload',a.target,a.expected_revision,session);try{return approval?await browser.uploadCaptured(approval.handle,a.project_relative_path):browser.upload(a.target,a.project_relative_path);}finally{await approval?.release();}});
-    tool('test_run_workflow','Run a YAML-authored deterministic workflow',{workflow_id:z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$/),role:z.string().max(125).optional(),environment:z.string().max(100).optional(),expected_revision:z.number().int().nonnegative()},a=>runBrowser(()=>runWorkflow({store,browser,session,workflowId:a.workflow_id,role:a.role,environment:a.environment,expectedRevision:a.expected_revision,knowledgeRoot,authorize:(action,target,revision)=>authorize(action,target,revision,session)})));
+     const configuredAuthId=config.application_auth?.mode==='workflow'?config.application_auth.workflow_id:undefined;
+      const safeAuthWorkflow=(workflowId:string,expectedRevision:number|undefined)=>{if(expectedRevision===undefined)return Promise.resolve({status:'failed',errorCode:'revision_conflict'});const current=store.currentYamlWorkflow(workflowId),snapshot=store.workflowSnapshotHash(workflowId);if(!current||!snapshot)return Promise.resolve({status:'failed',errorCode:'precondition_failed'});return runBrowser(()=>runWorkflow({store,browser,session,workflowId,expectedRevision,knowledgeRoot,disableFailureCapture:true,safeOutcome:true,authorize:(action,target,revision)=>authorize(action,target,revision,session)}));};
+      const applicationAuth=config.application_auth;if(applicationAuth){strictTool('application_sign_in','Sign in manually or run the configured YAML sign-in workflow',z.object({expected_revision:z.number().int().nonnegative().optional()}).strict(),a=>{if(applicationAuth.mode==='interactive')return{status:'manual_required'};return safeAuthWorkflow(applicationAuth.workflow_id,a.expected_revision);});}
+     tool('test_run_workflow','Run a YAML-authored deterministic workflow',{workflow_id:z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$/),role:z.string().max(125).optional(),environment:z.string().max(100).optional(),expected_revision:z.number().int().nonnegative()},a=>{const auth=a.workflow_id===configuredAuthId;return runBrowser(()=>runWorkflow({store,browser,session,workflowId:a.workflow_id,role:a.role,environment:a.environment,expectedRevision:a.expected_revision,knowledgeRoot,...(auth?{disableFailureCapture:true,safeOutcome:true}:{}),authorize:(action,target,revision)=>authorize(action,target,revision,session)}));});
     browserTool('browser_scroll', 'Scroll page', { direction: z.enum(['up', 'down']), amount: z.number().int().min(1).max(3000).optional() }, a => browser.scroll(a.direction, a.amount));
     browserTool('browser_wait_for','Wait for a bounded browser condition',{condition:z.enum(['visible','hidden','attached','detached','enabled','url']),target:z.union([target,z.string().max(2048)]).optional(),timeout_ms:z.number().int().min(1).max(10000).optional()},a=>browser.waitFor(a.condition,a.target,a.timeout_ms));
     browserTool('browser_tabs','List open tabs',{},()=>browser.listTabs());browserTool('browser_tab_select','Select a tab',{id:z.string().max(100)},a=>browser.selectTab(a.id));browserTool('browser_tab_create','Create a tab',{url:z.string().max(4096).optional()},a=>browser.createTab(a.url));browserTool('browser_tab_close','Close a tab',{id:z.string().max(100).optional()},a=>browser.closeTab(a.id));browserTool('browser_back','Go back',{},()=>browser.back());browserTool('browser_forward','Go forward',{},()=>browser.forward());
@@ -204,7 +209,7 @@ export async function serve(config: Config, store: Store, browser: BrowserContro
       armIdle(session);
       await session.transport.handleRequest(req, res);
     } catch (error) {
-      console.error('MCP request failed', error);
+      console.error('MCP request failed');
       reply(res, 500, 'MCP request failed');
     } finally {
       if(req.method==='POST'){activePosts--;if(activePosts===0){postDrain?.();postDrain=undefined;}}
