@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { chmod, cp, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { chmod, cp, lstat, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -26,9 +26,10 @@ const runtime = path.resolve(opts['node-runtime']);
 for (const required of ['dist', 'node_modules']) await readFile(path.join(root, required, required === 'dist' ? 'src/cli/index.js' : 'better-sqlite3/package.json'));
 await readFile(path.join(runtime, opts.platform === 'windows' ? 'node.exe' : 'bin/node'));
 await mkdir(output, { recursive: true });
-for (const entry of ['dist', 'node_modules']) await cp(path.join(root, entry), path.join(output, entry), { recursive: true, force: true });
+for (const entry of ['dist', 'node_modules']) await cp(path.join(root, entry), path.join(output, entry), { recursive: true, force: true, dereference: true });
 for (const entry of ['package.json', 'package-lock.json', 'LICENSE', 'README.md']) await cp(path.join(root, entry), path.join(output, entry));
-await cp(runtime, path.join(output, 'runtime'), { recursive: true, force: true });
+await cp(runtime, path.join(output, 'runtime'), { recursive: true, force: true, dereference: true });
+await writeFile(path.join(output, 'UMB-BUNDLE.json'), JSON.stringify({ format: 1, repository: 'Mikerad1/ui_testing_tool' }) + '\n');
 
 if (opts.platform === 'windows') {
   await writeFile(path.join(output, 'umb.cmd'), '@echo off\r\n"%~dp0runtime\\node.exe" "%~dp0dist\\src\\cli\\index.js" %*\r\n');
@@ -44,4 +45,14 @@ const smokeCode = `const Database=require(${JSON.stringify(sqlitePath)});const d
 const smoke = spawnSync(bundledNode, ['-e', smokeCode], { cwd: output, encoding: 'utf8' });
 if (smoke.error || smoke.status !== 0) throw new Error(`Bundled SQLite smoke failed: ${smoke.stderr || smoke.error?.message || smoke.status}`);
 
-console.log(`Prepared ${opts.platform} bundle at ${output}`);
+async function assertNoSymlinks(directory) {
+  for (const entry of await readdir(directory)) {
+    const file = path.join(directory, entry);
+    const info = await lstat(file);
+    if (info.isSymbolicLink()) throw new Error(`Release bundle contains a symlink, unsupported by safe self-update: ${file}`);
+    if (info.isDirectory()) await assertNoSymlinks(file);
+  }
+}
+await assertNoSymlinks(output);
+
+console.log(`Prepared ${opts.platform} bundle at ${output} (verified no symlink entries)`);
