@@ -232,6 +232,64 @@ Browser diagnostics are disabled by default. To opt in, set one or more of `brow
 
 `umb serve` and `umb mcp --stdio` hold an exclusive project lock under `.umb/locks` and a database lock adjacent to the canonical DB path before opening or mutating state; this also serializes overlapping project roots that resolve to the same DB. Stale same-host dead-PID locks are reclaimed under a per-lock exclusive gate; orphaned/malformed/remote-owner recovery gates fail closed and may need manual cleanup after verifying no owner is active. `umb doctor` is read-only: it validates YAML/config, checks an existing DB without migration, checks auth/port settings, and launches an ephemeral Chromium page without navigating to the application. The process owns one shared browser page and grants one MCP session a single-writer lease at a time. A second initializer receives HTTP 409 until the active session closes or expires after five minutes without requests. Browser tool operations are serialized within that lease; callers can use `expected_revision` to reject stale mutations. The idle timeout is injectable through the server API for tests. Shutdown drains MCP work before closing resources.
 
+## Application sign-in
+
+Application sign-in is opt-in. The strict `application_auth` configuration supports either interactive sign-in or a configured workflow. UMB does not log in during startup: call the `application_sign_in` MCP tool when sign-in is needed. The tool takes no credentials or workflow ID from the caller; the selected mode and, for workflow mode, workflow ID come only from trusted configuration. Workflow mode requires the current `expected_revision`; interactive mode can be called without `expected_revision`.
+
+For manual sign-in, set `mode: interactive` and `browser.headless: false`. UMB opens a visible browser and you complete the login, including any MFA prompts, yourself. For workflow sign-in, set `mode: workflow` and the ID of a dedicated YAML workflow. That workflow runs on demand through `application_sign_in`; declare any secret values as environment-backed workflow variables, not as tool inputs or YAML literals.
+
+The browser origin allowlist must contain the exact origins used by the flow, including the Microsoft Entra sign-in origin and your application's callback origin. Do not use wildcard origins. For example, replace these origins and IDs with the exact values for your tenant and application:
+
+```yaml
+browser:
+  headless: true
+  allowed_origins:
+    - https://login.microsoftonline.com
+    - https://app.example.com
+application_auth:
+  mode: workflow
+  workflow_id: entra-sign-in
+```
+
+The dedicated workflow is a knowledge YAML document. This example reads credentials from process environment variables; it does not put their values in the file:
+
+```yaml
+schema_version: 1
+kind: workflow
+id: entra-sign-in
+name: Sign in to the application
+variables:
+  ENTRA_USERNAME:
+    from_env: ENTRA_USERNAME
+    sensitive: true
+  ENTRA_PASSWORD:
+    from_env: ENTRA_PASSWORD
+    sensitive: true
+steps:
+  - id: enter-username
+    action: fill
+    target:
+      screen: sign-in
+      element: username
+    value: '${{ variables.ENTRA_USERNAME }}'
+  - id: enter-password
+    action: fill
+    target:
+      screen: sign-in
+      element: password
+    value: '${{ variables.ENTRA_PASSWORD }}'
+  - id: submit
+    action: click
+    target:
+      screen: sign-in
+      element: submit
+end_screen: dashboard
+```
+
+Set those variables in the environment before starting UMB (for example, `export ENTRA_USERNAME=...` and `export ENTRA_PASSWORD=...` in a POSIX shell, or `$env:ENTRA_USERNAME = '...'` and `$env:ENTRA_PASSWORD = '...'` in PowerShell), then start `umb serve` or `umb mcp --stdio` as usual. Never put credentials in YAML or pass them through model-visible tool calls. `sensitive: true` helps UMB handle workflow values as sensitive, but it is not a complete redaction guarantee. Automatic workflow-failure captures are suppressed for the configured application-auth workflow. Explicit screenshots and `test_assert` failure captures remain available, but input, textarea, and select controls are masked whenever `application_auth` is configured, even if `artifacts.redact_sensitive: false`. Visible page text can still contain account data, so do not treat all browser content as secret-proof.
+
+Sign-in is not persisted across UMB restarts, so authenticate again after restarting. UMB does not bypass MFA or Conditional Access: interactive sign-in leaves those steps to the user, and a workflow that encounters them must still be completed through the application's normal security process.
+
 ## Workflow replay and recall
 
 For explicit Playwright client attachment, set `UMB_PLAYWRIGHT_ENDPOINT_TOKEN` to a random secret of at least 32 bytes and run `umb playwright endpoint --config ./umb.config.yaml`; copy the printed loopback WebSocket URL into the trusted client and supply `Authorization: Bearer <token>` (Playwright `chromium.connect` headers). The URL is not authentication; the bearer token is required. The endpoint owns its launched browser and holds the project lock until shutdown. Optional CDP attachment is deferred.
