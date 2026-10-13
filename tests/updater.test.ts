@@ -90,7 +90,8 @@ test('update no-op and startup check opt-out do not need network access', { skip
 test('update fails closed on a malformed checksum without changing payload', { skip: !supportsBundleUpdate }, async () => {
   const root = await fixture();
   const url = (name: string) => `https://assets.invalid/${name}`;
-  const assets = ['umb-linux-x64.tar.gz', 'umb-linux-x64.tar.gz.sha256'].map(name => ({ name, browser_download_url: url(name) }));
+  const basename = process.platform === 'win32' ? 'umb-windows-x64.zip' : 'umb-linux-x64.tar.gz';
+  const assets = [basename, `${basename}.sha256`].map(name => ({ name, browser_download_url: url(name) }));
   const fetcher = async (input: RequestInfo | URL) => String(input) === 'https://api.github.com/repos/Mikerad1/ui_testing_tool/releases/latest'
     ? response(release('v0.3.0', assets)) : response(String(input).endsWith('.sha256') ? 'not a checksum' : 'archive');
   try {
