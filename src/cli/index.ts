@@ -14,15 +14,31 @@ import { createInterface } from 'node:readline/promises';
 import { confirmWorkflowLocatorProposal } from '../knowledge/locator-proposals.js';
 import { startPlaywrightEndpoint } from '../playwright/endpoint.js';
 import { generateWorkflowSpec, writeWorkflowSpec } from '../workflow/export.js';
+import { stringify } from 'yaml';
+import { access, rmdir, unlink } from 'node:fs/promises';
 
-const cli = new Command().name('umb').description('UI Memory Browser');
-cli.command('init').option('--project <id>', 'Project id', 'demo-web').option('--url <url>', 'Application base URL', 'http://127.0.0.1:3000').action(async o => {
- const config = `version: 1\nproject:\n  id: ${o.project}\n  name: ${o.project}\n  base_url: ${o.url}\nserver:\n  host: 127.0.0.1\n  port: 7317\n  auth:\n    mode: token\n    token_env: UMB_MCP_TOKEN\nbrowser:\n  headless: true\n  allowed_origins:\n    - ${new URL(o.url).origin}\nartifacts:\n  directory: ./.umb/artifacts\n  redact_sensitive: true\nmemory:\n  database: ./.umb/memory.sqlite\nknowledge:\n  path: ./umb-knowledge\n`;
- await writeFile('umb.config.yaml', config, { flag: 'wx' }); await mkdir('umb-knowledge', { recursive: true }); console.log('Created umb.config.yaml and umb-knowledge/. Set UMB_MCP_TOKEN before serving.');
+const cli = new Command().name('umb').description('UI Memory Browser').addHelpText('after', '\nExamples:\n  $ umb init\n  $ umb knowledge validate --json\n  $ umb doctor --json');
+cli.command('init').description('Safely create starter project configuration and knowledge directory').option('--project <id>', 'Project id', 'demo-web').option('--url <url>', 'Application base URL', 'http://127.0.0.1:3000').option('--yes','Skip interactive confirmation').option('--starter-knowledge','Generate sample application.yaml and home.yaml documents').action(async o => {
+ try {
+  const url=new URL(o.url); if(!/^https?:$/.test(url.protocol)) throw Error('Use an http or https base URL.');
+  if(typeof o.project!=='string'||!/^[_\w-]+$/.test(o.project))throw Error('Project id must be nonempty and contain only letters, numbers, underscores, or hyphens.');
+  const config=stringify({version:1,project:{id:o.project,name:o.project,base_url:url.href.replace(/\/$/,'')},server:{host:'127.0.0.1',port:7317,auth:{mode:'token',token_env:'UMB_MCP_TOKEN'}},browser:{headless:true,allowed_origins:[url.origin]},artifacts:{directory:'./.umb/artifacts',redact_sensitive:true},memory:{database:'./.umb/memory.sqlite'},knowledge:{path:'./umb-knowledge'}});
+  for(const target of ['umb.config.yaml','umb-knowledge']) try{await access(target);throw Error(`${target} already exists; nothing was changed.`);}catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')throw e;}
+  if(!o.yes&&process.stdin.isTTY){const rl=createInterface({input:process.stdin,output:process.stdout});let answer;try{answer=await rl.question(`Create umb.config.yaml and umb-knowledge/ for ${url.origin}? [y/N] `);}finally{rl.close();}if(answer.trim().toLowerCase()!=='y'){console.log('Initialization cancelled; no changes were made.');return;}}
+   const generated=['application.yaml','home.yaml'];await mkdir('umb-knowledge');
+   try{
+    if(o.starterKnowledge){
+     await writeFile(path.join('umb-knowledge','application.yaml'),stringify({schema_version:1,kind:'application',id:o.project,name:o.project,base_url:url.href.replace(/\/$/,''),start_screen:'screen:home'}),{flag:'wx'});
+     await writeFile(path.join('umb-knowledge','home.yaml'),stringify({schema_version:1,kind:'screen',id:'home',name:'Home',route:'/',landmarks:[],elements:[]}),{flag:'wx'});
+    }
+    await writeFile('umb.config.yaml',config,{flag:'wx'});
+    }catch(e){for(const file of generated)await unlink(path.join('umb-knowledge',file)).catch(()=>{});await rmdir('umb-knowledge').catch(()=>{});throw e;}
+   console.log(`Created umb.config.yaml and umb-knowledge/${o.starterKnowledge?' (application.yaml, home.yaml)':''}. Set UMB_MCP_TOKEN before serving.`);
+ } catch(e){console.error(`Init failed safely: ${(e as Error).message}`);process.exitCode=1;}
 });
-cli.command('doctor').option('--config <path>', 'Config file', 'umb.config.yaml').action(async o => {
- try { const result = await runDoctor(o.config); for (const check of result.checks) console.log(`${check.status.toUpperCase()} ${check.name}: ${check.message}`); if (!result.ok) process.exitCode = 1; }
- catch (e) { console.error(`Doctor failed: ${(e as Error).message}`); process.exitCode = 1; }
+cli.command('doctor').description('Read-only diagnostics with remediation guidance').option('--config <path>', 'Config file', 'umb.config.yaml').option('--json','Output machine-readable JSON').action(async o => {
+  try { const result = await runDoctor(o.config); if(o.json) console.log(JSON.stringify(result)); else for (const check of result.checks) console.log(`${check.status.toUpperCase()} ${check.name}: ${check.message}`); if (!result.ok) process.exitCode = 1; }
+  catch { if(o.json)console.log(JSON.stringify({ok:false,checks:[{id:'doctor.unexpected-error',name:'unexpected-error',status:'fail',message:'Doctor could not complete.',remediation:'Check the config path and permissions, then retry.'}]})); console.error('Doctor failed safely.'); process.exitCode = 1; }
 });
 const knowledge=cli.command('knowledge').description('Manage YAML knowledge and local locator proposals');
 knowledge.command('proposals').option('--config <path>','Config file','umb.config.yaml').action(async o=>{
@@ -31,9 +47,9 @@ knowledge.command('proposals').option('--config <path>','Config file','umb.confi
  catch{console.error('Unable to list locator proposals safely.');process.exitCode=1;}
  finally{store?.close();await lock?.release().catch(()=>{});}
 });
-knowledge.command('validate').option('--config <path>','Config file','umb.config.yaml').action(async o=>{
- try{const{config,root}=await loadConfig(o.config),knowledgeRoot=await safePath(root,config.knowledge.path),count=await validateKnowledge(knowledgeRoot);console.log(`Knowledge validation passed (${count} YAML documents).`);}
- catch{console.error('Knowledge validation failed; no graph changes were made.');process.exitCode=1;}
+knowledge.command('validate').description('Read-only validation of YAML knowledge and references').option('--config <path>','Config file','umb.config.yaml').option('--json','Output machine-readable JSON').action(async o=>{
+  try{const{config,root}=await loadConfig(o.config),knowledgeRoot=await safePath(root,config.knowledge.path),count=await validateKnowledge(knowledgeRoot);const result={ok:true,count,diagnostics:[{id:'knowledge.validation',status:'ok',message:`Knowledge validation passed (${count} YAML documents).`,remediation:'No action required.'}]};console.log(o.json?JSON.stringify(result):`Knowledge validation passed (${count} YAML documents).`);}
+  catch{const diagnostic={id:'knowledge.validation',status:'fail',message:'Knowledge could not be validated.',remediation:'Check YAML syntax, supported schemas, and referenced IDs; rerun validation.'};const result={ok:false,count:null,diagnostics:[diagnostic]};if(o.json)console.log(JSON.stringify(result));else console.error(`${diagnostic.message} ${diagnostic.remediation}`);process.exitCode=1;}
 });
 knowledge.command('reload').option('--config <path>','Config file','umb.config.yaml').action(async o=>{
  let store:Store|undefined,lock:Awaited<ReturnType<typeof acquireProjectLock>>|undefined;

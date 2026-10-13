@@ -30,7 +30,7 @@ export UMB_MCP_TOKEN='<set-a-long-random-secret>'
 ./umb serve --config ./umb.config.yaml
 ```
 
-`umb init` does not create knowledge documents; validation will report an empty tree as valid. To use a browser, install Chromium as shown. Linux may also need Playwright system libraries; see [Release bundles](#release-bundles). For a local source checkout and contributor commands, see [Build from source](#build-from-source).
+`umb init` prompts for confirmation only when run in an interactive TTY (use `--yes` to skip); non-interactive runs proceed without a prompt. By default it creates an empty `umb-knowledge/` directory. Opt in to two editable sample documents with `--starter-knowledge`: `application.yaml` (application `start_screen: screen:home`) and `home.yaml` (an empty Home screen). These examples use the selected project ID and URL, are not written unless explicitly requested, and can be adapted to your application. To use a browser, install Chromium as shown. Linux may also need Playwright system libraries; see [Release bundles](#release-bundles). For a local source checkout and contributor commands, see [Build from source](#build-from-source).
 
 ## Build from source
 
@@ -59,21 +59,25 @@ The repository's `examples/demo-project/` directory contains a sample config and
 
 ```sh
 umb init --project demo --url http://127.0.0.1:3000
+# In a non-interactive terminal, init proceeds without a prompt; pass --yes to make that explicit.
 # Review/edit umb.config.yaml, then place knowledge documents under umb-knowledge/.
 umb knowledge validate --config ./umb.config.yaml
 umb doctor --config ./umb.config.yaml
+# Machine-readable diagnostics (JSON is written alone to stdout):
+umb knowledge validate --json
+umb doctor --json
 ```
 
 Implemented CLI commands:
 
 | Command | What it does |
 | --- | --- |
-| `umb init [--project <id>] [--url <url>]` | Creates `umb.config.yaml` and `umb-knowledge/` in the current directory. Defaults: project `demo-web`, URL `http://127.0.0.1:3000`. Refuses to overwrite the config file. |
-| `umb doctor [--config <path>]` | Read-only checks for config/path safety, full knowledge schema/references, auth settings, an existing DB's integrity/schema, MCP port availability, and whether the configured browser engine launches headlessly. Does not migrate/create a DB or navigate to the application. |
+| `umb init [--project <id>] [--url <url>] [--yes] [--starter-knowledge]` | Guided creation of `umb.config.yaml` and `umb-knowledge/`; safely serializes YAML, validates URL protocol and project ID, and refuses existing targets without leaving partial output. Defaults: project `demo-web`, URL `http://127.0.0.1:3000`. `--starter-knowledge` creates exactly `application.yaml` and `home.yaml` (described above). |
+| `umb doctor [--config <path>] [--json]` | Read-only checks for config/path safety, full knowledge schema/references, auth settings, an existing DB's integrity/schema, MCP port availability, and whether the configured browser engine launches headlessly. Reports next steps; does not migrate/create a DB or navigate to the application. JSON mode emits `{ok, checks}`; each check has stable `id`, `status`, `message`, and `remediation` fields (`name` is included for compatibility). Unexpected failures also produce one JSON failure result; error details go to stderr. |
 | `umb serve [--config <path>] [--watch-knowledge]` | Starts Streamable HTTP MCP, reconciles knowledge, launches the configured browser, and holds project/database locks for the process lifetime. `--watch-knowledge` opts into debounced full-tree reconciliation. Token auth defaults to environment variable `UMB_MCP_TOKEN`. |
 | `umb mcp --stdio --config <path>` | Starts the MCP service over local subprocess stdin/stdout; `--stdio` is required and there is no HTTP listener. Stdout contains protocol only. Holds the same project/database locks as `serve`. |
 | `umb playwright endpoint [--config <path>] [--token-env <name>]` | Launches a separate Playwright BrowserServer behind a loopback, Bearer-authenticated, single-client proxy. Token variable defaults to `UMB_PLAYWRIGHT_ENDPOINT_TOKEN` and must contain at least 32 bytes. It is not the browser page used by `serve`/stdio and holds the project lock, so those modes cannot co-run for this project. |
-| `umb knowledge validate [--config <path>]` | Read-only validation of the complete knowledge tree; does not open/migrate Store or mutate graph state. |
+| `umb knowledge validate [--config <path>] [--json]` | Read-only validation of the complete knowledge tree; does not open/migrate Store or mutate graph state. JSON mode emits `{ok, count, diagnostics}`; diagnostics use the same stable `id`, `status`, `message`, and `remediation` contract as doctor checks. Success includes an `ok` diagnostic; failure has `count: null` and a `fail` diagnostic. |
 | `umb knowledge reload [--config <path>]` | Takes the project/database lock, opens Store, and reconciles the entire knowledge tree into the graph. This mutates graph/ownership state; stop `serve`, stdio, or endpoint first. Removing a previously imported YAML document can tombstone its YAML-owned graph nodes/edges. |
 | `umb knowledge proposals [--config <path>]` | Lists workflow locator proposals while holding the project/database lock. Stop other UMB processes for that project first. |
 | `umb knowledge confirm-locator <proposalId> [--config <path>]` | Requires an interactive local TTY and project lock. Confirms a reviewed manual YAML locator edit; it does not edit YAML for you. Stop other UMB processes first. |
