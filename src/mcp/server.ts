@@ -46,7 +46,7 @@ export async function serve(config: Config, store: Store, browser: BrowserContro
   const knowledgeRoot=options.knowledgeRoot??path.resolve(config.knowledge.path);
   const idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
   if (!Number.isFinite(idleTimeoutMs) || idleTimeoutMs < 1) throw Error('idleTimeoutMs must be a positive finite number');
-  let closing = false, pendingInitializers = 0, initializerReserved = false, initializationDrain: (() => void) | undefined, activePosts=0,postDrain:(()=>void)|undefined;
+  let closing = false, pendingInitializers = 0, initializationDrain: (() => void) | undefined, activePosts=0,postDrain:(()=>void)|undefined;
   let browserQueue: Promise<void> = Promise.resolve();
   const runBrowser = <T>(fn: () => Promise<T>): Promise<T> => {
     const next = browserQueue.then(fn, fn);
@@ -184,13 +184,10 @@ export async function serve(config: Config, store: Store, browser: BrowserContro
             const messages = Array.isArray(body) ? body : [body];
             if (messages.length !== 1 || messages[0]?.method !== 'initialize') { reply(res, 400, 'A valid MCP session is required'); return; }
             if (closing) { reply(res, 503, 'Server is shutting down'); return; }
-            if (sessions.size > 0 || initializerReserved) { reply(res, 409, 'The shared browser already has an active MCP writer session'); return; }
-            initializerReserved = true;
             const session = createSession(); await session.server.connect(session.transport);
             try { await session.transport.handleRequest(req, res, body); }
             finally { if (!session.id) { await session.transport.close(); await session.server.close(); } }
           } finally {
-            initializerReserved = false;
             pendingInitializers--;
             if (pendingInitializers === 0) { initializationDrain?.(); initializationDrain = undefined; }
           }

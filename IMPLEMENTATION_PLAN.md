@@ -6,8 +6,8 @@ The source of truth is `UI_Memory_Browser_PRD.md`. The repository currently has 
 
 - TypeScript CLI: `umb init`, `umb doctor`, `umb serve`; strict configuration, root-contained paths, SQLite-backed project memory, YAML validation/reconciliation.
 - Playwright Chromium browser, semantic locators, revision-scoped refs, allowlisted navigation, and stateful MCP Streamable HTTP.
-- Authenticated loopback MCP, one-session shared-browser lease, serialized browser calls, idle expiry, initialization-aware shutdown.
-- Live fixture-based tests cover official MCP client initialization/tool calls, Chromium fill/click, auth/Host/Origin rejection, redirect blocking, session cleanup/expiry/lease, and shutdown racing initialization.
+- Authenticated loopback MCP, multiple sessions sharing one browser page, globally serialized browser calls, per-session idle expiry, initialization-aware shutdown.
+- Live fixture-based tests cover official MCP client initialization/tool calls across concurrent sessions, Chromium fill/click, auth/Host/Origin rejection, redirect blocking, session cleanup/independent expiry, and shutdown racing initialization.
 - Current local verification: build, typecheck, all 71 tests, lint, CLI help, CI workflow YAML parse, and `git diff --check` pass. Quick and full benchmarks pass; full mode seeds 10k nodes/30k edges and runs the 100-command MCP smoke. P0-C and P1-A Oracle Gates 1–3 passed. The read-only example `doctor` reports its persisted DB is behind schema v9; it was not mutated, and isolated doctor tests pass. Hosted Linux/macOS CI jobs are configured but have not run locally.
 
 ## Remaining phases (ordered by dependencies)
@@ -48,8 +48,8 @@ Schema principle: workflow/screen/action facts remain graph nodes/edges; keep wo
 ## Product and security decisions
 
 - Keep the single-package module boundaries; do not split packages until independent distribution is needed.
-- Browser is one shared page under a single-writer session lease until project/context isolation is implemented.
-- The lease expires after five minutes without MCP requests by default. Browser tool calls are serialized; the server API accepts an injectable idle timeout for deterministic tests. Shutdown rejects new requests, drains already-started initialization attempts, then closes sessions and the listener.
+- MCP sessions share one browser page; browser operations are globally serialized, but clients are not isolated and multi-call sequences are not transactional. Use `expected_revision` where supported to reject stale mutations.
+- Each session expires after five minutes without MCP requests by default. The server API accepts an injectable idle timeout for deterministic tests. Shutdown rejects new requests, drains already-started initialization attempts, then closes all sessions and the listener.
 - Redirects may be followed only if every hop is checked against the configured origin allowlist. Until that is proven by tests, fail closed.
 - YAML-authored facts are proposed/trusted-source, never automatically verified. Evidence-backed promotion is required for learned facts.
 - Never persist credentials, sensitive field values, or whole page contents by default. Artifact capture must be opt-in, bounded, and rooted under the project.

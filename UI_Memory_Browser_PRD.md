@@ -479,7 +479,7 @@ rules:
 - **P1:** Optionally attach UMB to an existing local Chromium browser via `connectOverCDP()` for diagnostics only; document fidelity limitations.
 - **P2:** Generate a standalone Playwright `.spec.ts` from a verified workflow; emitted source must be reviewed/owned by the project.
 
-When two clients control the same browser, enforce single-writer session ownership or explicit exclusive leases. Do not let the MCP adapter and a Playwright client issue conflicting concurrent writes.
+Multiple MCP sessions may use the process's shared browser page. Globally serialize each browser operation (and each workflow/assertion run as a unit), but make clear that separate clients share page state and their sequences are not isolated or transactional. Clients should provide the current `expected_revision` on mutations where supported to reject stale changes. MCP sessions expire independently after five minutes without requests. The optional Playwright endpoint launches a separate browser and admits one external client at a time; project locking prevents it from running concurrently with the MCP server for the same project.
 
 ## 13. CLI and startup UX
 
@@ -602,7 +602,7 @@ Add deterministic assertions, artifact capture, workflows, isolation, failure re
 
 ### Milestone 5: Optional Playwright attachment + quality hardening
 
-Expose guarded Playwright attach, enforce single-writer leases, profile performance, implement export tools, documentation, packaging, cross-platform tests for Windows/Linux/macOS.
+Expose guarded Playwright attach with one external proxy client at a time, profile performance, implement export tools, documentation, packaging, cross-platform tests for Windows/Linux/macOS.
 
 **Exit gate:** External Playwright client can attach in a supported configuration without corrupting MCP session state.
 
