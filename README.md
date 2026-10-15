@@ -12,7 +12,7 @@ First, create a project config and knowledge directory. Then copy and adapt the 
 
 ```powershell
 .\umb.cmd init --project demo --url http://127.0.0.1:3000
-.\runtime\node.exe .\node_modules\playwright\cli.js install chromium
+.\payload\runtime\node.exe .\payload\node_modules\playwright\cli.js install chromium
 $env:UMB_MCP_TOKEN = '<set-a-long-random-secret>'
 .\umb.cmd knowledge validate --config .\umb.config.yaml
 .\umb.cmd doctor --config .\umb.config.yaml
@@ -23,7 +23,7 @@ $env:UMB_MCP_TOKEN = '<set-a-long-random-secret>'
 
 ```sh
 ./umb init --project demo --url http://127.0.0.1:3000
-./runtime/bin/node ./node_modules/playwright/cli.js install chromium
+./payload/runtime/bin/node ./payload/node_modules/playwright/cli.js install chromium
 export UMB_MCP_TOKEN='<set-a-long-random-secret>'
 ./umb knowledge validate --config ./umb.config.yaml
 ./umb doctor --config ./umb.config.yaml
@@ -75,7 +75,7 @@ Implemented CLI commands:
 | `umb init [--project <id>] [--url <url>] [--yes] [--starter-knowledge]` | Guided creation of `umb.config.yaml` and `umb-knowledge/`; safely serializes YAML, validates URL protocol and project ID, and refuses existing targets without leaving partial output. Defaults: project `demo-web`, URL `http://127.0.0.1:3000`. `--starter-knowledge` creates exactly `application.yaml` and `home.yaml` (described above). |
 | `umb doctor [--config <path>] [--json]` | Read-only checks for config/path safety, full knowledge schema/references, auth settings, an existing DB's integrity/schema, MCP port availability, and whether the configured browser engine launches headlessly. Reports next steps; does not migrate/create a DB or navigate to the application. JSON mode emits `{ok, checks}`; each check has stable `id`, `status`, `message`, and `remediation` fields (`name` is included for compatibility). Unexpected failures also produce one JSON failure result; error details go to stderr. |
 | `umb serve [--config <path>] [--watch-knowledge] [--no-update-check]` | Starts Streamable HTTP MCP, reconciles knowledge, launches the configured browser, and holds project/database locks for the process lifetime. `--watch-knowledge` opts into debounced full-tree reconciliation. Token auth defaults to environment variable `UMB_MCP_TOKEN`. Official prebuilt bundles also perform a short, non-blocking release metadata check; use `--no-update-check` or `UMB_NO_UPDATE_CHECK=1` to disable it. |
-| `umb --update` (or `umb update`) | Downloads the latest stable GitHub release for an official prebuilt bundle, verifies the archive against its SHA-256 sidecar, and replaces only UMB's runtime, app, dependencies, launcher, and package metadata. Source checkouts and npm installs refuse; project files such as `umb.config.yaml`, `umb-knowledge/`, and `.umb/` are never replaced. |
+| `umb --update` (or `umb update`) | Run through the stable root launcher (`umb.cmd`/`umb`), not by invoking bundled Node directly; the launcher supplies the required install context, stages the verified `payload/`, and synchronously applies it after the CLI exits. |
 | `umb mcp --stdio --config <path>` | Starts the MCP service over local subprocess stdin/stdout; `--stdio` is required and there is no HTTP listener. Stdout contains protocol only. Holds the same project/database locks as `serve`. |
 | `umb playwright endpoint [--config <path>] [--token-env <name>]` | Launches a separate Playwright BrowserServer behind a loopback, Bearer-authenticated, single-client proxy. Token variable defaults to `UMB_PLAYWRIGHT_ENDPOINT_TOKEN` and must contain at least 32 bytes. It is not the browser page used by `serve`/stdio and holds the project lock, so those modes cannot co-run for this project. |
 | `umb knowledge validate [--config <path>] [--json]` | Read-only validation of the complete knowledge tree; does not open/migrate Store or mutate graph state. JSON mode emits `{ok, count, diagnostics}`; diagnostics use the same stable `id`, `status`, `message`, and `remediation` contract as doctor checks. Success includes an `ok` diagnostic; failure has `count: null` and a `fail` diagnostic. |
@@ -356,23 +356,25 @@ The adapter uses common Playwright browser/context/page/locator APIs. The engine
 
 ## Release bundles
 
-Tagged releases publish `umb-windows-x64.zip` and `umb-linux-x64.tar.gz` platform bundles. These are directories containing the private Node 24 runtime used to build them, compiled `dist`, production `node_modules` (including the target-built native `better-sqlite3` addon), package metadata/lockfile, this README, the license, and a launcher. They are platform archives, not single-file binaries. Extract the archive and launch from its directory:
+Tagged releases publish `umb-windows-x64.zip` and `umb-linux-x64.tar.gz` platform bundles. Root launchers, update helpers, manifest, README, and license are stable; mutable application files (the private Node 24 runtime, compiled `dist`, production `node_modules`, and package metadata/lockfile) live under `payload/`. These are platform archives, not single-file binaries. Extract the archive and launch from its directory:
 
 ```powershell
 .\umb.cmd serve --config .\umb.config.yaml
-.\runtime\node.exe .\node_modules\playwright\cli.js install chromium
+.\payload\runtime\node.exe .\payload\node_modules\playwright\cli.js install chromium
 ```
 
 ```sh
 ./umb serve --config ./umb.config.yaml
-./runtime/bin/node ./node_modules/playwright/cli.js install chromium
+./payload/runtime/bin/node ./payload/node_modules/playwright/cli.js install chromium
 ```
 
 The Playwright browser binaries are intentionally not included. Install them with the bundle's Node runtime and bundled Playwright CLI; choose `firefox` or `webkit` instead of `chromium` when configured. On Linux, browser installation may require system libraries; use `--with-deps` on a supported Debian/Ubuntu system with package-install privileges (or install the documented Playwright OS dependencies separately). Binary versions must match the Playwright package in the bundle lockfile.
 
 Pushing a tag exactly matching the package version, for example `v1.2.3`, from a commit reachable from `main` runs native Windows x64 and Ubuntu 22.04 x64 build/test/package jobs and publishes both archives with SHA-256 checksums and generated release notes. Release publishing is tag-triggered; it does not change repository visibility or branch protection.
 
-Official bundles support `umb update`; the first metadata check on `umb serve` is best-effort and never delays startup, and notices are written only to stderr. Set `UMB_NO_UPDATE_CHECK=1` or pass `--no-update-check` to opt out. Checks run only for official prebuilt bundles, not source checkouts/npm installs; `umb update` refuses those installs. Updates use the fixed GitHub repository above, require a stable newer version and a matching SHA-256 sidecar, and fail without changing files on malformed metadata, checksum, or archive layout. The updater preserves arbitrary files in the bundle directory, including project configuration and data. Windows stages the verified payload and waits for the current UMB process to exit before replacing bundle files. Keep a backup of valuable local data; a power loss during file replacement cannot be made fully transactional across all filesystems. You can always update manually by extracting a newer release bundle and copying only its application payload files.
+Official bundles support `umb update`; the first metadata check on `umb serve` is best-effort and never delays startup. Linux checks for `flock` before downloading; if it becomes unavailable after a request is published, preflight warns and allows a valid current payload to run without applying the update. If the current payload is missing or unsafe, preflight fails closed. If target verification fails but rollback succeeds, the invalid request and staged payload are discarded so the previous bundle can launch and the user can retry; if rollback fails, recovery evidence is preserved. Set `UMB_NO_UPDATE_CHECK=1` or pass `--no-update-check` to opt out. Updates require a stable newer version and matching SHA-256 sidecar, stage the verified `payload/` on the install filesystem, and are applied synchronously by the root helper after the CLI exits. The launcher runs recovery preflight before Node when a request, missing payload, or orphan update artifact is detected; it restores a valid `payload.previous/`, retries a pending update, or recognizes a swap committed before request cleanup. Helpers use a kernel-released exclusive lock (Linux requires `flock` from util-linux; the persistent `.umb-update.lock` file itself is not a stale lock). Their scan for other UMB processes is best-effort and cannot eliminate a simultaneous-launch race: stop all UMB processes and do not start another UMB command while an update is being applied. Under the helper lock, unreferenced interrupted work/stage/temp files are cleaned; the request's referenced stage is retained. The helper retains at most one previous payload. Keep project config/data outside the app bundle.
+
+**One-time migration for existing flat 0.2.6 bundles:** the old updater cannot install the new payload layout and rejects it without changing existing files. Download and extract the latest release bundle manually once. Preserve project files by moving/copying them outside the app bundle before replacing it; do not copy project data into `payload/`. Future updates then work automatically.
 
 ## Benchmarking
 
