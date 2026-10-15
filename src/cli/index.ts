@@ -112,9 +112,10 @@ knowledge.command('reload').option('--config <path>','Config file','umb.config.y
    if (lifecycle.stopRequested) throw Error('Shutdown requested during startup');
   browser = new BrowserController(config, root); await browser.start();
    if (lifecycle.stopRequested) throw Error('Shutdown requested during startup');
-  await browser.navigate(config.project.base_url);
-   if (lifecycle.stopRequested) throw Error('Shutdown requested during startup');
-   stop = await serve(config, store, browser, { projectRoot:root,knowledgeRoot:await safePath(root,config.knowledge.path),watchKnowledge:Boolean(o.watchKnowledge),approver: async prompt => { if(!process.stdin.isTTY||!process.stdout.isTTY)return false;const rl=createInterface({input:process.stdin,output:process.stdout});try{return (await rl.question(prompt)).trim().toLowerCase()==='y';}finally{rl.close();} } });
+   let applicationReady = false;
+   try { await browser.navigate(config.project.base_url, 'domcontentloaded', 2500); applicationReady = true; } catch { /* The configured application may start after UMB. */ }
+    if (lifecycle.stopRequested) throw Error('Shutdown requested during startup');
+    stop = await serve(config, store, browser, { applicationReady, projectRoot:root,knowledgeRoot:await safePath(root,config.knowledge.path),watchKnowledge:Boolean(o.watchKnowledge),approver: async prompt => { if(!process.stdin.isTTY||!process.stdout.isTTY)return false;const rl=createInterface({input:process.stdin,output:process.stdout});try{return (await rl.question(prompt)).trim().toLowerCase()==='y';}finally{rl.close();} } });
   lifecycle.markReady();
   console.error(`UMB project ${config.project.id} listening at http://${config.server.host}:${config.server.port}/mcp`);
   await lifecycle.waitForStopRequest();
@@ -133,8 +134,10 @@ knowledge.command('reload').option('--config <path>','Config file','umb.config.y
    await mkdir(path.dirname(db),{recursive:true});store=new Store(db,config.project.id);
    await reconcile(await safePath(root,config.knowledge.path),store);if(lifecycle.stopRequested)throw Error('Shutdown requested during startup');
    browser=new BrowserController(config,root);await browser.start();if(lifecycle.stopRequested)throw Error('Shutdown requested during startup');
-   await browser.navigate(config.project.base_url);if(lifecycle.stopRequested)throw Error('Shutdown requested during startup');
-   stop=await serve(config,store,browser,{stdio:true,projectRoot:root,knowledgeRoot:await safePath(root,config.knowledge.path)});
+    let applicationReady = false;
+    try { await browser.navigate(config.project.base_url, 'domcontentloaded', 2500); applicationReady = true; } catch { /* The configured application may start after UMB. */ }
+    if(lifecycle.stopRequested)throw Error('Shutdown requested during startup');
+    stop=await serve(config,store,browser,{stdio:true,applicationReady,projectRoot:root,knowledgeRoot:await safePath(root,config.knowledge.path)});
    lifecycle.markReady();await lifecycle.waitForStopRequest();
   }catch(e){console.error(`MCP stdio failed: ${(e as Error).message}`);process.exitCode=1;}
   finally{process.off('SIGINT',signal);process.off('SIGTERM',signal);process.stdin.off('end',signal);try{await lifecycle.shutdown();}catch(e){console.error(`Shutdown failed: ${(e as Error).message}`);process.exitCode=1;}}

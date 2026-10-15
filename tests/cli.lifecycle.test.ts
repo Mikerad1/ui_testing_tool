@@ -8,6 +8,8 @@ import { createServer as createNetServer } from 'node:net';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { acquireProjectLock } from '../src/security/project-lock.js';
 import { ShutdownLifecycle } from '../src/cli/lifecycle.js';
 
@@ -221,6 +223,43 @@ test('serve child locks, cleans up on startup failure and signal, then restarts'
  } finally {
   if (running) { try { await exitChild(running, 'finally cleanup'); } catch { running.process.kill(); } }
   await new Promise<void>(resolve => app.close(() => resolve()));
+  await rm(root, { recursive: true, force: true });
+ }
+});
+
+test('serve remains available until the configured frontend starts, then refreshes over HTTP', { timeout: 60000 }, async () => {
+ const root = await mkdtemp(path.join(os.tmpdir(), 'umb-late-frontend-'));
+ const app = createServer((_req, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<html><title>late app</title><body>ready</body></html>'); });
+ const appPort = await freePort(), port = await freePort(), config = path.join(root, 'umb.config.yaml');
+ await mkdir(path.join(root, 'knowledge'), { recursive: true });
+ await writeFile(config, `version: 1\nproject:\n  id: late-frontend\n  name: late-frontend\n  base_url: http://127.0.0.1:${appPort}\nserver:\n  host: 127.0.0.1\n  port: ${port}\n  auth:\n    mode: token\n    token_env: UMB_MCP_TOKEN\nbrowser:\n  headless: true\n  allowed_origins:\n    - http://127.0.0.1:${appPort}\nmemory:\n  database: ./.umb/memory.sqlite\nknowledge:\n  path: ./knowledge\n`);
+ const running = child(config, root), token = 'test-token';
+ let client: Client | undefined, transport: StreamableHTTPClientTransport | undefined;
+ try {
+  await waitReady(running, 'serve with frontend unavailable');
+  transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), {
+   requestInit: { headers: { authorization: `Bearer ${token}` } },
+   fetch: (input, init) => fetch(input, { ...init, headers: { ...Object.fromEntries(new Headers(init?.headers)), accept: 'application/json, text/event-stream' } }),
+  });
+  client = new Client({ name: 'late-frontend-http-test', version: '1.0.0' });
+  await client.connect(transport);
+  const status = await client.callTool({ name: 'browser_status', arguments: {} });
+  assert.equal((status as any).structuredContent.data.application_ready, false);
+  const failed = await client.callTool({ name: 'browser_refresh', arguments: {} });
+  assert.equal(failed.isError, true);
+  assert.match((failed as any).structuredContent.error.message, /start the application.*browser_refresh/i);
+  const stillUnavailable = await client.callTool({ name: 'browser_status', arguments: {} });
+  assert.equal((stillUnavailable as any).structuredContent.data.application_ready, false);
+  app.listen(appPort, '127.0.0.1'); await once(app, 'listening');
+  const refreshed = await client.callTool({ name: 'browser_refresh', arguments: {} });
+  assert.equal((refreshed as any).structuredContent.data.application_ready, true);
+  const ready = await client.callTool({ name: 'browser_status', arguments: {} });
+  assert.equal((ready as any).structuredContent.data.application_ready, true);
+ } finally {
+  await client?.close().catch(() => undefined);
+  await transport?.close().catch(() => undefined);
+  if (running.process.exitCode === null) await exitChild(running, 'late frontend cleanup');
+  if (app.listening) await new Promise<void>(resolve => app.close(() => resolve()));
   await rm(root, { recursive: true, force: true });
  }
 });
