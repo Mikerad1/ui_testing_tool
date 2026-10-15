@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { copyFile, mkdtemp, mkdir, rename, rm, writeFile, chmod } from 'node:fs/promises';
+import { copyFile, mkdtemp, mkdir, realpath, rename, rm, writeFile, chmod } from 'node:fs/promises';
 import { spawn, spawnSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
@@ -39,6 +39,9 @@ function runWindowsBatch(batchFile: string, cwd: string) {
   return spawnSync('powershell.exe', [
     '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', '& $env:UMB_TEST_BATCH; exit $LASTEXITCODE',
   ], { cwd, encoding: 'utf8', env: { ...process.env, UMB_TEST_BATCH: batchFile } });
+}
+async function canonicalWindowsPath(value: string): Promise<string> {
+  return (await realpath(value.trim())).toLowerCase();
 }
 
 test('startup check returns a newer stable release for official bundle only', async () => {
@@ -293,10 +296,13 @@ test('Windows target verification rollback restores old payload and discards inv
   await completeStage(stage);
   const request = path.join(root, '.umb-update-request.json');
   await writeFile(request, JSON.stringify({ format: 1, stage, version: '0.3.0' }));
-  const helper = path.join(root, 'umb-update-helper.ps1'), wrapper = path.join(root, 'force-target-mismatch.ps1');
-  await writeFile(wrapper, `function Move-Item { param([string]$LiteralPath,[string]$Destination,[string]$ErrorAction); Microsoft.PowerShell.Management\\Move-Item -LiteralPath $LiteralPath -Destination $Destination -ErrorAction $ErrorAction; if ([IO.Path]::GetFullPath($Destination) -ieq [IO.Path]::GetFullPath('${path.join(root, 'payload').replaceAll("'", "''")}') -and [IO.Path]::GetFileName($LiteralPath) -like '.umb-update-stage-*') { [IO.File]::WriteAllText((Join-Path $Destination 'package.json'), '{"name":"ui-memory-browser","version":"9.9.9"}') } }; . '${helper.replaceAll("'", "''")}' '${root.replaceAll("'", "''")}'`);
+  const helper = await (await import('node:fs/promises')).readFile(path.resolve('scripts/umb-update-helper.ps1'), 'utf8');
+  const stageMove = 'Move-Item -LiteralPath $stage -Destination $payload';
+  assert.equal(helper.split(stageMove).length - 1, 1, 'test fault injection must target the single stage-to-payload move');
+  const injectedHelper = path.join(root, 'force-target-mismatch.ps1');
+  await writeFile(injectedHelper, helper.replace(stageMove, `${stageMove}\n  [IO.File]::WriteAllText((Join-Path $payload 'package.json'), '{"name":"ui-memory-browser","version":"9.9.9"}')`));
   try {
-    const result = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', wrapper], { encoding: 'utf8' });
+    const result = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', injectedHelper, root], { encoding: 'utf8' });
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /target version verification failed.*previous payload restored.*discarded/);
     assert.equal(JSON.parse(await (await import('node:fs/promises')).readFile(path.join(root, 'payload/package.json'), 'utf8')).version, '0.2.6');
@@ -413,7 +419,7 @@ test('stable launcher preflights a missing payload before starting the CLI', { s
     await writeFile(path.join(root, 'umb'), '#!/bin/sh\nHERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"\nif [ ! -d "$HERE/payload" ] || [ -e "$HERE/.umb-update-request.json" ] || [ -L "$HERE/.umb-update-request.json" ]; then (cd "$HERE" && "$HERE/umb-update-helper.sh" "$HERE" --preflight); rc=$?; [ "$rc" -eq 0 ] || exit "$rc"; fi\nUMB_INSTALL_ROOT="$HERE" "$HERE/payload/runtime/bin/node" "$HERE/payload/dist/src/cli/index.js" "$@"\nstatus=$?\nif [ -f "$HERE/.umb-update-request.json" ]; then (cd "$HERE" && "$HERE/umb-update-helper.sh" "$HERE"); helper_status=$?; if [ "$status" -eq 0 ]; then status=$helper_status; fi; fi\nexit "$status"\n');
     await chmod(path.join(root, 'umb'), 0o755);
   } else {
-    await writeFile(path.join(root, 'umb.cmd'), '@echo off\r\nsetlocal\r\nset "UMB_INSTALL_ROOT=%~dp0"\r\nif not exist "%~dp0payload\\" goto preflight\r\nif exist "%~dp0.umb-update-request.json" goto preflight\r\ngoto runcli\r\n:preflight\r\npushd "%~dp0"\r\nif errorlevel 1 exit /b 1\r\npowershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0umb-update-helper.ps1" "%~dp0" -Preflight\r\nset "RECOVERY_EXIT=%ERRORLEVEL%"\r\npopd\r\nif not "%RECOVERY_EXIT%"=="0" exit /b %RECOVERY_EXIT%\r\nif not exist "%~dp0payload\\" exit /b 1\r\n:runcli\r\n"%~dp0payload\\runtime\\node.exe" "%~dp0payload\\dist\\src\\cli\\index.js" %*\r\nset "UMB_EXIT=%ERRORLEVEL%"\r\nif exist "%~dp0.umb-update-request.json" (call :applyupdate & if errorlevel 1 set "UMB_EXIT=1")\r\nexit /b %UMB_EXIT%\r\n:applyupdate\r\npushd "%~dp0"\r\nif errorlevel 1 exit /b 1\r\npowershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0umb-update-helper.ps1" "%~dp0"\r\nset "HELPER_EXIT=%ERRORLEVEL%"\r\npopd\r\nexit /b %HELPER_EXIT%\r\n');
+    await writeFile(path.join(root, 'umb.cmd'), '@echo off\r\nsetlocal\r\nset "UMB_INSTALL_ROOT=%~dp0."\r\nif not exist "%~dp0payload\\" goto preflight\r\nif exist "%~dp0.umb-update-request.json" goto preflight\r\ngoto runcli\r\n:preflight\r\npushd "%~dp0."\r\nif errorlevel 1 exit /b 1\r\npowershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0umb-update-helper.ps1" "%~dp0." -Preflight\r\nset "RECOVERY_EXIT=%ERRORLEVEL%"\r\npopd\r\nif not "%RECOVERY_EXIT%"=="0" exit /b %RECOVERY_EXIT%\r\nif not exist "%~dp0payload\\" exit /b 1\r\n:runcli\r\n"%~dp0payload\\runtime\\node.exe" "%~dp0payload\\dist\\src\\cli\\index.js" %*\r\nset "UMB_EXIT=%ERRORLEVEL%"\r\nif exist "%~dp0.umb-update-request.json" (call :applyupdate & if errorlevel 1 set "UMB_EXIT=1")\r\nexit /b %UMB_EXIT%\r\n:applyupdate\r\npushd "%~dp0."\r\nif errorlevel 1 exit /b 1\r\npowershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0umb-update-helper.ps1" "%~dp0."\r\nset "HELPER_EXIT=%ERRORLEVEL%"\r\npopd\r\nexit /b %HELPER_EXIT%\r\n');
   }
   try {
     const result = process.platform === 'win32'
@@ -441,16 +447,16 @@ test('Windows launcher runs the helper after Node exits and preserves the caller
   const realHelper = path.join(root, 'umb-update-helper-real.ps1');
   await copyFile(path.join(root, 'umb-update-helper.ps1'), realHelper);
   await writeFile(path.join(root, 'umb-update-helper.ps1'), `param([string]$BundleRoot,[switch]$Preflight)\n[IO.File]::WriteAllText(${JSON.stringify(helperCwd)}, (Get-Location).Path)\nif ($Preflight) { & (Join-Path $BundleRoot 'umb-update-helper-real.ps1') $BundleRoot -Preflight } else { & (Join-Path $BundleRoot 'umb-update-helper-real.ps1') $BundleRoot }\nexit $LASTEXITCODE\n`);
-  await writeFile(path.join(root, 'umb.cmd'), '@echo off\r\nsetlocal\r\nset "UMB_INSTALL_ROOT=%~dp0"\r\nif not exist "%~dp0payload\\" goto preflight\r\nif exist "%~dp0.umb-update-request.json" goto preflight\r\ngoto runcli\r\n:preflight\r\npushd "%~dp0"\r\nif errorlevel 1 exit /b 1\r\npowershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0umb-update-helper.ps1" "%~dp0" -Preflight\r\nset "RECOVERY_EXIT=%ERRORLEVEL%"\r\npopd\r\nif not "%RECOVERY_EXIT%"=="0" exit /b %RECOVERY_EXIT%\r\nif not exist "%~dp0payload\\" exit /b 1\r\n:runcli\r\n"%~dp0payload\\runtime\\node.exe" "%~dp0payload\\dist\\src\\cli\\index.js" %*\r\nset "UMB_EXIT=%ERRORLEVEL%"\r\nif exist "%~dp0.umb-update-request.json" (call :applyupdate & if errorlevel 1 set "UMB_EXIT=1")\r\nexit /b %UMB_EXIT%\r\n:applyupdate\r\npushd "%~dp0"\r\nif errorlevel 1 exit /b 1\r\npowershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0umb-update-helper.ps1" "%~dp0"\r\nset "HELPER_EXIT=%ERRORLEVEL%"\r\npopd\r\nexit /b %HELPER_EXIT%\r\n');
+  await writeFile(path.join(root, 'umb.cmd'), '@echo off\r\nsetlocal\r\nset "UMB_INSTALL_ROOT=%~dp0."\r\nif not exist "%~dp0payload\\" goto preflight\r\nif exist "%~dp0.umb-update-request.json" goto preflight\r\ngoto runcli\r\n:preflight\r\npushd "%~dp0."\r\nif errorlevel 1 exit /b 1\r\npowershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0umb-update-helper.ps1" "%~dp0." -Preflight\r\nset "RECOVERY_EXIT=%ERRORLEVEL%"\r\npopd\r\nif not "%RECOVERY_EXIT%"=="0" exit /b %RECOVERY_EXIT%\r\nif not exist "%~dp0payload\\" exit /b 1\r\n:runcli\r\n"%~dp0payload\\runtime\\node.exe" "%~dp0payload\\dist\\src\\cli\\index.js" %*\r\nset "UMB_EXIT=%ERRORLEVEL%"\r\nif exist "%~dp0.umb-update-request.json" (call :applyupdate & if errorlevel 1 set "UMB_EXIT=1")\r\nexit /b %UMB_EXIT%\r\n:applyupdate\r\npushd "%~dp0."\r\nif errorlevel 1 exit /b 1\r\npowershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0umb-update-helper.ps1" "%~dp0."\r\nset "HELPER_EXIT=%ERRORLEVEL%"\r\npopd\r\nexit /b %HELPER_EXIT%\r\n');
   try {
     const launcher = path.join(root, 'umb.cmd');
     const wrapper = path.join(root, 'invoke-launcher.cmd');
     await writeFile(wrapper, `@echo off\r\ncall "${launcher}"\r\nset "UMB_TEST_EXIT=%ERRORLEVEL%"\r\ncd > "${afterCwd}"\r\nexit /b %UMB_TEST_EXIT%\r\n`);
     const result = runWindowsBatch(wrapper, callerCwd);
     assert.equal(result.status, 0, result.stderr);
-    assert.equal((await (await import('node:fs/promises')).readFile(cwdRecord, 'utf8')), callerCwd);
-    assert.equal((await (await import('node:fs/promises')).readFile(helperCwd, 'utf8')).toLowerCase(), root.toLowerCase());
-    assert.equal((await (await import('node:fs/promises')).readFile(afterCwd, 'utf8')).trim().toLowerCase(), callerCwd.toLowerCase());
+    assert.equal(await canonicalWindowsPath(await (await import('node:fs/promises')).readFile(cwdRecord, 'utf8')), await canonicalWindowsPath(callerCwd));
+    assert.equal(await canonicalWindowsPath(await (await import('node:fs/promises')).readFile(helperCwd, 'utf8')), await canonicalWindowsPath(root));
+    assert.equal(await canonicalWindowsPath(await (await import('node:fs/promises')).readFile(afterCwd, 'utf8')), await canonicalWindowsPath(callerCwd));
     await (await import('node:fs/promises')).access(callerCwd);
     assert.equal(JSON.parse(await (await import('node:fs/promises')).readFile(path.join(root, 'payload/package.json'), 'utf8')).version, '0.3.0');
     assert.match(result.stdout, /Updated UMB to 0\.3\.0/);
@@ -467,14 +473,14 @@ test('Windows generated release launcher applies requests from payload CWD and p
     const currentPayload = path.join(bundleRoot, 'payload'), callerCwd = path.join(currentPayload, 'dist/src/cli');
     const stage = path.join(bundleRoot, '.umb-update-stage-generated-test');
     const request = path.join(bundleRoot, '.umb-update-request.json'), cwdRecord = path.join(tempRoot, 'cli-cwd.txt');
-    const fakeCli = `const fs=require('fs'),path=require('path');const root=${JSON.stringify(bundleRoot)},stage=${JSON.stringify(stage)};fs.writeFileSync(${JSON.stringify(cwdRecord)},process.cwd());fs.mkdirSync(path.join(stage,'runtime'),{recursive:true});fs.linkSync(path.join(root,'payload/runtime/node.exe'),path.join(stage,'runtime/node.exe'));fs.mkdirSync(path.join(stage,'dist/src/cli'),{recursive:true});fs.mkdirSync(path.join(stage,'node_modules/better-sqlite3'),{recursive:true});fs.writeFileSync(path.join(stage,'node_modules/better-sqlite3/package.json'),JSON.stringify({name:'better-sqlite3',version:'1.0.0'}));fs.writeFileSync(path.join(stage,'package.json'),JSON.stringify({name:'ui-memory-browser',version:'98.7.6'}));fs.copyFileSync(__filename,path.join(stage,'dist/src/cli/index.js'));fs.writeFileSync(${JSON.stringify(request)},JSON.stringify({format:1,stage,version:'98.7.6'}));`;
+    const fakeCli = `import fs from 'node:fs';import path from 'node:path';const root=${JSON.stringify(bundleRoot)},stage=${JSON.stringify(stage)};fs.writeFileSync(${JSON.stringify(cwdRecord)},process.cwd());fs.mkdirSync(path.join(stage,'runtime'),{recursive:true});fs.linkSync(path.join(root,'payload/runtime/node.exe'),path.join(stage,'runtime/node.exe'));fs.mkdirSync(path.join(stage,'dist/src/cli'),{recursive:true});fs.mkdirSync(path.join(stage,'node_modules/better-sqlite3'),{recursive:true});fs.writeFileSync(path.join(stage,'node_modules/better-sqlite3/package.json'),JSON.stringify({name:'better-sqlite3',version:'1.0.0'}));fs.writeFileSync(path.join(stage,'package.json'),JSON.stringify({name:'ui-memory-browser',version:'98.7.6'}));fs.writeFileSync(path.join(stage,'dist/src/cli/index.js'),'');fs.writeFileSync(${JSON.stringify(request)},JSON.stringify({format:1,stage,version:'98.7.6'}));`;
     await writeFile(path.join(currentPayload, 'dist/src/cli/index.js'), fakeCli);
     const afterCwd = path.join(tempRoot, 'after-cwd.txt'), wrapper = path.join(tempRoot, 'invoke-launcher.cmd');
     await writeFile(wrapper, `@echo off\r\ncall "${path.join(bundleRoot, 'umb.cmd')}"\r\nset "UMB_TEST_EXIT=%ERRORLEVEL%"\r\ncd > "${afterCwd}"\r\nexit /b %UMB_TEST_EXIT%\r\n`);
     const success = runWindowsBatch(wrapper, callerCwd);
     assert.equal(success.status, 0, success.stderr);
-    assert.equal(await (await import('node:fs/promises')).readFile(cwdRecord, 'utf8'), callerCwd);
-    assert.equal((await (await import('node:fs/promises')).readFile(afterCwd, 'utf8')).trim().toLowerCase(), callerCwd.toLowerCase());
+    assert.equal(await canonicalWindowsPath(await (await import('node:fs/promises')).readFile(cwdRecord, 'utf8')), await canonicalWindowsPath(callerCwd));
+    assert.equal(await canonicalWindowsPath(await (await import('node:fs/promises')).readFile(afterCwd, 'utf8')), await canonicalWindowsPath(callerCwd));
     assert.match(success.stdout, /Updated UMB to 98\.7\.6/);
     assert.equal(JSON.parse(await (await import('node:fs/promises')).readFile(path.join(bundleRoot, 'payload/package.json'), 'utf8')).version, '98.7.6');
 
@@ -482,7 +488,7 @@ test('Windows generated release launcher applies requests from payload CWD and p
     const failure = runWindowsBatch(wrapper, callerCwd);
     assert.notEqual(failure.status, 0);
     assert.match(failure.stderr, /pending request is malformed/);
-    assert.equal((await (await import('node:fs/promises')).readFile(afterCwd, 'utf8')).trim().toLowerCase(), callerCwd.toLowerCase());
+    assert.equal(await canonicalWindowsPath(await (await import('node:fs/promises')).readFile(afterCwd, 'utf8')), await canonicalWindowsPath(callerCwd));
   } finally { await rm(tempRoot, { recursive: true, force: true }); }
 });
 
