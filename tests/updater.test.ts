@@ -36,7 +36,7 @@ function response(data: unknown, ok = true): Response {
 }
 function release(tag: string, assets: unknown[] = []) { return { tag_name: tag, draft: false, prerelease: false, assets }; }
 function runWindowsBatch(batchFile: string, cwd: string) {
-  return spawnSync('cmd.exe', ['/d', '/c', 'call "%UMB_TEST_BATCH%"'], {
+  return spawnSync('cmd.exe', ['/d', '/c', '""%UMB_TEST_BATCH%""'], {
     cwd, encoding: 'utf8', env: { ...process.env, UMB_TEST_BATCH: batchFile },
   });
 }
