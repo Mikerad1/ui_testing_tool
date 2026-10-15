@@ -36,9 +36,9 @@ function response(data: unknown, ok = true): Response {
 }
 function release(tag: string, assets: unknown[] = []) { return { tag_name: tag, draft: false, prerelease: false, assets }; }
 function runWindowsBatch(batchFile: string, cwd: string) {
-  return spawnSync('powershell.exe', [
-    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', '& $env:UMB_TEST_BATCH; exit $LASTEXITCODE',
-  ], { cwd, encoding: 'utf8', env: { ...process.env, UMB_TEST_BATCH: batchFile } });
+  return spawnSync('cmd.exe', ['/d', '/c', 'call "%UMB_TEST_BATCH%"'], {
+    cwd, encoding: 'utf8', env: { ...process.env, UMB_TEST_BATCH: batchFile },
+  });
 }
 async function canonicalWindowsPath(value: string): Promise<string> {
   return (await realpath(value.trim())).toLowerCase();
