@@ -7,6 +7,7 @@ import { spawn, spawnSync } from 'node:child_process';
 const REPOSITORY = 'Mikerad1/ui_testing_tool';
 const API = `https://api.github.com/repos/${REPOSITORY}/releases/latest`;
 const ALLOWLIST = ['runtime', 'dist', 'node_modules', 'umb', 'umb.cmd', 'package.json', 'package-lock.json', 'UMB-BUNDLE.json'];
+const WINDOWS_ARCHIVE_ROOTS = [...ALLOWLIST, 'LICENSE', 'README.md'];
 type Release = { tag_name?: unknown; draft?: unknown; prerelease?: unknown; assets?: unknown };
 
 function bundledRoot(): string { return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../'); }
@@ -49,14 +50,22 @@ function command(cmd: string, args: string[], cwd: string): string {
   if (result.error || result.status !== 0) throw new Error(`Could not safely inspect/extract release archive (${result.error?.message ?? result.stderr ?? cmd}).`);
   return result.stdout;
 }
-export function validateArchivePaths(listing: string, expectedTop: string): void {
+export function validateArchivePaths(listing: string, expectedTop: string, flatEntries: readonly string[] = []): 'nested' | 'flat' {
   const entries = listing.split(/\r?\n/).filter(Boolean);
   if (!entries.length || entries.length > 100000) throw new Error('Release archive has an invalid file list.');
+  let nested = false, flat = false;
   for (const entry of entries) {
     const normalized = entry.replaceAll('\\', '/').replace(/\/$/, '');
     if (normalized.startsWith('/') || /^[A-Za-z]:/.test(normalized) || normalized.split('/').some(p => !p || p === '..' || p === '.')) throw new Error('Release archive contains an unsafe path.');
-    if (normalized.split('/')[0] !== expectedTop) throw new Error('Release archive layout is not recognized.');
+    const [top] = normalized.split('/');
+    if (top === expectedTop) nested = true;
+    else if (flatEntries.includes(top!)) flat = true;
+    else throw new Error('Release archive layout is not recognized.');
+    if (top === expectedTop && flat) throw new Error('Release archive layout is not recognized.');
+    if (top !== expectedTop && nested) throw new Error('Release archive layout is not recognized.');
   }
+  if (nested && flat) throw new Error('Release archive layout is not recognized.');
+  return flat ? 'flat' : 'nested';
 }
 
 export function validateTarTypes(details: string): void {
@@ -109,8 +118,10 @@ export async function updateBundle(fetcher: typeof fetch = fetch, root = bundled
   try {
     const archivePath = path.join(temp, basename), extracted = path.join(temp, 'extract'); await writeFile(archivePath, archive); await mkdir(extracted);
     const top = process.platform === 'win32' ? 'umb-windows-x64' : 'umb-linux-x64';
+    let archiveLayout: 'nested' | 'flat' = 'nested';
     if (process.platform === 'win32') {
-      const listing = command('tar', ['-tf', archivePath], temp); validateArchivePaths(listing, top);
+      const listing = command('tar', ['-tf', archivePath], temp);
+      archiveLayout = validateArchivePaths(listing, top, WINDOWS_ARCHIVE_ROOTS);
       const details = command('tar', ['-tvf', archivePath], temp);
       validateTarTypes(details);
       command('tar', ['-xf', archivePath, '-C', extracted, '--no-same-owner'], temp);
@@ -120,7 +131,7 @@ export async function updateBundle(fetcher: typeof fetch = fetch, root = bundled
       validateTarTypes(details);
       command('tar', ['-xzf', archivePath, '-C', extracted, '--no-same-owner'], temp);
     }
-    const staged = path.join(extracted, top);
+    const staged = path.join(extracted, process.platform === 'win32' && archiveLayout === 'flat' ? '' : top);
     if (!(await officialBundle(staged))) throw new Error('Downloaded archive does not contain a valid UMB bundle.');
     const stagedVersion = JSON.parse(await readFile(path.join(staged, 'package.json'), 'utf8')).version;
     if (stagedVersion !== latest.tag.replace(/^v/, '')) throw new Error('Archive version does not match the release tag.');
