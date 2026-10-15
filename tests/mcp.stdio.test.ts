@@ -28,7 +28,7 @@ test('stdio CLI serves MCP tools over official transport and releases resources 
  const client=new Client({name:'stdio-test',version:'1.0.0'});
  try{
   await client.connect(transport);
-    const listed=await client.listTools();assert.ok(listed.tools.some(tool=>tool.name==='browser_status'));assert.ok(listed.tools.some(tool=>tool.name==='browser_refresh'));
+     const listed=await client.listTools();assert.ok(listed.tools.some(tool=>tool.name==='browser_status'));assert.ok(listed.tools.some(tool=>tool.name==='browser_refresh'));assert.ok(listed.tools.some(tool=>tool.name==='browser_set_viewport'));
     const result=await client.callTool({name:'browser_status',arguments:{}});assert.equal((result as any).structuredContent.data.application_ready,false);
     const unavailable=await client.callTool({name:'browser_snapshot',arguments:{}});assert.equal((unavailable as any).structuredContent.error.code,'application_not_ready');assert.match((unavailable as any).structuredContent.error.message,/not ready.*browser_refresh/i);
     const failedRefresh=await client.callTool({name:'browser_refresh',arguments:{}});assert.equal(failedRefresh.isError,true);assert.match((failedRefresh as any).structuredContent.error.message,/start the application.*browser_refresh/i);
@@ -36,7 +36,9 @@ test('stdio CLI serves MCP tools over official transport and releases resources 
     assert.equal((await client.callTool({name:'memory_stats',arguments:{}}) as any).structuredContent.ok,true);
     const appReady=new Promise<void>(resolve=>app.listen(port,'127.0.0.1',resolve));await appReady;
     const refreshed=await client.callTool({name:'browser_refresh',arguments:{}});assert.equal((refreshed as any).structuredContent.data.application_ready,true);
-    const readyStatus=await client.callTool({name:'browser_status',arguments:{}});assert.equal((readyStatus as any).structuredContent.data.application_ready,true);
+     const readyStatus=await client.callTool({name:'browser_status',arguments:{}});assert.equal((readyStatus as any).structuredContent.data.application_ready,true);
+    const resized=await client.callTool({name:'browser_set_viewport',arguments:{width:1024,height:768}});assert.equal((resized as any).structuredContent.ok,true);assert.deepEqual((resized as any).structuredContent.data.viewport,{width:1024,height:768});
+    const invalidViewport=await client.callTool({name:'browser_set_viewport',arguments:{width:10001,height:768}});assert.equal(invalidViewport.isError,true);
    await new Promise(resolve=>setTimeout(resolve,20));
    const frames=transport.stdout.split('\n').filter(line=>line.length>0);assert.ok(frames.length>=3,'expected initialize/list/tools protocol frames');
    for(const frame of frames){const message=JSON.parse(frame);assert.equal(message.jsonrpc,'2.0',`non-protocol stdout line: ${frame}`);}
