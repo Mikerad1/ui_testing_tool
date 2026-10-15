@@ -130,9 +130,9 @@ export async function checkForUpdate(fetcher: typeof fetch = fetch, root = bundl
 
 export async function updateBundle(fetcher: typeof fetch = fetch, root = bundledRoot(), launcherRoot = process.env.UMB_INSTALL_ROOT, lockAvailable: () => boolean = linuxUpdateLockAvailable): Promise<string> {
   await assertUpdateBundle(root);
+  if (!launcherMatchesBundle(root, launcherRoot)) throw new Error('Self-update must be run through the stable bundle launcher (umb.cmd on Windows or ./umb on Linux); direct Node/CLI invocation cannot apply the staged update.');
   if (process.platform !== 'linux' && process.platform !== 'win32') throw new Error('Self-update supports only official Linux x64 and Windows x64 bundles.');
   if (process.arch !== 'x64') throw new Error('Self-update supports x64 bundles only.');
-  if (!launcherMatchesBundle(root, launcherRoot)) throw new Error('Self-update must be run through the stable bundle launcher (umb.cmd on Windows or ./umb on Linux); direct Node/CLI invocation cannot apply the staged update.');
   if (process.platform === 'linux' && !lockAvailable()) throw new Error('Linux self-update requires the flock utility (util-linux); install it before updating. No request was published.');
   const installed = JSON.parse(await readFile(path.join(root, 'payload/package.json'), 'utf8')).version as string;
   const latest = await fetchLatest(fetcher);
