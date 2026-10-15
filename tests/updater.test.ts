@@ -55,6 +55,14 @@ test('archive validation permits bundle files/directories and rejects traversal 
   for (const kind of ['l', 'h', 'b', 'c', 'p', 's']) assert.throws(() => validateTarTypes(`${kind}rwxr-xr-x user/group 0 2026-01-01 00:00 entry`), /non-regular or unsafe/);
 });
 
+test('Windows archive validation accepts recognized flat or nested layouts and rejects unknown or mixed roots', () => {
+  const windowsEntries = ['runtime', 'dist', 'node_modules', 'umb', 'umb.cmd', 'package.json', 'package-lock.json', 'UMB-BUNDLE.json', 'LICENSE', 'README.md'];
+  assert.equal(validateArchivePaths('runtime/\nruntime/node.exe\npackage.json\nLICENSE\nREADME.md\n', 'umb-windows-x64', windowsEntries), 'flat');
+  assert.equal(validateArchivePaths('umb-windows-x64/\numb-windows-x64/runtime/\n', 'umb-windows-x64', windowsEntries), 'nested');
+  assert.throws(() => validateArchivePaths('unknown/file\n', 'umb-windows-x64', windowsEntries), /layout is not recognized/);
+  assert.throws(() => validateArchivePaths('runtime/file\numb-windows-x64/package.json\n', 'umb-windows-x64', windowsEntries), /layout is not recognized/);
+});
+
 test('Windows ZIP verbose listings reject symlinks and special entry types', () => {
   // Format emitted by `tar -tvf` for ZIP files on the supported Windows bundle path.
   assert.doesNotThrow(() => validateTarTypes('drwxr-xr-x user/group 0 2026-01-01 00:00 umb-windows-x64/\n-rw-r--r-- user/group 1 2026-01-01 00:00 umb-windows-x64/umb.cmd'));

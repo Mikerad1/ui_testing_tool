@@ -70,7 +70,7 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'Bundled Node SQLite smoke failed' }
           } finally { Pop-Location }
           $archive = Join-Path $env:RUNNER_TEMP 'umb-windows-x64.zip'
-          Compress-Archive -Path "$bundle\*" -DestinationPath $archive -Force
+          Compress-Archive -Path $bundle -DestinationPath $archive -Force
           $checksum = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
           Set-Content -Path "$archive.sha256" -Value "$checksum  umb-windows-x64.zip" -Encoding ascii
       - uses: actions/upload-artifact@v4
