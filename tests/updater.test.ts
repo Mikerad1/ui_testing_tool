@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { copyFile, mkdtemp, mkdir, realpath, rename, rm, writeFile, chmod } from 'node:fs/promises';
+import { copyFile, mkdtemp, mkdir, readFile, realpath, rename, rm, writeFile, chmod } from 'node:fs/promises';
 import { spawn, spawnSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
@@ -35,14 +35,44 @@ function response(data: unknown, ok = true): Response {
   return new Response(typeof data === 'string' ? data : JSON.stringify(data), { status: ok ? 200 : 500 });
 }
 function release(tag: string, assets: unknown[] = []) { return { tag_name: tag, draft: false, prerelease: false, assets }; }
-function runWindowsBatch(batchFile: string, cwd: string) {
-  return spawnSync('cmd.exe', ['/d', '/c', '""%UMB_TEST_BATCH%""'], {
-    cwd, encoding: 'utf8', env: { ...process.env, UMB_TEST_BATCH: batchFile },
-  });
+async function runWindowsBatch(batchFile: string, callerCwd: string) {
+  const runnerDir = await mkdtemp(path.join(path.dirname(batchFile), '.umb-test-runner-'));
+  const runner = path.join(runnerDir, 'invoke.cmd');
+  try {
+    await writeFile(runner, '@echo off\r\npushd "%UMB_TEST_CALLER_CWD%"\r\nif errorlevel 1 exit /b 1\r\ncall "%UMB_TEST_BATCH%"\r\nset "UMB_TEST_EXIT=%ERRORLEVEL%"\r\npopd\r\nexit /b %UMB_TEST_EXIT%\r\n');
+    return spawnSync('powershell.exe', [
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', '& $env:UMB_TEST_RUNNER; exit $LASTEXITCODE',
+    ], {
+      cwd: path.dirname(batchFile), encoding: 'utf8',
+      env: { ...process.env, UMB_TEST_BATCH: batchFile, UMB_TEST_CALLER_CWD: callerCwd, UMB_TEST_RUNNER: runner },
+    });
+  } finally { await rm(runnerDir, { recursive: true, force: true }); }
+}
+function windowsBatchDiagnostics(result: ReturnType<typeof spawnSync>, batchFile: string, callerCwd: string): string {
+  return `batch: ${batchFile}\nrequested caller CWD: ${callerCwd}\nrunner status: ${result.status}${result.error ? `; ${result.error.message}` : ''}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`;
 }
 async function canonicalWindowsPath(value: string): Promise<string> {
   return (await realpath(value.trim())).toLowerCase();
 }
+
+test('Windows batch runner handles spaced paths, caller CWD, and exit status', { skip: process.platform !== 'win32' }, async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'umb batch runner smoke '));
+  const callerCwd = path.join(root, 'caller cwd with spaces');
+  const batchFile = path.join(root, 'batch file with spaces.cmd');
+  const marker = path.join(root, 'entered marker.txt'), cwdRecord = path.join(root, 'batch cwd.txt');
+  await mkdir(callerCwd);
+  await writeFile(batchFile, [
+    '@echo off', `echo entered>"${marker}"`, `cd > "${cwdRecord}"`, 'exit /b 37', '',
+  ].join('\r\n'));
+  try {
+    const runnerCwd = path.dirname(batchFile);
+    assert.ok(path.relative(callerCwd, runnerCwd).startsWith('..'), 'PowerShell runner CWD must stay outside the caller directory');
+    const result = await runWindowsBatch(batchFile, callerCwd);
+    assert.equal(result.status, 37, windowsBatchDiagnostics(result, batchFile, callerCwd));
+    assert.equal(await readFile(marker, 'utf8'), 'entered\r\n');
+    assert.equal(await canonicalWindowsPath(await readFile(cwdRecord, 'utf8')), await canonicalWindowsPath(callerCwd));
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 test('startup check returns a newer stable release for official bundle only', async () => {
   const root = await fixture();
@@ -423,9 +453,11 @@ test('stable launcher preflights a missing payload before starting the CLI', { s
   }
   try {
     const result = process.platform === 'win32'
-      ? runWindowsBatch(path.join(root, 'umb.cmd'), callerCwd)
+      ? await runWindowsBatch(path.join(root, 'umb.cmd'), callerCwd)
       : spawnSync(path.join(root, 'umb'), [], { cwd: callerCwd, encoding: 'utf8' });
-    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.status, 0, process.platform === 'win32'
+      ? windowsBatchDiagnostics(result, path.join(root, 'umb.cmd'), callerCwd)
+      : result.stderr);
     assert.equal(await (await import('node:fs/promises')).readFile(seen, 'utf8'), '0.2.6|true');
     assert.match(result.stdout, /Recovered UMB 0\.2\.6 from payload\.previous/);
     assert.match(result.stdout, /Updated UMB to 0\.3\.0/);
@@ -452,8 +484,8 @@ test('Windows launcher runs the helper after Node exits and preserves the caller
     const launcher = path.join(root, 'umb.cmd');
     const wrapper = path.join(root, 'invoke-launcher.cmd');
     await writeFile(wrapper, `@echo off\r\ncall "${launcher}"\r\nset "UMB_TEST_EXIT=%ERRORLEVEL%"\r\ncd > "${afterCwd}"\r\nexit /b %UMB_TEST_EXIT%\r\n`);
-    const result = runWindowsBatch(wrapper, callerCwd);
-    assert.equal(result.status, 0, result.stderr);
+    const result = await runWindowsBatch(wrapper, callerCwd);
+    assert.equal(result.status, 0, windowsBatchDiagnostics(result, wrapper, callerCwd));
     assert.equal(await canonicalWindowsPath(await (await import('node:fs/promises')).readFile(cwdRecord, 'utf8')), await canonicalWindowsPath(callerCwd));
     assert.equal(await canonicalWindowsPath(await (await import('node:fs/promises')).readFile(helperCwd, 'utf8')), await canonicalWindowsPath(root));
     assert.equal(await canonicalWindowsPath(await (await import('node:fs/promises')).readFile(afterCwd, 'utf8')), await canonicalWindowsPath(callerCwd));
@@ -477,15 +509,15 @@ test('Windows generated release launcher applies requests from payload CWD and p
     await writeFile(path.join(currentPayload, 'dist/src/cli/index.js'), fakeCli);
     const afterCwd = path.join(tempRoot, 'after-cwd.txt'), wrapper = path.join(tempRoot, 'invoke-launcher.cmd');
     await writeFile(wrapper, `@echo off\r\ncall "${path.join(bundleRoot, 'umb.cmd')}"\r\nset "UMB_TEST_EXIT=%ERRORLEVEL%"\r\ncd > "${afterCwd}"\r\nexit /b %UMB_TEST_EXIT%\r\n`);
-    const success = runWindowsBatch(wrapper, callerCwd);
-    assert.equal(success.status, 0, success.stderr);
+    const success = await runWindowsBatch(wrapper, callerCwd);
+    assert.equal(success.status, 0, windowsBatchDiagnostics(success, wrapper, callerCwd));
     assert.equal(await canonicalWindowsPath(await (await import('node:fs/promises')).readFile(cwdRecord, 'utf8')), await canonicalWindowsPath(callerCwd));
     assert.equal(await canonicalWindowsPath(await (await import('node:fs/promises')).readFile(afterCwd, 'utf8')), await canonicalWindowsPath(callerCwd));
     assert.match(success.stdout, /Updated UMB to 98\.7\.6/);
     assert.equal(JSON.parse(await (await import('node:fs/promises')).readFile(path.join(bundleRoot, 'payload/package.json'), 'utf8')).version, '98.7.6');
 
     await writeFile(request, '{broken request');
-    const failure = runWindowsBatch(wrapper, callerCwd);
+    const failure = await runWindowsBatch(wrapper, callerCwd);
     assert.notEqual(failure.status, 0);
     assert.match(failure.stderr, /pending request is malformed/);
     assert.equal(await canonicalWindowsPath(await (await import('node:fs/promises')).readFile(afterCwd, 'utf8')), await canonicalWindowsPath(callerCwd));
