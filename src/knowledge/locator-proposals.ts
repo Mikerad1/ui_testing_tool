@@ -3,6 +3,7 @@ import {lstat,readFile,realpath} from 'node:fs/promises';
 import path from 'node:path';
 import {parse} from 'yaml';
 import type {Store} from '../memory/store.js';
+import type {LearningWriter} from '../memory/learning-writer.js';
 import {validateKnowledge,reconcile} from './reconcile.js';
 
 export type SafeLocator=Record<string,string|boolean> & {by:'role'|'label'|'placeholder'|'test_id'|'text'|'css'};
@@ -32,7 +33,7 @@ export async function readLocatorProposalSource(knowledgeRoot:string,sourcePath:
 
 export function locatorEquals(left:unknown,right:unknown){try{return canonical(normalizeLocator(left))===canonical(normalizeLocator(right));}catch{return false;}}
 
-export async function confirmWorkflowLocatorProposal(store:Store,proposalId:string,knowledgeRoot:string){
+export async function confirmWorkflowLocatorProposal(store:Store,proposalId:string,knowledgeRoot:string,writer:LearningWriter){
  const proposal=store.getWorkflowLocatorProposal(proposalId) as any;if(!proposal)throw Error('Unknown locator proposal');if(proposal.status==='accepted')return{status:'accepted' as const};if(proposal.status!=='pending')return{status:proposal.status as 'rejected'|'stale'};
  const stale=()=>{try{store.setWorkflowLocatorProposalStatus(proposalId,'stale');}catch{}return{status:'stale' as const};};
  try{
@@ -42,6 +43,6 @@ export async function confirmWorkflowLocatorProposal(store:Store,proposalId:stri
   if(source.baselineHash!==proposal.baseline_hash||source.document.id!==proposal.screen_id||!locatorEquals(source.element.locator,JSON.parse(proposal.candidate_locator_json)))return stale();
   const previous=normalizeLocator(JSON.parse(proposal.previous_locator_json)),oldHistory=JSON.parse(proposal.fallback_history_json) as unknown[];
   if(locatorEquals(previous,source.element.locator)||!Array.isArray(source.element.fallback_locators)||!source.element.fallback_locators.some((item:unknown)=>locatorEquals(item,previous))||!oldHistory.every(item=>source.element.fallback_locators.some((current:unknown)=>locatorEquals(current,item))))return stale();
-  await validateKnowledge(knowledgeRoot);await reconcile(knowledgeRoot,store);const verified=await readLocatorProposalSource(knowledgeRoot,proposal.source_path,proposal.screen_id,proposal.element_id),reconciledElement=store.getByTypeKey('ui_element',`screen:${proposal.screen_id}/${proposal.element_id}`) as any;if(verified.baselineHash!==proposal.baseline_hash||!locatorEquals(verified.element.locator,JSON.parse(proposal.candidate_locator_json))||!verified.element.fallback_locators?.some((item:unknown)=>locatorEquals(item,previous))||!reconciledElement||!locatorEquals(JSON.parse(reconciledElement.attributes_json).locator,JSON.parse(proposal.candidate_locator_json)))return stale();store.setWorkflowLocatorProposalStatus(proposalId,'accepted');return{status:'accepted' as const};
+   await validateKnowledge(knowledgeRoot);await reconcile(knowledgeRoot,store,writer);const verified=await readLocatorProposalSource(knowledgeRoot,proposal.source_path,proposal.screen_id,proposal.element_id),reconciledElement=store.getByTypeKey('ui_element',`screen:${proposal.screen_id}/${proposal.element_id}`) as any;if(verified.baselineHash!==proposal.baseline_hash||!locatorEquals(verified.element.locator,JSON.parse(proposal.candidate_locator_json))||!verified.element.fallback_locators?.some((item:unknown)=>locatorEquals(item,previous))||!reconciledElement||!locatorEquals(JSON.parse(reconciledElement.attributes_json).locator,JSON.parse(proposal.candidate_locator_json)))return stale();store.setWorkflowLocatorProposalStatus(proposalId,'accepted');return{status:'accepted' as const};
  }catch{return stale();}
 }

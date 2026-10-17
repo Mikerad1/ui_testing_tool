@@ -10,6 +10,7 @@ import { z } from 'zod';
 import type { Config } from '../config/config.js';
 import { safePath } from '../config/config.js';
 import type { Store } from '../memory/store.js';
+import type { LearningWriter } from '../memory/learning-writer.js';
 import type { BrowserController } from '../browser/controller.js';
 import { runWorkflow } from '../workflow/runner.js';
 import { reconcile } from '../knowledge/reconcile.js';
@@ -36,7 +37,7 @@ async function readJsonBody(req: IncomingMessage): Promise<unknown> {
 }
 function reply(res: ServerResponse, status: number, message: string) { if (!res.headersSent) { res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' }); res.end(message); } }
 
-export type ServeOptions={stdio?:boolean;idleTimeoutMs?:number;applicationReady?:boolean;approver?:(prompt:string)=>Promise<boolean>;knowledgeRoot?:string;projectRoot?:string;watchKnowledge?:boolean;watcherFactory?:(root:string,listener:KnowledgeWatchEvent)=>KnowledgeWatchHandle;watchDebounceMs?:number};
+export type ServeOptions={stdio?:boolean;idleTimeoutMs?:number;applicationReady?:boolean;approver?:(prompt:string)=>Promise<boolean>;knowledgeRoot?:string;projectRoot?:string;learningWriter?:LearningWriter;watchKnowledge?:boolean;watcherFactory?:(root:string,listener:KnowledgeWatchEvent)=>KnowledgeWatchHandle;watchDebounceMs?:number};
 export async function serve(config: Config, store: Store, browser: BrowserController, options: ServeOptions = {}) {
   const token = !options.stdio && config.server.auth.mode === 'token' ? process.env[config.server.auth.token_env] : undefined;
   if (!options.stdio && config.server.auth.mode === 'token' && !token) throw Error(`Set ${config.server.auth.token_env} before starting server`);
@@ -46,7 +47,7 @@ export async function serve(config: Config, store: Store, browser: BrowserContro
   const knowledgeRoot=options.knowledgeRoot??path.resolve(config.knowledge.path);
   const idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
   if (!Number.isFinite(idleTimeoutMs) || idleTimeoutMs < 1) throw Error('idleTimeoutMs must be a positive finite number');
-  let closing = false, pendingInitializers = 0, initializationDrain: (() => void) | undefined, activePosts=0,postDrain:(()=>void)|undefined;
+  let closing = false, pendingInitializers = 0, initializationDrain: (() => void) | undefined, activePosts=0,postDrain:(()=>void)|undefined,activeToolCalls=0,toolDrain:(()=>void)|undefined;
   let browserQueue: Promise<void> = Promise.resolve();
   let applicationReady = options.applicationReady ?? true;
   const assertApplicationReady = () => { if (!applicationReady) throw Error('Application is not ready. Start the configured application, then retry browser_refresh.'); };
@@ -82,14 +83,18 @@ export async function serve(config: Config, store: Store, browser: BrowserContro
         const envelope = { ok: false, project_id: config.project.id, session_id: session.id, error: { code: 'invalid_input', message: text }, state_revision: browser.revision };
         return { ...result, isError: true, structuredContent: envelope, content: [{ type: 'text', text: JSON.stringify(envelope) }] };
       });
-    const invokeTool = (fn: (args: any) => unknown | Promise<unknown>) => async (args: any) => {
+     const invokeTool = (fn: (args: any) => unknown | Promise<unknown>) => async (args: any) => {
+        activeToolCalls++;
         let result: any;
         try { result = { ok: true, project_id: config.project.id, session_id: session.id, data: await fn(args), state_revision: browser.revision }; }
         catch (error) {
           const message = sanitizeErrorMessage(error instanceof Error ? error.message : 'Operation failed');
           const code = /application is not ready|application is not reachable/i.test(message)?'application_not_ready':/revision_conflict/i.test(message)?'revision_conflict':/approval_denied/i.test(message)?'approval_denied':/revision conflict/i.test(message) ? 'revision_conflict' : /expired snapshot reference|stale ref/i.test(message) ? 'stale_ref' : /ambiguous|matches: 0|no match/i.test(message) ? 'ambiguous_or_missing_target' : /origin not allowed|navigation.*denied/i.test(message) ? 'navigation_denied' : /timeout|timed out/i.test(message) ? 'timeout' : /invalid|must be|requires/i.test(message) ? 'invalid_input' : 'internal';
           result = { ok: false, project_id: config.project.id, session_id: session.id, error: { code, message }, state_revision: browser.revision };
-          return { isError: true, structuredContent: result, content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
+           return { isError: true, structuredContent: result, content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
+        } finally {
+          activeToolCalls--;
+          if (activeToolCalls === 0) { toolDrain?.(); toolDrain = undefined; }
         }
         return { structuredContent: result, content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
       };
@@ -125,14 +130,14 @@ export async function serve(config: Config, store: Store, browser: BrowserContro
     browserTool('browser_tabs','List open tabs',{},()=>browser.listTabs());browserTool('browser_tab_select','Select a tab',{id:z.string().max(100)},a=>browser.selectTab(a.id));browserTool('browser_tab_create','Create a tab',{url:z.string().max(4096).optional()},a=>browser.createTab(a.url));browserTool('browser_tab_close','Close a tab',{id:z.string().max(100).optional()},a=>browser.closeTab(a.id));browserTool('browser_back','Go back',{},()=>browser.back());browserTool('browser_forward','Go forward',{},()=>browser.forward());
     tool('memory_context', 'Project knowledge context', {}, () => store.context()); tool('memory_search', 'Search knowledge', { query: z.string().max(200) }, a => store.search(a.query));
     tool('memory_get_node', 'Read knowledge node', { id: z.string().max(100) }, a => store.get(a.id));
-    tool('memory_propose', 'Propose a knowledge node', { type: z.string().max(50), stable_key: z.string().max(200), display_name: z.string().max(500), attributes: z.record(z.unknown()).optional() }, a => { if (JSON.stringify(a.attributes ?? {}).length > 16000) throw Error('Attributes too large'); return store.propose(a); });
-     tool('memory_verify', 'Verify proposed knowledge using passing assertion evidence', { id: z.string().max(100), run_id: z.string().max(100) }, a => ({ verified: store.verify(a.id,a.run_id) }));
-      tool('test_assert','Evaluate and record a safe browser assertion',{condition:z.enum(['visible','hidden','enabled','text','url_matches','count','value','present']),target:target.optional(),expected:z.union([z.string().max(1000),z.number()]).optional(),match:z.enum(['contains','exact']).optional(),timeout_ms:z.number().int().min(1).max(30000).optional(),subject_node_id:z.string().min(1).max(100).optional()},a=>runBrowser(async()=>{assertApplicationReady();const subject=a.subject_node_id??store.applicationSubject()?.id;if(!subject||!store.get(subject))throw Error('Assertion subject must belong to this project');const result=await (browser as any).assertCondition(a.condition,a.target,a.expected,a.timeout_ms??5000,a.match??'contains');let artifact:string|undefined,capture:{status:'captured'|'failed';code?:string}|undefined;let safeSummary:Record<string,number>={};let actions:unknown[]=[];if(!result.passed){try{artifact=(await browser.takeScreenshot(false)).artifactPath;capture={status:'captured'};}catch(error){capture={status:'failed',code:/quota|limit/i.test(String(error))?'quota_exceeded':'capture_failed'};}try{const snapshot=await browser.snapshot({mode:'interactive'}) as any;for(const element of snapshot.elements??[])safeSummary[element.role??'unknown']=(safeSummary[element.role??'unknown']??0)+1;}catch{}actions=(browser as any).actionSequence(30).map((x:any)=>({action:x.action,at:x.at,target_by:x.target_by,revision:x.revision}));}const record=store.recordAssertion({session_id:session.id,subject_node_id:subject,passed:result.passed,observed_count:result.observedCount,artifact_ref:artifact,actions});const evidence=record.evidence as any;if(!result.passed){const metadata=JSON.parse(evidence.metadata_json);metadata.role_counts=safeSummary;metadata.capture=capture;store.db.prepare('UPDATE evidence SET metadata_json=? WHERE project_id=? AND id=?').run(JSON.stringify(metadata).slice(0,4096),config.project.id,evidence.id);}return{status:result.passed?'PASS':'FAIL',run_id:record.id,passed:result.passed,observed_count:result.observedCount,capture,evidence_refs:[{id:evidence.id,artifact_ref:artifact??null}]};}));
+     tool('memory_propose', 'Propose a knowledge node', { type: z.string().max(50), stable_key: z.string().max(200), display_name: z.string().max(500), attributes: z.record(z.unknown()).optional() }, a => { if (JSON.stringify(a.attributes ?? {}).length > 16000) throw Error('Attributes too large'); if(!options.learningWriter)throw Error('NLP sidecar request failed'); return options.learningWriter.propose(a); });
+      tool('memory_verify', 'Verify proposed knowledge using passing assertion evidence', { id: z.string().max(100), run_id: z.string().max(100) }, async a => { if(!options.learningWriter)throw Error('NLP sidecar request failed');return { verified: await options.learningWriter.verify(a.id,a.run_id) }; });
+      tool('test_assert','Evaluate and record a safe browser assertion',{condition:z.enum(['visible','hidden','enabled','text','url_matches','count','value','present']),target:target.optional(),expected:z.union([z.string().max(1000),z.number()]).optional(),match:z.enum(['contains','exact']).optional(),timeout_ms:z.number().int().min(1).max(30000).optional(),subject_node_id:z.string().min(1).max(100).optional()},a=>runBrowser(async()=>{assertApplicationReady();const subject=a.subject_node_id??store.applicationSubject()?.id;if(!subject||!store.get(subject))throw Error('Assertion subject must belong to this project');const result=await (browser as any).assertCondition(a.condition,a.target,a.expected,a.timeout_ms??5000,a.match??'contains');let artifact:string|undefined,capture:{status:'captured'|'failed';code?:'quota_exceeded'|'capture_failed'}|undefined;let safeSummary:Record<string,number>={};let actions:unknown[]=[];if(!result.passed){try{artifact=(await browser.takeScreenshot(false)).artifactPath;capture={status:'captured'};}catch(error){capture={status:'failed',code:/quota|limit/i.test(String(error))?'quota_exceeded':'capture_failed'};}try{const snapshot=await browser.snapshot({mode:'interactive'}) as any;for(const element of snapshot.elements??[])safeSummary[element.role??'unknown']=(safeSummary[element.role??'unknown']??0)+1;}catch{}actions=(browser as any).actionSequence(30).map((x:any)=>({action:x.action,at:x.at,target_by:x.target_by,revision:x.revision}));}const record=store.recordAssertion({session_id:session.id,subject_node_id:subject,passed:result.passed,observed_count:result.observedCount,artifact_ref:artifact,actions});const evidence=record.evidence as any;if(!result.passed)store.addAssertionDiagnostics({runId:record.id,evidenceId:evidence.id,roleCounts:safeSummary,capture:capture!});return{status:result.passed?'PASS':'FAIL',run_id:record.id,passed:result.passed,observed_count:result.observedCount,capture,evidence_refs:[{id:evidence.id,artifact_ref:artifact??null}]};}));
      tool('test_report','Read a project-scoped safe test report',{run_id:z.string().min(1).max(100)},a=>store.getRunReport(a.run_id));
-    tool('memory_add_edge','Add a project-scoped relationship',{from_id:z.string().min(1).max(100),to_id:z.string().min(1).max(100),relation:z.string().min(1).max(100),attributes:z.record(z.unknown()).optional()},a=>{if(JSON.stringify(a.attributes??{}).length>4096)throw Error('Attributes too large');return store.addEdge(a.from_id,a.to_id,a.relation,a.attributes);});
+     tool('memory_add_edge','Add a project-scoped relationship',{from_id:z.string().min(1).max(100),to_id:z.string().min(1).max(100),relation:z.string().min(1).max(100),attributes:z.record(z.unknown()).optional()},a=>{if(JSON.stringify(a.attributes??{}).length>4096)throw Error('Attributes too large');if(!options.learningWriter)throw Error('NLP sidecar request failed');return options.learningWriter.addEdge(a);});
     tool('memory_neighbors','List neighboring project nodes',{id:z.string().min(1).max(100),limit:z.number().int().min(1).max(200).optional()},a=>store.neighbors(a.id,a.limit));
     tool('memory_path','Find a bounded project graph path',{from_id:z.string().min(1).max(100),to_id:z.string().min(1).max(100),max_depth:z.number().int().min(0).max(10).optional()},a=>store.path(a.from_id,a.to_id,a.max_depth));
-    tool('memory_supersede','Supersede a project node',{old_id:z.string().min(1).max(100),new_id:z.string().min(1).max(100)},a=>({superseded:store.supersede(a.old_id,a.new_id)}));
+     tool('memory_supersede','Supersede a project node',{old_id:z.string().min(1).max(100),new_id:z.string().min(1).max(100)},async a=>{if(!options.learningWriter)throw Error('NLP sidecar request failed');return{superseded:await options.learningWriter.supersede(a.old_id,a.new_id)};});
      tool('memory_record_outcome','Record a bounded run outcome for a node',{subject_node_id:z.string().min(1).max(100),outcome:z.enum(['passed','failed','observed','skipped']),metadata:z.object({environment:z.enum(['local','staging','production']).optional(),browser:z.enum(['chromium','firefox','webkit']).optional(),duration_ms:z.number().int().min(0).max(10000000).optional(),attempt:z.number().int().min(1).max(100).optional()}).strict().optional(),artifact_ref:z.string().max(1000).optional()},a=>{const metadata=a.metadata??{};const runId=store.createRun();try{const evidence=store.addEvidence({run_id:runId,subject_node_id:a.subject_node_id,kind:'outcome',outcome:a.outcome,metadata,artifact_ref:a.artifact_ref});store.finishRun(runId);return{run_id:runId,evidence};}catch(error){store.finishRun(runId,'failed');throw error;}});
     tool('memory_stats','Project memory statistics',{},()=>store.stats());
     tool('memory_conflicts','List bounded project memory conflicts',{limit:z.number().int().min(1).max(200).optional()},()=>store.listConflicts().slice(0,200));
@@ -161,9 +166,11 @@ export async function serve(config: Config, store: Store, browser: BrowserContro
       if (stopped) return;
       stopped = true;
       closing = true;
+      await transport.close();
+      if (activeToolCalls > 0) await new Promise<void>(resolve => { toolDrain = resolve; });
+      for (;;) { const queued = browserQueue; await queued; if (queued === browserQueue) break; }
       sessions.delete(session.id);
       session.closed = true;
-      await transport.close();
       await session.server.close();
     };
   }
@@ -222,7 +229,7 @@ export async function serve(config: Config, store: Store, browser: BrowserContro
   });
   await new Promise<void>((resolve, reject) => { http.once('error', reject); http.listen(config.server.port, config.server.host, resolve); });
   let knowledgeWatcher:ReturnType<typeof startKnowledgeWatcher>|undefined;
-  if(options.watchKnowledge){try{const watcherRoot=await safePath(options.projectRoot??process.cwd(),knowledgeRoot);knowledgeWatcher=startKnowledgeWatcher(watcherRoot,async()=>{if(closing)return;await runBrowser(async()=>{try{await reconcile(watcherRoot,store);}catch{console.error('Knowledge reload failed; the last valid graph remains active.');}});},{factory:options.watcherFactory,debounceMs:options.watchDebounceMs,onError:message=>console.error(message)});}catch{closing=true;await new Promise<void>(resolve=>http.close(()=>resolve()));throw Error('Knowledge watcher could not start safely');}}
+  if(options.watchKnowledge){try{const watcherRoot=await safePath(options.projectRoot??process.cwd(),knowledgeRoot);knowledgeWatcher=startKnowledgeWatcher(watcherRoot,async()=>{if(closing)return;await runBrowser(async()=>{try{if(!options.learningWriter)throw new Error('NLP sidecar request failed');await reconcile(watcherRoot,store,options.learningWriter);}catch{console.error('Knowledge reload failed; the last valid graph remains active.');}});},{factory:options.watcherFactory,debounceMs:options.watchDebounceMs,onError:message=>console.error(message)});}catch{closing=true;await new Promise<void>(resolve=>http.close(()=>resolve()));throw Error('Knowledge watcher could not start safely');}}
   return async () => {
     closing = true;
     const listenerClosed = new Promise<void>((resolve, reject) => http.close(e => e ? reject(e) : resolve()));

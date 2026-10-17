@@ -3,7 +3,7 @@ import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { safePath as safeProjectPath } from '../config/config.js';
 import { normalizeLocator } from '../knowledge/locator-proposals.js';
-import { parseWorkflowDocument, type WorkflowAssertion, type WorkflowDocument, type WorkflowStep, type WorkflowTarget } from './contract.js';
+import { parseStoredWorkflowDocument, type WorkflowAssertion, type WorkflowDocument, type WorkflowStep, type WorkflowTarget } from './contract.js';
 
 const literal=(value:unknown)=>JSON.stringify(value);
 const screenKey=(value:string)=>value.replace(/^screen:/,'');
@@ -102,7 +102,7 @@ function screenRoute(store:Store,ref:string):string|undefined {
 export function generateWorkflowSpec(store:Store,workflowId:string,baseUrlValue:string,allowedOrigins:string[]=[]):string {
  const node=store.currentYamlWorkflow(workflowId);if(!node)throw Error('Workflow must be active, conflict-free YAML');
  if(!store.hasWorkflowExportVerification(workflowId))throw Error('Workflow has no verification for its current YAML content hash');
- let workflow:WorkflowDocument;try{workflow=parseWorkflowDocument(JSON.parse(node.attributes_json));}catch{throw Error('Current workflow YAML is invalid');}
+  let workflow:WorkflowDocument;try{workflow=parseStoredWorkflowDocument(JSON.parse(node.attributes_json));}catch{throw Error('Current workflow YAML is invalid');}
  if(workflow.id!==workflowId)throw Error('Workflow identity mismatch');
  if(workflow.requires)throw Error('Role/environment workflow requirements are unsupported by static export');
  const base=baseUrl(baseUrlValue);

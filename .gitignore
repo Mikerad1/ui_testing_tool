@@ -6,3 +6,5 @@ dist/
 coverage/
 .workflow-export-test-*/
 .workflow-origin-export-*/
+__pycache__/
+*.py[cod]

@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {Store} from '../src/memory/store.js';
 import {reconcile} from '../src/knowledge/reconcile.js';
+import {runFixtureSql,testWriter} from './helpers/learning.js';
 
 const yaml=(value:unknown)=>JSON.stringify(value);
 async function fixture(){
@@ -28,9 +29,9 @@ async function fixture(){
     {id:'rules-flow',name:'Route rules reports workflow',start_screen:'reports',steps:[{id:'route-rules-step',action:'navigate',path:'/reports'}]},
   ];
   for(const [index,doc] of [...docs,...workflows.map(w=>({schema_version:1,kind:'workflow',...w}))].entries())await writeFile(path.join(knowledge,`${String(index).padStart(2,'0')}.yaml`),yaml(doc));
-  const store=new Store(path.join(root,'memory.sqlite'),'recall-project');await reconcile(knowledge,store);
+  const databaseFilename=path.join(root,'memory.sqlite'),store=new Store(databaseFilename,'recall-project');await reconcile(knowledge, store, testWriter(store));
   const close=()=>{store.close();return rm(root,{recursive:true,force:true});};
-  return{root,knowledge,store,workflows,close};
+  return{root,knowledge,databaseFilename,store,workflows,close};
 }
 test('recall finds direct and directed multi-hop paths but not reverse-only/unrelated routes',async()=>{
   const f=await fixture();try{
@@ -39,12 +40,12 @@ test('recall finds direct and directed multi-hop paths but not reverse-only/unre
     assert.deepEqual(byId.get('direct-flow')?.directed_path?.screen_ids,['home','login']);
     const multi=f.store.recallWorkflowCandidates({goal:'account journey',currentUrl:'http://127.0.0.1:3000/home?secret=private'}).find((x:any)=>x.workflow_id==='multi-flow');assert.ok(multi);assert.deepEqual(multi.directed_path?.screen_ids,['home','login','account']);assert.equal(multi.current_route_pattern,'/home');
     const viaRule=f.store.recallWorkflowCandidates({goal:'route rules reports',currentUrl:'http://127.0.0.1:3000/home'}).find((x:any)=>x.workflow_id==='rules-flow');assert.deepEqual(viaRule?.directed_path?.screen_ids,['home','reports']);
-    f.store.db.prepare("UPDATE nodes SET verification_status='stale' WHERE project_id=? AND type='workflow'").run(f.store.projectId);
-    const reverseNode=f.store.getByTypeKey('workflow','reverse-flow') as any;f.store.db.prepare("UPDATE nodes SET verification_status='proposed' WHERE project_id=? AND id=?").run(f.store.projectId,reverseNode.id);
+    runFixtureSql(f.databaseFilename,"UPDATE nodes SET verification_status='stale' WHERE project_id=? AND type='workflow'",f.store.projectId);
+    const reverseNode=f.store.getByTypeKey('workflow','reverse-flow') as any;runFixtureSql(f.databaseFilename,"UPDATE nodes SET verification_status='proposed' WHERE project_id=? AND id=?",f.store.projectId,reverseNode.id);
     const reverse=f.store.recallWorkflowCandidates({goal:'reverse home',currentUrl:'http://127.0.0.1:3000/login'}).find((x:any)=>x.workflow_id==='reverse-flow');assert.equal(reverse?.directed_path,null);
     const againstRule=f.store.recallWorkflowCandidates({goal:'reverse-flow',currentUrl:'http://127.0.0.1:3000/reports'}).find((x:any)=>x.workflow_id==='reverse-flow');assert.equal(againstRule?.directed_path,null);
-    f.store.db.prepare("UPDATE nodes SET verification_status='stale' WHERE project_id=? AND type='workflow'").run(f.store.projectId);
-    const unrelatedNode=f.store.getByTypeKey('workflow','unrelated-flow') as any;f.store.db.prepare("UPDATE nodes SET verification_status='proposed' WHERE project_id=? AND id=?").run(f.store.projectId,unrelatedNode.id);
+    runFixtureSql(f.databaseFilename,"UPDATE nodes SET verification_status='stale' WHERE project_id=? AND type='workflow'",f.store.projectId);
+    const unrelatedNode=f.store.getByTypeKey('workflow','unrelated-flow') as any;runFixtureSql(f.databaseFilename,"UPDATE nodes SET verification_status='proposed' WHERE project_id=? AND id=?",f.store.projectId,unrelatedNode.id);
     const unrelated=f.store.recallWorkflowCandidates({goal:'unrelated report',currentUrl:'http://127.0.0.1:3000/reports'}).find((x:any)=>x.workflow_id==='unrelated-flow');assert.equal(unrelated?.directed_path,null);
   }finally{await f.close();}
 });
@@ -72,7 +73,7 @@ test('low uncertainty requires verified success and current-screen path evidence
   const f=await fixture();try{
     const workflow=f.store.getByTypeKey('workflow','direct-flow') as any,run=f.store.createRun('session',workflow.id);
     f.store.addEvidence({run_id:run,subject_node_id:workflow.id,kind:'workflow',outcome:'passed'});f.store.finishRun(run,'passed');
-    f.store.db.prepare("UPDATE nodes SET verification_status='verified' WHERE project_id=? AND id=?").run(f.store.projectId,workflow.id);
+    runFixtureSql(f.databaseFilename,"UPDATE nodes SET verification_status='verified' WHERE project_id=? AND id=?",f.store.projectId,workflow.id);
     const direct=f.store.recallWorkflowCandidates({goal:'direct-flow',currentUrl:'http://127.0.0.1:3000/login',role:'member',environment:'staging'}).find((x:any)=>x.workflow_id==='direct-flow');assert.equal(direct?.uncertainty,'low');
     const disconnected=f.store.recallWorkflowCandidates({goal:'direct-flow',currentUrl:'http://127.0.0.1:3000/reports',role:'member',environment:'staging'}).find((x:any)=>x.workflow_id==='direct-flow');assert.equal(disconnected?.uncertainty,'high');
   }finally{await f.close();}
@@ -82,19 +83,19 @@ test('recall output is project-scoped and excludes secret payloads and raw curre
     const serialized=JSON.stringify(f.store.recallWorkflowCandidates({goal:'PRIVATE_VALUE_SENTINEL',currentUrl:'http://127.0.0.1:3000/home?secret=PRIVATE_URL_SENTINEL'}));
     for(const secret of ['PRIVATE_VALUE_SENTINEL','PRIVATE_EXPECTED_SENTINEL','PRIVATE_LOCATOR_SENTINEL','PRIVATE_URL_SENTINEL'])assert.equal(serialized.includes(secret),false);
     assert.equal(serialized.includes('PRIVATE_URL_SENTINEL'),false);
-    const other=new Store(path.join(f.root,'memory.sqlite'),'another-project');try{await reconcile(f.knowledge,other);assert.notEqual(other.recallWorkflowCandidates({goal:'account',currentUrl:'http://127.0.0.1:3000/home'}).length,0);assert.equal(other.recallWorkflowCandidates({goal:'direct submit account',currentUrl:'http://127.0.0.1:3000/login'})[0].outcome_counts.passed,0);}finally{other.close();}
+    const other=new Store(path.join(f.root,'memory.sqlite'),'another-project');try{await reconcile(f.knowledge, other, testWriter(other));assert.notEqual(other.recallWorkflowCandidates({goal:'account',currentUrl:'http://127.0.0.1:3000/home'}).length,0);assert.equal(other.recallWorkflowCandidates({goal:'direct submit account',currentUrl:'http://127.0.0.1:3000/login'})[0].outcome_counts.passed,0);}finally{other.close();}
   }finally{await f.close();}
 });
 test('candidate provenance is a marker and never exposes the YAML source path',async()=>{
   const f=await fixture();try{
-    await rename(path.join(f.knowledge,'07.yaml'),path.join(f.knowledge,'UNIQUE_SOURCE_PATH_SENTINEL.yaml'));await reconcile(f.knowledge,f.store);
+    await rename(path.join(f.knowledge,'07.yaml'),path.join(f.knowledge,'UNIQUE_SOURCE_PATH_SENTINEL.yaml'));await reconcile(f.knowledge, f.store, testWriter(f.store));
     const result=f.store.recallWorkflowCandidates({goal:'direct-flow',currentUrl:'http://127.0.0.1:3000/login'});const serialized=JSON.stringify(result);
     assert.equal(result[0]?.source,'yaml');assert.equal(serialized.includes('source_path'),false);assert.equal(serialized.includes('UNIQUE_SOURCE_PATH_SENTINEL'),false);
   }finally{await f.close();}
 });
 test('uncertainty is low only for verified workflows with successful runs and known required context',async()=>{
   const f=await fixture();try{
-    const workflow=f.store.getByTypeKey('workflow','direct-flow') as any;f.store.db.prepare("UPDATE nodes SET verification_status='verified' WHERE project_id=? AND id=?").run(f.store.projectId,workflow.id);
+   const workflow=f.store.getByTypeKey('workflow','direct-flow') as any;runFixtureSql(f.databaseFilename,"UPDATE nodes SET verification_status='verified' WHERE project_id=? AND id=?",f.store.projectId,workflow.id);
     const run=f.store.createRun('session','direct-flow');f.store.addEvidence({run_id:run,subject_node_id:workflow.id,kind:'workflow',outcome:'passed'});f.store.finishRun(run,'passed');
     const result=f.store.recallWorkflowCandidates({goal:'direct-flow',currentUrl:'http://127.0.0.1:3000/login',role:'role:member',environment:'staging'}).find((x:any)=>x.workflow_id==='direct-flow');assert.equal(result?.uncertainty,'low');
   }finally{await f.close();}

@@ -100,10 +100,14 @@ test('restored copy opens through Store and migrates normally', async () => {
   const backupPath = path.join(dir, 'backup.sqlite');
   const restoredPath = path.join(dir, 'restored.sqlite');
   let store: Store | undefined;
+  let fixtureDb: Database.Database | undefined;
   let restoredStore: Store | undefined;
   try {
     store = new Store(sourcePath, 'backup-project');
-    store.db.prepare("INSERT INTO nodes(id,project_id,type,stable_key,canonical_key,display_name,attributes_json,origin,verification_status,confidence) VALUES('preserved','backup-project','screen','preserved','preserved','Preserved','{}','human','verified',1)").run();
+    fixtureDb = new Database(sourcePath);
+    fixtureDb.prepare("INSERT INTO nodes(id,project_id,type,stable_key,canonical_key,display_name,attributes_json,origin,verification_status,confidence) VALUES('preserved','backup-project','screen','preserved','preserved','Preserved','{}','human','verified',1)").run();
+    fixtureDb.close();
+    fixtureDb = undefined;
     await backupSqlite(sourcePath, backupPath);
     await restoreSqlite(backupPath, restoredPath);
     restoredStore = new Store(restoredPath, 'backup-project');
@@ -111,6 +115,7 @@ test('restored copy opens through Store and migrates normally', async () => {
     assert.equal((restoredStore.db.prepare('SELECT max(version) version FROM schema_migrations').get() as { version: number }).version, 10);
     assert.deepEqual(restoredStore.db.pragma('foreign_key_check'), []);
   } finally {
+    fixtureDb?.close();
     restoredStore?.close();
     store?.close();
     await rm(dir, { recursive: true, force: true });

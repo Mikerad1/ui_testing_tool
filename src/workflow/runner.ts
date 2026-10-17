@@ -1,7 +1,7 @@
 import type { ElementHandle } from 'playwright';
 import type { Store } from '../memory/store.js';
 import type { BrowserController } from '../browser/controller.js';
-import { parseWorkflowDocument, resolveWorkflowVariables, type WorkflowAssertion, type WorkflowDocument, type WorkflowStep, type WorkflowTarget } from './contract.js';
+import { parseStoredWorkflowDocument, resolveWorkflowVariables, type WorkflowAssertion, type WorkflowDocument, type WorkflowStep, type WorkflowTarget } from './contract.js';
 import {locatorEquals,normalizeLocator,readLocatorProposalSource} from '../knowledge/locator-proposals.js';
 
 const RUN_LIMIT_MS=5*60_000;
@@ -24,7 +24,7 @@ async function runWorkflowInner(options:RunnerOptions){
   const workflowNode=(typeof store.currentYamlWorkflow==='function'?store.currentYamlWorkflow(workflowId):store.getByTypeKey('workflow',workflowId)) as any;
   if(!workflowNode||workflowNode.origin!=='yaml')return earlyFailure('precondition_failed');
   let workflow:WorkflowDocument;
-  try{workflow=parseWorkflowDocument(JSON.parse(workflowNode.attributes_json));}catch{return earlyFailure('precondition_failed');}
+  try{workflow=parseStoredWorkflowDocument(JSON.parse(workflowNode.attributes_json));}catch{return earlyFailure('precondition_failed');}
   const metadata:Record<string,unknown>={...(options.role?{role:options.role}:{}),...(options.environment?{environment:options.environment}:{})};const boundedNames:string[]=[];for(const name of Object.keys(workflow.variables??{})){const candidate=[...boundedNames,name];if(JSON.stringify({...metadata,variable_names:candidate}).length>900)break;boundedNames.push(name);}if(boundedNames.length)metadata.variable_names=boundedNames;
     const workflowSnapshotHash=store.workflowSnapshotHash(workflowId);if(!workflowSnapshotHash)return earlyFailure('precondition_failed');
     if(options.safeOutcome){for(const step of workflow.steps){if(step.action==='fill'||step.action==='type'||step.action==='select'){const match=step.value.match(/^\$\{\{\s*variables\.([A-Z_][A-Z0-9_]*)\s*\}\}$/),declaration=match&&workflow.variables?.[match[1]!];if(!declaration?.from_env||declaration.sensitive!==true)return earlyFailure('precondition_failed');}}}
