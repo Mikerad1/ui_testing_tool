@@ -94,10 +94,11 @@ class PrepareWindowsRuntimeTests(unittest.TestCase):
             output = "pip 25.0 from target\\Lib\\site-packages\\pip (python 3.13)" if "pip" in command else "venv help"
             return SimpleNamespace(returncode=0, stdout=output, stderr="")
 
-        result = prepare.run_python_check(Path("target/python.exe"), ["-m", "pip", "--version"], runner=runner, environment={"PYTHONPATH": "hostile"})
+        python = Path("target") / "python.exe"
+        result = prepare.run_python_check(python, ["-m", "pip", "--version"], runner=runner, environment={"PYTHONPATH": "hostile"})
         self.assertTrue(result.startswith("pip 25.0"))
         self.assertNotIn("PYTHONPATH", calls[0][1]["env"])
-        self.assertEqual(calls[0][0], ["target/python.exe", "-m", "pip", "--version"])
+        self.assertEqual(calls[0][0], [str(python), "-m", "pip", "--version"])
 
 
 if __name__ == "__main__":

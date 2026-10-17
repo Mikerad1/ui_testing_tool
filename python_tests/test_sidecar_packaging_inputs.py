@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import re
 import unittest
@@ -5,6 +6,11 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+BUILD_SCRIPT = ROOT / "scripts/build-memory-sidecar.py"
+BUILD_SPEC = importlib.util.spec_from_file_location("build_memory_sidecar", BUILD_SCRIPT)
+build_sidecar = importlib.util.module_from_spec(BUILD_SPEC)
+assert BUILD_SPEC and BUILD_SPEC.loader
+BUILD_SPEC.loader.exec_module(build_sidecar)
 
 
 class SidecarPackagingInputTests(unittest.TestCase):
@@ -37,6 +43,31 @@ class SidecarPackagingInputTests(unittest.TestCase):
         build = (ROOT / "scripts/build-memory-sidecar.py").read_text(encoding="utf-8")
         self.assertIn('"--require-hashes"', build)
         self.assertIn('"en-core-web-sm": "3.8.0"', build)
+
+    def test_model_package_identity_is_not_inferred_from_pipeline_metadata_name(self):
+        build_source = BUILD_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("'model_package':en_core_web_sm.__name__", build_source)
+        self.assertIn("'model_metadata_name':n.meta.get('name')", build_source)
+        self.assertNotIn('m.get("name") == "en_core_web_sm"', build_source)
+        metadata = {
+            "python": "3.13.16",
+            "spacy": "3.8.9",
+            "model_package": "en_core_web_sm",
+            "model_distribution_version": "3.8.0",
+            # spaCy's loaded pipeline reports core_web_sm here; it is not the import package name.
+            "model_metadata_name": "core_web_sm",
+            "model_metadata_version": "3.8.0",
+            "distributions": {
+                "spacy": "3.8.9",
+                "en-core-web-sm": "3.8.0",
+                "pyinstaller": "6.22.3",
+                "pyinstaller-hooks-contrib": "2026.8",
+            },
+        }
+        build_sidecar.validate_runtime_metadata(metadata)
+        metadata["model_package"] = "core_web_sm"
+        with self.assertRaisesRegex(SystemExit, "model package=.*expected en_core_web_sm"):
+            build_sidecar.validate_runtime_metadata(metadata)
 
 
 if __name__ == "__main__":

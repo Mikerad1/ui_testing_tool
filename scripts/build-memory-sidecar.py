@@ -21,6 +21,30 @@ EXPECTED = {
 }
 
 
+def validate_runtime_metadata(metadata: dict[str, object]) -> None:
+    expected_distributions = EXPECTED
+    errors = []
+    if metadata.get("python") != "3.13.16":
+        errors.append(f"python={metadata.get('python')!r}, expected 3.13.16")
+    if metadata.get("spacy") != EXPECTED["spacy"]:
+        errors.append(f"spacy={metadata.get('spacy')!r}, expected {EXPECTED['spacy']}")
+    if metadata.get("model_package") != "en_core_web_sm":
+        errors.append(f"model package={metadata.get('model_package')!r}, expected en_core_web_sm")
+    if metadata.get("model_distribution_version") != EXPECTED["en-core-web-sm"]:
+        errors.append(f"model distribution version={metadata.get('model_distribution_version')!r}, expected {EXPECTED['en-core-web-sm']}")
+    if metadata.get("model_metadata_version") != EXPECTED["en-core-web-sm"]:
+        errors.append(f"loaded pipeline metadata version={metadata.get('model_metadata_version')!r}, expected {EXPECTED['en-core-web-sm']}")
+    distributions = metadata.get("distributions")
+    if not isinstance(distributions, dict):
+        errors.append("distribution versions are missing")
+    else:
+        for package, expected in expected_distributions.items():
+            if distributions.get(package) != expected:
+                errors.append(f"distribution {package}={distributions.get(package)!r}, expected {expected}")
+    if errors:
+        raise SystemExit("Installed runtime/build pin mismatch: " + "; ".join(errors))
+
+
 def sha256(filename: Path) -> str:
     digest = hashlib.sha256()
     with filename.open("rb") as stream:
@@ -102,15 +126,13 @@ def main() -> None:
             "n=en_core_web_sm.load(); print(json.dumps({'python':__import__('platform').python_version(),"
             "'platform':__import__('platform').platform(),'machine':__import__('platform').machine(),"
             "'libc':__import__('platform').libc_ver(),"
-            "'spacy':spacy.__version__,'model':n.meta.get('name'),'model_version':n.meta.get('version'),"
+            "'spacy':spacy.__version__,'model_package':en_core_web_sm.__name__,"
+            "'model_distribution_version':m.version('en-core-web-sm'),"
+            "'model_metadata_name':n.meta.get('name'),'model_metadata_version':n.meta.get('version'),"
             "'pip':m.version('pip'),'distributions':{k:m.version(k) for k in ['spacy','en-core-web-sm','pyinstaller','pyinstaller-hooks-contrib']}})); n('UMB build smoke.')"
         )
         metadata = json.loads(subprocess.check_output([str(python), "-c", check_code], cwd=repo, env=env, text=True))
-        if metadata["python"] != "3.13.16" or metadata["spacy"] != EXPECTED["spacy"] or metadata["model"] != "en_core_web_sm" or metadata["model_version"] != EXPECTED["en-core-web-sm"]:
-            raise SystemExit(f"Installed runtime/model pin mismatch: {metadata}")
-        for package, expected in EXPECTED.items():
-            if metadata["distributions"][package] != expected:
-                raise SystemExit(f"Installed build input mismatch: {package}={metadata['distributions'][package]}, expected {expected}")
+        validate_runtime_metadata(metadata)
         dist = temp / "dist"
         work = temp / "work"
         run([str(python), "-m", "PyInstaller", "--clean", "--noconfirm", "--distpath", str(dist), "--workpath", str(work), str(repo / "python/umb_memory_sidecar.spec")], cwd=repo / "python", env=env)
@@ -122,8 +144,8 @@ def main() -> None:
         if not model_metadata:
             raise SystemExit("Frozen output does not visibly contain en_core_web_sm/meta.json")
         frozen_versions = [json.loads(p.read_text(encoding="utf-8")) for p in model_metadata]
-        if not any(m.get("name") == "en_core_web_sm" and m.get("version") == "3.8.0" for m in frozen_versions):
-            raise SystemExit("Frozen model metadata does not identify en_core_web_sm 3.8.0")
+        if not any(m.get("version") == EXPECTED["en-core-web-sm"] for m in frozen_versions):
+            raise SystemExit(f"Frozen en_core_web_sm package metadata does not contain model version {EXPECTED['en-core-web-sm']}")
         materialized_symlinks = materialize_safe_symlinks(built)
         reject_symlinks(built)
         shutil.copytree(built, args.output)
