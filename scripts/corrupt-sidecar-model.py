@@ -9,6 +9,32 @@ import shutil
 from pathlib import Path
 
 
+MODEL_PACKAGE = "en_core_web_sm"
+MODEL_VERSION = "3.8.0"
+
+
+def remove_model_package(onedir: Path) -> None:
+    """Remove only the collected import package with the expected version."""
+    metadata_files = []
+    for candidate in onedir.rglob("meta.json"):
+        # The package directory identifies the import package. spaCy metadata's
+        # name field is a pipeline name and can differ (e.g. core_web_sm).
+        if candidate.parent.name != MODEL_PACKAGE:
+            continue
+        try:
+            metadata = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if metadata.get("version") == MODEL_VERSION:
+            metadata_files.append(candidate)
+    if not metadata_files:
+        raise SystemExit("Corrupted-copy preparation cannot find en_core_web_sm 3.8.0 metadata")
+
+    for model_root in sorted({entry.parent for entry in metadata_files}, key=lambda p: len(p.parts), reverse=True):
+        if model_root.exists():
+            shutil.rmtree(model_root)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", type=Path, required=True)
@@ -17,25 +43,13 @@ def main() -> None:
     if args.output.exists():
         shutil.rmtree(args.output)
     shutil.copytree(args.source, args.output, symlinks=True)
-    metadata_files = []
-    for candidate in args.output.rglob("meta.json"):
-        try:
-            metadata = json.loads(candidate.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if metadata.get("name") == "en_core_web_sm" and metadata.get("version") == "3.8.0":
-            metadata_files.append(candidate)
-    if not metadata_files:
-        raise SystemExit("Corrupted-copy preparation cannot find en_core_web_sm 3.8.0 metadata")
+    if any(path.is_symlink() for path in args.output.rglob("*")):
+        raise SystemExit("Corrupted test copy contains symlinks")
     # Remove the collected model package, retaining the PyInstaller executable/runtime.
-    for model_root in sorted({entry.parent for entry in metadata_files}, key=lambda p: len(p.parts), reverse=True):
-        if model_root.exists():
-            shutil.rmtree(model_root)
+    remove_model_package(args.output)
     executable = args.output / ("umb-memory-sidecar.exe" if os.name == "nt" else "umb-memory-sidecar")
     if not executable.is_file():
         raise SystemExit("Corrupted copy unexpectedly lost its sidecar executable")
-    if any(path.is_symlink() for path in args.output.rglob("*")):
-        raise SystemExit("Corrupted test copy contains symlinks")
     print(f"Prepared missing-model test copy at {args.output}")
 
 

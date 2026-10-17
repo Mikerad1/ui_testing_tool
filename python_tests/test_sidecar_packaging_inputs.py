@@ -2,6 +2,7 @@ import importlib.util
 import json
 import re
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -15,6 +16,11 @@ BUILD_SPEC.loader.exec_module(build_sidecar)
 
 
 class SidecarPackagingInputTests(unittest.TestCase):
+    def test_reproducible_build_epoch_is_zip_timestamp_safe(self):
+        epoch = build_sidecar.REPRODUCIBLE_SOURCE_DATE_EPOCH
+        self.assertEqual(datetime.fromtimestamp(epoch, timezone.utc), datetime(1980, 1, 1, tzinfo=timezone.utc))
+        self.assertGreaterEqual(epoch, 315532800)
+
     def test_target_locks_pin_every_resolved_requirement_with_hashes(self):
         for target in ("windows-x64", "linux-x64"):
             lock = ROOT / "python" / f"requirements-{target}.lock"

@@ -19,6 +19,9 @@ EXPECTED = {
     "pyinstaller": "6.22.3",
     "pyinstaller-hooks-contrib": "2026.8",
 }
+# ZIP/DOS timestamps cannot predate 1980-01-01; use its UTC Unix epoch as the
+# deterministic reproducible-build time to keep zip-based build tools valid.
+REPRODUCIBLE_SOURCE_DATE_EPOCH = 315532800
 
 
 def validate_runtime_metadata(metadata: dict[str, object]) -> None:
@@ -149,7 +152,7 @@ def main() -> None:
         shutil.rmtree(args.output)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
-    env.update({"SOURCE_DATE_EPOCH": "0", "PYTHONHASHSEED": "0", "PYTHONUTF8": "1", "TZ": "UTC", "PIP_DISABLE_PIP_VERSION_CHECK": "1"})
+    env.update({"SOURCE_DATE_EPOCH": str(REPRODUCIBLE_SOURCE_DATE_EPOCH), "PYTHONHASHSEED": "0", "PYTHONUTF8": "1", "TZ": "UTC", "PIP_DISABLE_PIP_VERSION_CHECK": "1"})
     env["PIP_INDEX_URL"] = "https://pypi.org/simple"
     env.pop("PIP_EXTRA_INDEX_URL", None)
     with tempfile.TemporaryDirectory(prefix="umb-sidecar-build-") as temporary:
