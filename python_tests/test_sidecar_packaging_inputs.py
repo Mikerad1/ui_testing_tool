@@ -18,7 +18,7 @@ class SidecarPackagingInputTests(unittest.TestCase):
             for block in requirements:
                 self.assertRegex(block, r"--hash=sha256:[0-9a-f]{64}", block.splitlines()[0])
             for package, version in (
-                ("spacy", "3.8.9"), ("pyinstaller", "6.22.3"),
+                ("click", "8.3.1"), ("spacy", "3.8.9"), ("pyinstaller", "6.22.3"),
                 ("pyinstaller-hooks-contrib", "2026.8"),
             ):
                 self.assertRegex(text, rf"(?m)^{re.escape(package)}=={re.escape(version)} \\")
