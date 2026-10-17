@@ -94,7 +94,7 @@ function screenRoute(store:Store,ref:string):string|undefined {
   let attrs:any;try{attrs=JSON.parse(node.attributes_json);}catch{throw Error('Malformed screen YAML metadata');}
   if(attrs.route!==undefined){if(typeof attrs.route!=='string'||!attrs.route.startsWith('/'))throw Error('Unsafe workflow screen route');return attrs.route;}
   const subject=store.applicationSubject() as any;let application=subject?store.get(subject.id) as any:undefined;
-  if(application?.origin!=='yaml')application=store.db.prepare("SELECT * FROM nodes WHERE project_id=? AND type='application' AND origin='yaml' AND tombstone=0 ORDER BY id LIMIT 1").get(store.projectId) as any;
+  if(application?.origin!=='yaml')application=store.db.prepare("SELECT * FROM nodes WHERE project_id=? AND environment=? AND type='application' AND origin='yaml' AND tombstone=0 ORDER BY id LIMIT 1").get(store.projectId,store.memoryEnvironment) as any;
   if(!application||application.origin!=='yaml')return undefined;
   try{const routes=JSON.parse(application.attributes_json).route_patterns;if(!Array.isArray(routes))return undefined;const route=routes.find((entry:any)=>entry&&screenKey(String(entry.screen??''))===screenKey(ref)&&typeof entry.path==='string');if(!route)return undefined;if(!route.path.startsWith('/'))throw Error('Unsafe workflow application route');return route.path;}catch(error){if(error instanceof Error&&/Unsafe workflow application route/.test(error.message))throw error;return undefined;}
 }

@@ -46,7 +46,7 @@ export function fixtureEdge(
   const stableKey = options.stableKey ?? `${from}:${relation}:${to}`;
   const database = new Database(databaseFilename);
   try {
-    database.prepare('INSERT INTO edges(id,project_id,from_node_id,to_node_id,relation_type,attributes_json,origin,verification_status,stable_key) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(project_id,origin,stable_key) DO UPDATE SET attributes_json=excluded.attributes_json').run(id, store.projectId, from, to, relation, JSON.stringify(withNlpMetadata(attributes, 'fixture-normalized')), origin, options.verification_status ?? 'proposed', stableKey);
+    database.prepare('INSERT INTO edges(id,project_id,environment,from_node_id,to_node_id,relation_type,attributes_json,origin,verification_status,stable_key) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(project_id,environment,origin,stable_key) DO UPDATE SET attributes_json=excluded.attributes_json').run(id, store.projectId, store.memoryEnvironment, from, to, relation, JSON.stringify(withNlpMetadata(attributes, 'fixture-normalized')), origin, options.verification_status ?? 'proposed', stableKey);
   } finally { database.close(); }
   return (store.listEdges() as any[]).find(edge => edge.origin === origin && edge.stable_key === stableKey);
 }

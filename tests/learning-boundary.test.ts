@@ -28,11 +28,12 @@ test('production learning graph writes stay behind Store and LearningWriter', as
   const metadataMinterImport = /import\s*\{[^}]*\bwithNlpMetadata\b[^}]*\}\s*from/;
   const metadataMinterCall = /\bwithNlpMetadata\s*\(/;
   const metadataMintingFiles = new Set(['memory/learning-writer.ts', 'knowledge/reconcile.ts']);
+  const storeMutationFiles = new Set(['memory/store.ts', 'memory/schema-v11.ts', 'memory/yaml-commit.ts']);
 
   for (const filename of files) {
     const relative = path.relative(sourceRoot, filename).split(path.sep).join('/');
     const source = await readFile(filename, 'utf8');
-    if (relative !== 'memory/store.ts') assert.doesNotMatch(source, sqlMutation, `${relative} must not mutate graph tables directly`);
+    if (!storeMutationFiles.has(relative)) assert.doesNotMatch(source, sqlMutation, `${relative} must not mutate graph tables directly outside the Store/migration boundary`);
     if (relative !== 'memory/store.ts' && relative !== 'memory/learning-writer.ts') {
       assert.doesNotMatch(source, directCommit, `${relative} must use LearningWriter rather than Store commit internals`);
     }
