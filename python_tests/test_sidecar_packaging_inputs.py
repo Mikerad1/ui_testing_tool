@@ -3,6 +3,7 @@ import json
 import re
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -68,6 +69,43 @@ class SidecarPackagingInputTests(unittest.TestCase):
         metadata["model_package"] = "core_web_sm"
         with self.assertRaisesRegex(SystemExit, "model package=.*expected en_core_web_sm"):
             build_sidecar.validate_runtime_metadata(metadata)
+
+    def test_model_metadata_provenance_is_relative_to_ondir_and_venv_install_avoids_ensurepip(self):
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            onedir = root / "build-temp" / "dist" / "umb-memory-sidecar"
+            model_meta = onedir / "_internal" / "en_core_web_sm" / "meta.json"
+            model_meta.parent.mkdir(parents=True)
+            model_meta.write_text('{"version":"3.8.0"}', encoding="utf-8")
+            paths = build_sidecar.model_metadata_paths_relative_to_ondir([model_meta], onedir)
+            self.assertEqual(paths, ["_internal/en_core_web_sm/meta.json"])
+            self.assertNotIn(str(root), " ".join(paths))
+
+            base_python = root / "pinned-python" / "python.exe"
+            venv = root / "fresh-venv"
+            lock = root / "requirements-windows-x64.lock"
+            create, install, venv_python = build_sidecar.venv_setup_commands(base_python, venv, lock)
+            self.assertEqual(create, [str(base_python), "-m", "venv", str(venv), "--without-pip"])
+            self.assertNotIn("ensurepip", " ".join(create))
+            self.assertEqual(install[:6], [str(base_python), "-m", "pip", "--python", str(venv_python), "install"])
+            self.assertIn("--require-hashes", install)
+            self.assertIn("--only-binary=:all:", install)
+            self.assertNotEqual(install[0], str(venv_python))
+
+    def test_bootstrap_pip_must_advertise_python_target_support(self):
+        with patch.object(build_sidecar.subprocess, "check_output", side_effect=[
+            "pip 26.0 from pinned-runtime\\Lib\\site-packages\\pip (python 3.13)",
+            "Usage: pip <command> [options]\n  --python <python> Run pip with the specified Python interpreter.",
+        ]) as check_output:
+            version = build_sidecar.bootstrap_pip_version(Path("pinned-python.exe"), env={})
+        self.assertTrue(version.startswith("pip 26.0"))
+        self.assertEqual(check_output.call_count, 2)
+
+        with patch.object(build_sidecar.subprocess, "check_output", side_effect=["pip 21.0", "Usage: pip install"]):
+            with self.assertRaisesRegex(SystemExit, "lacks pip --python support"):
+                build_sidecar.bootstrap_pip_version(Path("old-python.exe"), env={})
 
 
 if __name__ == "__main__":

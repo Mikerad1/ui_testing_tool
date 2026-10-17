@@ -45,6 +45,43 @@ def validate_runtime_metadata(metadata: dict[str, object]) -> None:
         raise SystemExit("Installed runtime/build pin mismatch: " + "; ".join(errors))
 
 
+def model_metadata_paths_relative_to_ondir(metadata_files: list[Path], onedir_root: Path) -> list[str]:
+    """Return model metadata locations relative to the frozen onedir, never temp build paths."""
+    return sorted(path.relative_to(onedir_root).as_posix() for path in metadata_files)
+
+
+def venv_setup_commands(base_python: Path, venv_dir: Path, lock_file: Path) -> tuple[list[str], list[str], Path]:
+    venv_python = venv_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    create_command = [str(base_python), "-m", "venv", str(venv_dir), "--without-pip"]
+    install_command = [
+        str(base_python), "-m", "pip", "--python", str(venv_python), "install", "--isolated",
+        "--index-url", "https://pypi.org/simple", "--require-hashes", "--only-binary=:all:", "-r", str(lock_file),
+    ]
+    return create_command, install_command, venv_python
+
+
+def bootstrap_pip_version(base_python: Path, *, env: dict[str, str]) -> str:
+    version_command = [str(base_python), "-m", "pip", "--version"]
+    help_command = [str(base_python), "-m", "pip", "--help"]
+    print("+", " ".join(version_command), flush=True)
+    version_output = subprocess.check_output(version_command, text=True, stderr=subprocess.STDOUT, env=env).strip()
+    print("+", " ".join(help_command), flush=True)
+    help_output = subprocess.check_output(help_command, text=True, stderr=subprocess.STDOUT, env=env)
+    if not version_output.startswith("pip "):
+        raise SystemExit(f"Pinned base interpreter did not report bundled pip version: {version_output!r}")
+    if "--python <python>" not in help_output:
+        raise SystemExit(f"Bundled {version_output} lacks pip --python support required for a no-ensurepip isolated install")
+    return version_output
+
+
+def run_captured(command: list[str], *, label: str, **kwargs: object) -> None:
+    print("+", " ".join(command), flush=True)
+    result = subprocess.run(command, check=False, capture_output=True, text=True, **kwargs)
+    if result.returncode != 0:
+        detail = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part and part.strip())
+        raise RuntimeError(f"{label} failed with exit status {result.returncode}.\nCommand: {command!r}\n{detail}")
+
+
 def sha256(filename: Path) -> str:
     digest = hashlib.sha256()
     with filename.open("rb") as stream:
@@ -118,9 +155,12 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="umb-sidecar-build-") as temporary:
         temp = Path(temporary)
         venv = temp / "venv"
-        run([str(args.python), "-m", "venv", str(venv)], cwd=repo, env=env)
-        python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-        run([str(python), "-m", "pip", "--isolated", "install", "--index-url", "https://pypi.org/simple", "--require-hashes", "--only-binary=:all:", "-r", str(lock)], cwd=repo, env=env)
+        base_pip_version = bootstrap_pip_version(args.python, env=env)
+        create_venv_command, install_lock_command, python = venv_setup_commands(args.python, venv, lock)
+        run_captured(create_venv_command, label="Creating isolated venv without ensurepip", cwd=repo, env=env)
+        if not python.is_file():
+            raise SystemExit(f"Pip-free venv creation succeeded but its interpreter is missing: {python}")
+        run_captured(install_lock_command, label=f"Installing hash-locked requirements into venv via {base_pip_version}", cwd=repo, env=env)
         check_code = (
             "import importlib.metadata as m, json, spacy, en_core_web_sm; "
             "n=en_core_web_sm.load(); print(json.dumps({'python':__import__('platform').python_version(),"
@@ -129,7 +169,7 @@ def main() -> None:
             "'spacy':spacy.__version__,'model_package':en_core_web_sm.__name__,"
             "'model_distribution_version':m.version('en-core-web-sm'),"
             "'model_metadata_name':n.meta.get('name'),'model_metadata_version':n.meta.get('version'),"
-            "'pip':m.version('pip'),'distributions':{k:m.version(k) for k in ['spacy','en-core-web-sm','pyinstaller','pyinstaller-hooks-contrib']}})); n('UMB build smoke.')"
+            "'distributions':{k:m.version(k) for k in ['spacy','en-core-web-sm','pyinstaller','pyinstaller-hooks-contrib']}})); n('UMB build smoke.')"
         )
         metadata = json.loads(subprocess.check_output([str(python), "-c", check_code], cwd=repo, env=env, text=True))
         validate_runtime_metadata(metadata)
@@ -164,12 +204,12 @@ def main() -> None:
             "platform": metadata["platform"],
             "machine": metadata["machine"],
             "libc": metadata["libc"],
-            "installer_pip_version": metadata["pip"],
+            "bootstrap_pip_version": base_pip_version,
         },
         "verified_versions": metadata,
         "explicit_model_collection": {
             "hidden_import": "en_core_web_sm",
-            "model_data": [p.relative_to(args.output).as_posix() for p in model_metadata],
+            "model_metadata_paths_relative_to_ondir": model_metadata_paths_relative_to_ondir(model_metadata, built),
         },
         "materialized_in_tree_symlinks": materialized_symlinks,
         "frozen_files_sha256": inventory,
