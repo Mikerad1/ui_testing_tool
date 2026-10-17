@@ -5,7 +5,8 @@ import { parse } from 'yaml';
 import { z } from 'zod';
 import type { Store } from '../memory/store.js';
 import type { LearningWriter } from '../memory/learning-writer.js';
-import { withNlpMetadata, type LearningAttributes, type YamlReconciliationPlan } from '../memory/learning-types.js';
+import { withNlpMetadata, type LearningAttributes, type YamlRecordFingerprint, type YamlReconciliationPlan } from '../memory/learning-types.js';
+import type {ValidatedYamlDocument} from '../memory/learning-writer.js';
 import { workflowSchema } from '../workflow/contract.js';
 
 const locator = z.object({
@@ -26,9 +27,46 @@ const schemas: Record<string, z.ZodTypeAny> = {
 
 const toPosixRelative = (root: string, file: string) => path.relative(root, file).split(path.sep).join('/');
 type Doc = { file: string; doc: any; hash: string };
-type PreparedDoc = Doc & { normalized: string };
+type RedactedDoc=Doc&{validated:ValidatedYamlDocument};
+type PreparedDoc = Doc & { normalized: string; fingerprint:YamlRecordFingerprint };
 type Entity = { type: string; key: string; name: string; attrs: LearningAttributes; hash: string; parent?: string; source: string };
 type Edge = { key: string; from: string; to: string; relation: string; attrs: LearningAttributes; source: string };
+const YAML_PROJECTION_VERSION='yaml-projection-v1';
+
+function validateReferences(docs:Array<{doc:any}>):void{
+  const byKey=new Map<string,{doc:any}>();
+  for(const entry of docs){const key=`${entry.doc.kind}:${entry.doc.id}`;if(byKey.has(key))throw new Error('Duplicate knowledge identity');byKey.set(key,entry);}
+  const ref=(value:string,kind:string)=>{
+    const key=value.includes(':')?value:`${kind}:${value}`;
+    if(!byKey.has(key))throw new Error('Knowledge reference is missing');
+    if(key.split(':')[0]!==kind)throw new Error('Knowledge reference has the wrong kind');
+    return key;
+  };
+  for(const entry of docs){
+    const doc=entry.doc;
+    if(doc.kind==='screen')for(const action of doc.actions??[]){
+      if(!(doc.elements??[]).some((element:any)=>element.id===action.element))throw new Error('Knowledge action references an unknown element');
+      if(action.effect?.navigates_to)ref(action.effect.navigates_to,'screen');
+    }
+    if(doc.kind==='application'){
+      if(doc.start_screen)ref(doc.start_screen,'screen');
+      for(const route of doc.route_patterns??[])ref(route.screen,'screen');
+    }
+    if(doc.kind==='workflow'){
+      if(doc.start_screen)ref(doc.start_screen,'screen');
+      if(doc.end_screen)ref(doc.end_screen,'screen');
+      if(doc.requires?.role)ref(doc.requires.role,'role');
+      const checkTarget=(target:any)=>{
+        if(!target?.screen)return;
+        const targetKey=ref(target.screen,'screen'),screen=byKey.get(targetKey)!.doc;
+        if(target.element&&!(screen.elements??[]).some((element:any)=>element.id===target.element))throw new Error('Workflow target references an unknown element');
+      };
+      for(const check of doc.preconditions??[])checkTarget(check.target);
+      for(const step of doc.steps)checkTarget(step.target);
+    }
+    if(doc.kind==='navigation_rules')for(const rule of doc.rules){ref(rule.from,'screen');ref(rule.to,'screen');}
+  }
+}
 
 async function walk(dir: string): Promise<string[]> {
   const out: string[] = [];
@@ -46,7 +84,7 @@ export async function reconcile(root: string, store: Store, writer: LearningWrit
   let all: string[] = [];
   try { all = await walk(root); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
 
-  const docs: PreparedDoc[] = [];
+  const rawDocs: Doc[] = [];
   for (const file of all) {
     if (!(await lstat(file)).isFile()) continue;
     const text = await readFile(file, 'utf8');
@@ -59,10 +97,26 @@ export async function reconcile(root: string, store: Store, writer: LearningWrit
     const schema = schemas[(raw as any).kind]!;
     let parsed: any;
     try { parsed = schema.parse(raw); } catch { throw new Error('Knowledge document failed validation'); }
-    const prepared = await writer.prepareDocument(parsed);
-    let safeDoc: any;
-    try { safeDoc = schema.parse(prepared.value); } catch { throw new Error('Redacted knowledge document failed validation'); }
-    docs.push({ file, doc: safeDoc, hash: createHash('sha256').update(text).digest('hex'), normalized: prepared.normalized });
+    const rawHash=createHash('sha256').update(text).digest('hex');
+    rawDocs.push({file,doc:parsed,hash:rawHash});
+  }
+
+  const redactedDocs:RedactedDoc[]=[];
+  for(const entry of rawDocs){
+    const sourcePath=toPosixRelative(root,entry.file),schema=schemas[entry.doc.kind]!;
+    const validated=await writer.validateYamlDocument(entry.doc,{sourcePath,documentKind:entry.doc.kind,documentId:entry.doc.id,rawHash:entry.hash,projectionVersion:YAML_PROJECTION_VERSION},value=>{
+      try{return schema.parse(value);}catch{throw new Error('Redacted knowledge document failed validation');}
+    });
+    redactedDocs.push({...entry,doc:validated.value,validated});
+  }
+
+  // Validate the complete redacted source set before allowing any NLP cache hit or analysis.
+  validateReferences(redactedDocs);
+
+  const docs:PreparedDoc[]=[];
+  for(const entry of redactedDocs){
+    const prepared=await writer.normalizeYamlDocument(entry.validated);
+    docs.push({...entry,doc:prepared.value,normalized:prepared.normalized,fingerprint:entry.validated.fingerprint});
   }
 
   const byKey = new Map<string, PreparedDoc>();
@@ -147,6 +201,7 @@ export async function reconcile(root: string, store: Store, writer: LearningWrit
     sources: docs.map(entry => ({ path: toPosixRelative(root, entry.file), hash: entry.hash })),
     entities,
     edges,
+    recordFingerprints:docs.map(entry=>entry.fingerprint),
   };
   return writer.commitReconciliation(plan);
 }

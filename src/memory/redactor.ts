@@ -1,3 +1,5 @@
+import {createHash} from 'node:crypto';
+
 const REDACTION_ERROR = 'Memory input could not be safely redacted';
 const REDACTED = '[REDACTED]';
 const MAX_DEPTH = 32;
@@ -11,6 +13,7 @@ export type MemoryRedactionConfig = {
 };
 
 export type MemoryRedactor = {
+  readonly policyFingerprint:string;
   redactText(text: string): string;
   redactValue(value: unknown): unknown;
   redactWorkflowVariables(workflow: unknown, resolved: Record<string, string>): Record<string, string>;
@@ -132,5 +135,12 @@ export function createMemoryRedactor(
     }
   };
 
-  return { redactText, redactValue, redactWorkflowVariables };
+  const policyFingerprint=createHash('sha256').update(JSON.stringify({
+    version:1,
+    textPatterns:textPatterns.map(([pattern,replacement])=>[pattern.source,pattern.flags,replacement]),
+    sensitivePaths:[...sensitivePointers].sort(),
+    sensitiveValueNames:[...config.sensitive_values_env].sort(),
+    sensitiveValueDigest:createHash('sha256').update(JSON.stringify([...new Set(configuredValues)].sort())).digest('hex'),
+  })).digest('hex');
+  return { policyFingerprint, redactText, redactValue, redactWorkflowVariables };
 }

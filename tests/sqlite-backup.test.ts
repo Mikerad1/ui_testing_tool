@@ -112,7 +112,7 @@ test('restored copy opens through Store and migrates normally', async () => {
     await restoreSqlite(backupPath, restoredPath);
     restoredStore = new Store(restoredPath, 'backup-project');
     assert.equal((restoredStore.get('preserved') as { display_name: string }).display_name, 'Preserved');
-    assert.equal((restoredStore.db.prepare('SELECT max(version) version FROM schema_migrations').get() as { version: number }).version, 11);
+    assert.equal((restoredStore.db.prepare('SELECT max(version) version FROM schema_migrations').get() as { version: number }).version, 12);
     assert.deepEqual(restoredStore.db.pragma('foreign_key_check'), []);
   } finally {
     fixtureDb?.close();

@@ -1,6 +1,9 @@
 import type { Store } from './store.js';
 import type { YamlReconciliationPlan } from './learning-types.js';
 
+export type BackfillNodeWrite={jobId:string;id:string;payloadHash:string;redactedHash:string;type:string;stable_key:string;display_name:string;attributes:Record<string,unknown>};
+export type BackfillEdgeWrite={jobId:string;id:string;payloadHash:string;redactedHash:string;from_id:string;to_id:string;relation:string;attributes:Record<string,unknown>};
+
 export type ProposedNodeWrite = {
   type: string;
   stable_key: string;
@@ -19,6 +22,8 @@ type StoreWriteOperations = {
   proposedNode(input: ProposedNodeWrite): any;
   preparedEdge(input: PreparedEdgeWrite): any;
   reconciliation(plan: YamlReconciliationPlan): number;
+  backfillNode(input:BackfillNodeWrite):boolean;
+  backfillEdge(input:BackfillEdgeWrite):boolean;
 };
 
 const operations = new WeakMap<Store, StoreWriteOperations>();
@@ -40,4 +45,6 @@ export const storeLearningCommit = Object.freeze({
   proposedNode: (store: Store, input: ProposedNodeWrite) => forStore(store).proposedNode(input),
   preparedEdge: (store: Store, input: PreparedEdgeWrite) => forStore(store).preparedEdge(input),
   reconciliation: (store: Store, plan: YamlReconciliationPlan) => forStore(store).reconciliation(plan),
+  backfillNode: (store:Store,input:BackfillNodeWrite)=>forStore(store).backfillNode(input),
+  backfillEdge: (store:Store,input:BackfillEdgeWrite)=>forStore(store).backfillEdge(input),
 });

@@ -4,7 +4,8 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { loadConfig, safePath } from '../config/config.js';
 import { Store } from '../memory/store.js';
-import { createLearningWriter } from '../memory/runtime.js';
+import { createLearningWriter, persistentLearningWritesEnabled } from '../memory/runtime.js';
+import { backfillMemory } from '../memory/backfill.js';
 import { reconcile, validateKnowledge } from '../knowledge/reconcile.js';
 import { BrowserController } from '../browser/controller.js';
 import { serve } from '../mcp/server.js';
@@ -49,6 +50,16 @@ cli.command('doctor').description('Read-only diagnostics with remediation guidan
   catch { if(o.json)console.log(JSON.stringify({ok:false,checks:[{id:'doctor.unexpected-error',name:'unexpected-error',status:'fail',message:'Doctor could not complete.',remediation:'Check the config path and permissions, then retry.'}]})); console.error('Doctor failed safely.'); process.exitCode = 1; }
 });
 const knowledge=cli.command('knowledge').description('Manage YAML knowledge and local locator proposals');
+cli.command('memory').description('Manage scoped persistent memory maintenance').command('backfill').description('Resume redacted NLP processing of stored memory records').option('--config <path>','Config file','umb.config.yaml').action(async o=>{
+  let store:Store|undefined,learningWriter:ReturnType<typeof createLearningWriter>|undefined,lock:Awaited<ReturnType<typeof acquireProjectLock>>|undefined;
+  try{
+    const{config,root}=await loadConfig(o.config);
+    if(!persistentLearningWritesEnabled())throw Error('Memory backfill is disabled until the Phase 1 offline release gate passes.');
+    const db=await safePath(root,config.memory.database);lock=await acquireProjectLock(root,config.project.id,config.memory.database);await mkdir(path.dirname(db),{recursive:true});store=await Store.open(db,config.project.id,config.memory.environment??'legacy');learningWriter=createLearningWriter(store,config);
+    const summary=await backfillMemory(store,learningWriter);console.log(JSON.stringify(summary));
+  }catch(error){console.error(`Memory backfill failed safely: ${(error as Error).message}`);process.exitCode=1;}
+  finally{await learningWriter?.close();store?.close();await lock?.release().catch(()=>{});}
+});
 knowledge.command('proposals').option('--config <path>','Config file','umb.config.yaml').action(async o=>{
  let store:Store|undefined,lock:Awaited<ReturnType<typeof acquireProjectLock>>|undefined;
  try{const{config,root}=await loadConfig(o.config);const db=await safePath(root,config.memory.database);lock=await acquireProjectLock(root,config.project.id,config.memory.database);await mkdir(path.dirname(db),{recursive:true});store=await Store.open(db,config.project.id,config.memory.environment??'legacy');for(const proposal of store.listWorkflowLocatorProposals() as any[]){const prior=JSON.stringify(JSON.parse(proposal.previous_locator_json)),candidate=JSON.stringify(JSON.parse(proposal.candidate_locator_json));console.log(`${proposal.id} [${proposal.status}] ${proposal.source_path} :: screen ${proposal.screen_id} / element ${proposal.element_id}`);console.log(`  Prior locator (untrusted YAML source): ${prior}`);console.log(`  Candidate locator (untrusted YAML source): ${candidate}`);console.log(`  Reason: ${proposal.reason_code}`);}}

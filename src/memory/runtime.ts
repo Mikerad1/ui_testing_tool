@@ -7,6 +7,7 @@ import type { Store } from './store.js';
 
 // Keep production persistence disabled until the Phase 1C release gate passes.
 const PERSISTENT_LEARNING_WRITES_ENABLED = false;
+export const persistentLearningWritesEnabled=()=>PERSISTENT_LEARNING_WRITES_ENABLED;
 
 export function createLearningWriter(
   store: Store,

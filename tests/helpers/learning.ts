@@ -7,17 +7,18 @@ import { withNlpMetadata } from '../../src/memory/learning-types.js';
 
 const writers = new WeakMap<Store, LearningWriter>();
 
-export function testLearningWriter(store: Store, state: { ready?: boolean; failAnalyze?: boolean; failAtAnalysis?: number; inputs?: string[]; sensitivePaths?: string[]; sensitiveValuesEnv?: string[]; env?: NodeJS.ProcessEnv } = {}): LearningWriter {
+export function testLearningWriter(store: Store, state: { ready?: boolean; failAnalyze?: boolean; failAtAnalysis?: number; inputs?: string[]; sensitivePaths?: string[]; sensitiveValuesEnv?: string[]; env?: NodeJS.ProcessEnv;python?:string;spacy?:string;model?:string;rules?:string;protocol?:number;normalized?:string;onAnalyze?:(text:string,count:number)=>void|Promise<void> } = {}): LearningWriter {
   let analysisCount = 0;
   const nlp: NlpProcessor = {
     async health() {
-      return { version: 1, id: 'test-health', ok: true, op: 'health', health: { protocol: 1, python: 'test', spacy: 'fake', model: 'fake', rules: '1', ready: state.ready !== false } };
+      return { version: 1, id: 'test-health', ok: true, op: 'health', health: { protocol: state.protocol??1, python: state.python??'test', spacy: state.spacy??'fake', model: state.model??'fake', rules: state.rules??'1', ready: state.ready !== false } };
     },
     async analyze(text: string) {
       analysisCount += 1;
       state.inputs?.push(text);
+      await state.onAnalyze?.(text,analysisCount);
       if (state.failAnalyze || state.failAtAnalysis === analysisCount) throw new Error('private fixture failure');
-      return { version: 1, id: 'test-analyze', ok: true, op: 'analyze', normalized: 'fixture-normalized', tokens: [], entities: [] };
+      return { version: 1, id: 'test-analyze', ok: true, op: 'analyze', normalized: state.normalized??'fixture-normalized', tokens: [], entities: [] };
     },
     async shutdown() {},
   };

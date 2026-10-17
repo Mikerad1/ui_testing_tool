@@ -3,12 +3,14 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import {normalizeLocator} from '../knowledge/locator-proposals.js';
-import {hasNlpMetadata, type YamlReconciliationPlan} from './learning-types.js';
-import {registerStoreWriteOperations} from './store-internal.js';
+import {hasNlpMetadata, NLP_METADATA_KEY, type YamlReconciliationPlan, type YamlRecordFingerprint} from './learning-types.js';
+import {registerStoreWriteOperations, type BackfillEdgeWrite, type BackfillNodeWrite} from './store-internal.js';
 import {assertMemoryEnvironment, LEGACY_MEMORY_ENVIRONMENT} from './environment.js';
 import {migrateEnvironmentSchema} from './schema-v11.js';
 import {commitYamlReconciliation} from './yaml-commit.js';
 import {backupSqlite} from './sqlite-backup.js';
+import {hashBackfillEdge, hashBackfillNode, withoutNlpMetadata, type BackfillEdgeValue, type BackfillNodeValue} from './content-fingerprint.js';
+import type {BackfillEdgeRecord, BackfillNodeRecord, BackfillRecord, BackfillRedactedHash, BackfillSummary} from './backfill-types.js';
 
 type Evidence = { id:string; project_id:string; run_id:string; subject_node_id:string; kind:string; outcome:string; metadata_json:string; artifact_ref:string|null; created_at:string };
 export type WorkflowRecallContext={goal:string;currentUrl:string;role?:string;environment?:string;limit?:number};
@@ -51,7 +53,7 @@ function readOnlyDatabase(database:Database.Database):ReadOnlyDatabase{
   });
 }
 
-export const CURRENT_SCHEMA_VERSION=11;
+export const CURRENT_SCHEMA_VERSION=12;
 export class Store {
   declare readonly db: ReadOnlyDatabase; declare readonly projectId: string; declare readonly memoryEnvironment: string; #database: Database.Database;
   static async open(filename:string,projectId:string,memoryEnvironment=LEGACY_MEMORY_ENVIRONMENT):Promise<Store>{
@@ -88,8 +90,10 @@ export class Store {
       this.#database.prepare('INSERT OR IGNORE INTO nodes(id,project_id,environment,type,stable_key,canonical_key,display_name,attributes_json,origin,verification_status,confidence) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(randomUUID(),projectId,scope,'application',projectId,projectId,projectId,'{}','human','verified',1);
       registerStoreWriteOperations(this,{
         proposedNode:input=>this.#commitProposedNode(input),
-        preparedEdge:input=>this.#commitPreparedEdge(input),
-        reconciliation:plan=>this.#commitReconciliation(plan),
+      preparedEdge:input=>this.#commitPreparedEdge(input),
+      reconciliation:plan=>this.#commitReconciliation(plan),
+      backfillNode:input=>this.#commitBackfillNode(input),
+      backfillEdge:input=>this.#commitBackfillEdge(input),
       });
     }catch(error){
       try{this.#database.close();}catch{}
@@ -231,6 +235,49 @@ export class Store {
       this.#database.prepare('INSERT INTO schema_migrations VALUES(10,?)').run(new Date().toISOString());
     })();
     if(!has(11)) migrateEnvironmentSchema(this.#database);
+    if(!has(12)) this.#database.transaction(()=>{
+      this.#database.exec(`
+        CREATE TABLE yaml_record_fingerprints(
+          project_id TEXT NOT NULL,
+          environment TEXT NOT NULL,
+          document_kind TEXT NOT NULL,
+          document_id TEXT NOT NULL,
+          source_path TEXT NOT NULL,
+          raw_hash TEXT NOT NULL CHECK(length(raw_hash)=64),
+          redacted_hash TEXT NOT NULL CHECK(length(redacted_hash)=64),
+          preparation_key TEXT NOT NULL CHECK(length(preparation_key)=64),
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY(project_id,environment,document_kind,document_id)
+        );
+        CREATE TABLE memory_backfill_jobs(
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          environment TEXT NOT NULL,
+          pipeline_fingerprint TEXT NOT NULL CHECK(length(pipeline_fingerprint)=64),
+          status TEXT NOT NULL CHECK(status IN ('running','interrupted','completed')),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          completed_at TEXT,
+          UNIQUE(project_id,environment,pipeline_fingerprint),
+          UNIQUE(project_id,environment,id)
+        );
+        CREATE TABLE memory_backfill_items(
+          project_id TEXT NOT NULL,
+          environment TEXT NOT NULL,
+          job_id TEXT NOT NULL,
+          entity_kind TEXT NOT NULL CHECK(entity_kind IN ('node','edge')),
+          entity_id TEXT NOT NULL,
+          payload_hash TEXT NOT NULL CHECK(length(payload_hash)=64),
+          redacted_hash TEXT CHECK(redacted_hash IS NULL OR length(redacted_hash)=64),
+          status TEXT NOT NULL CHECK(status IN ('pending','processed','obsolete')),
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY(project_id,environment,job_id,entity_kind,entity_id),
+          FOREIGN KEY(project_id,environment,job_id) REFERENCES memory_backfill_jobs(project_id,environment,id)
+        );
+        CREATE INDEX memory_backfill_pending ON memory_backfill_items(project_id,environment,job_id,status,entity_kind,entity_id);
+      `);
+      this.#database.prepare('INSERT INTO schema_migrations VALUES(12,?)').run(new Date().toISOString());
+    })();
   }
   close(){this.#database.close();}
   export(){return{nodes:this.#database.prepare('SELECT * FROM nodes WHERE project_id=? AND environment=? AND tombstone=0').all(this.projectId,this.memoryEnvironment),edges:this.#database.prepare('SELECT * FROM edges WHERE project_id=? AND environment=? AND tombstone=0').all(this.projectId,this.memoryEnvironment)};}
@@ -265,7 +312,137 @@ export class Store {
         return this.#database.prepare('SELECT * FROM edges WHERE project_id=? AND environment=? AND origin=? AND stable_key=?').get(this.projectId,this.memoryEnvironment,'agent',stableKey);
       })();
     }
-   #commitReconciliation(plan:YamlReconciliationPlan){return commitYamlReconciliation(this.#database,this.projectId,this.memoryEnvironment,plan);}
+    #commitReconciliation(plan:YamlReconciliationPlan){return commitYamlReconciliation(this.#database,this.projectId,this.memoryEnvironment,plan);}
+  getYamlRecordNormalization(input:Pick<YamlRecordFingerprint,'document_kind'|'document_id'|'raw_hash'|'redacted_hash'|'preparation_key'>):string|null{
+    const row=this.#database.prepare(`SELECT n.attributes_json FROM yaml_record_fingerprints f
+      JOIN yaml_ownership y ON y.project_id=f.project_id AND y.environment=f.environment AND y.entity_type=f.document_kind AND y.entity_key=f.document_id AND y.source_path=f.source_path AND y.hash=f.raw_hash AND y.tombstone=0
+      JOIN nodes n ON n.project_id=y.project_id AND n.environment=y.environment AND n.id=y.entity_id AND n.type=f.document_kind AND n.content_hash=f.raw_hash AND n.origin='yaml' AND n.tombstone=0
+      WHERE f.project_id=? AND f.environment=? AND f.document_kind=? AND f.document_id=? AND f.raw_hash=? AND f.redacted_hash=? AND f.preparation_key=? LIMIT 1`).get(this.projectId,this.memoryEnvironment,input.document_kind,input.document_id,input.raw_hash,input.redacted_hash,input.preparation_key) as {attributes_json:string}|undefined;
+    if(!row)return null;
+    try{
+      const attributes=JSON.parse(row.attributes_json) as Record<string,unknown>,metadata=attributes?.[NLP_METADATA_KEY] as any;
+      return metadata?.protocol===1&&typeof metadata.normalized==='string'&&metadata.normalized.length<=64*1024?metadata.normalized:null;
+    }catch{return null;}
+  }
+  beginMemoryBackfill(pipelineFingerprint:string):string{
+    if(!/^[a-f0-9]{64}$/.test(pipelineFingerprint))throw Error('Invalid backfill pipeline fingerprint');
+    return this.#database.transaction(()=>{
+      const now=new Date().toISOString();
+      let job=this.#database.prepare('SELECT id FROM memory_backfill_jobs WHERE project_id=? AND environment=? AND pipeline_fingerprint=?').get(this.projectId,this.memoryEnvironment,pipelineFingerprint) as {id:string}|undefined;
+      if(!job){job={id:randomUUID()};this.#database.prepare("INSERT INTO memory_backfill_jobs(id,project_id,environment,pipeline_fingerprint,status,created_at,updated_at) VALUES(?,?,?,?,'running',?,?)").run(job.id,this.projectId,this.memoryEnvironment,pipelineFingerprint,now,now);}
+      this.#syncMemoryBackfillItems(job.id,now);
+      return job.id;
+    })();
+  }
+  refreshMemoryBackfill(jobId:string):void{
+    this.#database.transaction(()=>{
+      if(!this.#database.prepare('SELECT 1 FROM memory_backfill_jobs WHERE project_id=? AND environment=? AND id=?').get(this.projectId,this.memoryEnvironment,jobId))throw Error('Backfill job not found in this Store environment');
+      this.#syncMemoryBackfillItems(jobId,new Date().toISOString());
+    })();
+  }
+  #syncMemoryBackfillItems(jobId:string,now:string):void{
+    const nodes=this.#database.prepare('SELECT id,type,stable_key,display_name,attributes_json FROM nodes WHERE project_id=? AND environment=?').all(this.projectId,this.memoryEnvironment) as Array<{id:string;type:string;stable_key:string;display_name:string;attributes_json:string}>;
+    const edges=this.#database.prepare('SELECT id,from_node_id,to_node_id,relation_type,attributes_json FROM edges WHERE project_id=? AND environment=?').all(this.projectId,this.memoryEnvironment) as Array<{id:string;from_node_id:string;to_node_id:string;relation_type:string;attributes_json:string}>;
+    const upsert=this.#database.prepare(`INSERT INTO memory_backfill_items(project_id,environment,job_id,entity_kind,entity_id,payload_hash,redacted_hash,status,updated_at) VALUES(?,?,?,?,?,?,NULL,'pending',?)
+      ON CONFLICT(project_id,environment,job_id,entity_kind,entity_id) DO UPDATE SET payload_hash=excluded.payload_hash,status=CASE WHEN memory_backfill_items.payload_hash=excluded.payload_hash AND memory_backfill_items.status='processed' THEN 'processed' ELSE 'pending' END,updated_at=excluded.updated_at`);
+    for(const row of nodes){const value=this.#backfillNodeValue(row);upsert.run(this.projectId,this.memoryEnvironment,jobId,'node',row.id,hashBackfillNode(value),now);}
+    for(const row of edges){const value=this.#backfillEdgeValue(row);upsert.run(this.projectId,this.memoryEnvironment,jobId,'edge',row.id,hashBackfillEdge(value),now);}
+    this.#database.prepare("UPDATE memory_backfill_items SET status='obsolete',updated_at=? WHERE project_id=? AND environment=? AND job_id=? AND entity_kind='node' AND NOT EXISTS(SELECT 1 FROM nodes n WHERE n.project_id=memory_backfill_items.project_id AND n.environment=memory_backfill_items.environment AND n.id=memory_backfill_items.entity_id)").run(now,this.projectId,this.memoryEnvironment,jobId);
+    this.#database.prepare("UPDATE memory_backfill_items SET status='obsolete',updated_at=? WHERE project_id=? AND environment=? AND job_id=? AND entity_kind='edge' AND NOT EXISTS(SELECT 1 FROM edges e WHERE e.project_id=memory_backfill_items.project_id AND e.environment=memory_backfill_items.environment AND e.id=memory_backfill_items.entity_id)").run(now,this.projectId,this.memoryEnvironment,jobId);
+    this.#database.prepare("UPDATE memory_backfill_jobs SET status='running',updated_at=?,completed_at=NULL WHERE project_id=? AND environment=? AND id=?").run(now,this.projectId,this.memoryEnvironment,jobId);
+  }
+  #backfillNodeValue(row:{type:string;stable_key:string;display_name:string;attributes_json:string}):BackfillNodeValue{
+    let attributes:unknown;try{attributes=JSON.parse(row.attributes_json);}catch{throw Error('Stored memory record is invalid');}
+    return{type:row.type,stable_key:row.stable_key,display_name:row.display_name,attributes:withoutNlpMetadata(attributes)};
+  }
+  #backfillEdgeValue(row:{from_node_id:string;to_node_id:string;relation_type:string;attributes_json:string}):BackfillEdgeValue{
+    let attributes:unknown;try{attributes=JSON.parse(row.attributes_json);}catch{throw Error('Stored memory record is invalid');}
+    return{from_id:row.from_node_id,to_id:row.to_node_id,relation:row.relation_type,attributes:withoutNlpMetadata(attributes)};
+  }
+  setMemoryBackfillRedactedHashes(jobId:string,hashes:BackfillRedactedHash[]):void{
+    const update=this.#database.prepare(`UPDATE memory_backfill_items SET status=CASE WHEN status='processed' AND (redacted_hash IS NULL OR redacted_hash<>?) THEN 'pending' ELSE status END,redacted_hash=?,updated_at=?
+      WHERE project_id=? AND environment=? AND job_id=? AND entity_kind=? AND entity_id=?`),now=new Date().toISOString();
+    this.#database.transaction(()=>{for(const item of hashes){if(!/^[a-f0-9]{64}$/.test(item.redactedHash))throw Error('Invalid redacted backfill fingerprint');update.run(item.redactedHash,item.redactedHash,now,this.projectId,this.memoryEnvironment,jobId,item.entityKind,item.entityId);}})();
+  }
+  memoryBackfillBatch(jobId:string,limit=10):BackfillRecord[]{
+    const cap=Math.max(1,Math.min(50,Math.trunc(limit)));
+    if(!this.#database.prepare('SELECT 1 FROM memory_backfill_jobs WHERE project_id=? AND environment=? AND id=?').get(this.projectId,this.memoryEnvironment,jobId))throw Error('Backfill job not found in this Store environment');
+    const items=this.#database.prepare("SELECT entity_kind,entity_id,payload_hash,redacted_hash FROM memory_backfill_items WHERE project_id=? AND environment=? AND job_id=? AND status='pending' ORDER BY entity_kind,entity_id LIMIT ?").all(this.projectId,this.memoryEnvironment,jobId,cap) as Array<{entity_kind:'node'|'edge';entity_id:string;payload_hash:string;redacted_hash:string|null}>;
+    const out:BackfillRecord[]=[];
+    for(const item of items){
+      if(item.entity_kind==='node'){
+        const row=this.#database.prepare('SELECT id,type,stable_key,display_name,attributes_json FROM nodes WHERE project_id=? AND environment=? AND id=?').get(this.projectId,this.memoryEnvironment,item.entity_id) as {id:string;type:string;stable_key:string;display_name:string;attributes_json:string}|undefined;
+        if(!row){this.#database.prepare("UPDATE memory_backfill_items SET status='obsolete',updated_at=? WHERE project_id=? AND environment=? AND job_id=? AND entity_kind='node' AND entity_id=?").run(new Date().toISOString(),this.projectId,this.memoryEnvironment,jobId,item.entity_id);continue;}
+        out.push({kind:'node',record:{...this.#backfillNodeValue(row),id:row.id,payloadHash:item.payload_hash,redactedHash:item.redacted_hash??''}});
+      }else{
+        const row=this.#database.prepare('SELECT id,from_node_id,to_node_id,relation_type,attributes_json FROM edges WHERE project_id=? AND environment=? AND id=?').get(this.projectId,this.memoryEnvironment,item.entity_id) as {id:string;from_node_id:string;to_node_id:string;relation_type:string;attributes_json:string}|undefined;
+        if(!row){this.#database.prepare("UPDATE memory_backfill_items SET status='obsolete',updated_at=? WHERE project_id=? AND environment=? AND job_id=? AND entity_kind='edge' AND entity_id=?").run(new Date().toISOString(),this.projectId,this.memoryEnvironment,jobId,item.entity_id);continue;}
+        out.push({kind:'edge',record:{...this.#backfillEdgeValue(row),id:row.id,payloadHash:item.payload_hash,redactedHash:item.redacted_hash??''}});
+      }
+    }
+    return out;
+  }
+  memoryBackfillRecords(jobId:string,offset=0,limit=50):BackfillRecord[]{
+    const cap=Math.max(1,Math.min(50,Math.trunc(limit))),skip=Math.max(0,Math.trunc(offset));
+    if(!this.#database.prepare('SELECT 1 FROM memory_backfill_jobs WHERE project_id=? AND environment=? AND id=?').get(this.projectId,this.memoryEnvironment,jobId))throw Error('Backfill job not found in this Store environment');
+    const items=this.#database.prepare("SELECT entity_kind,entity_id,payload_hash,redacted_hash FROM memory_backfill_items WHERE project_id=? AND environment=? AND job_id=? AND status<>'obsolete' ORDER BY entity_kind,entity_id LIMIT ? OFFSET ?").all(this.projectId,this.memoryEnvironment,jobId,cap,skip) as Array<{entity_kind:'node'|'edge';entity_id:string;payload_hash:string;redacted_hash:string|null}>;
+    const out:BackfillRecord[]=[];
+    for(const item of items){
+      if(item.entity_kind==='node'){
+        const row=this.#database.prepare('SELECT id,type,stable_key,display_name,attributes_json FROM nodes WHERE project_id=? AND environment=? AND id=?').get(this.projectId,this.memoryEnvironment,item.entity_id) as {id:string;type:string;stable_key:string;display_name:string;attributes_json:string}|undefined;
+        if(row)out.push({kind:'node',record:{...this.#backfillNodeValue(row),id:row.id,payloadHash:item.payload_hash,redactedHash:item.redacted_hash??''}});
+      }else{
+        const row=this.#database.prepare('SELECT id,from_node_id,to_node_id,relation_type,attributes_json FROM edges WHERE project_id=? AND environment=? AND id=?').get(this.projectId,this.memoryEnvironment,item.entity_id) as {id:string;from_node_id:string;to_node_id:string;relation_type:string;attributes_json:string}|undefined;
+        if(row)out.push({kind:'edge',record:{...this.#backfillEdgeValue(row),id:row.id,payloadHash:item.payload_hash,redactedHash:item.redacted_hash??''}});
+      }
+    }
+    return out;
+  }
+  finishMemoryBackfill(jobId:string):BackfillSummary{
+    const pending=(this.#database.prepare("SELECT count(*) count FROM memory_backfill_items WHERE project_id=? AND environment=? AND job_id=? AND status='pending'").get(this.projectId,this.memoryEnvironment,jobId) as {count:number}).count;
+    if(pending===0)this.#database.prepare("UPDATE memory_backfill_jobs SET status='completed',completed_at=COALESCE(completed_at,?),updated_at=? WHERE project_id=? AND environment=? AND id=?").run(new Date().toISOString(),new Date().toISOString(),this.projectId,this.memoryEnvironment,jobId);
+    else this.#database.prepare("UPDATE memory_backfill_jobs SET status='running',completed_at=NULL,updated_at=? WHERE project_id=? AND environment=? AND id=?").run(new Date().toISOString(),this.projectId,this.memoryEnvironment,jobId);
+    return this.memoryBackfillSummary(jobId);
+  }
+  interruptMemoryBackfill(jobId:string):void{this.#database.prepare("UPDATE memory_backfill_jobs SET status='interrupted',updated_at=? WHERE project_id=? AND environment=? AND id=? AND status<>'completed'").run(new Date().toISOString(),this.projectId,this.memoryEnvironment,jobId);}
+  memoryBackfillSummary(jobId:string):BackfillSummary{
+    const job=this.#database.prepare('SELECT id,environment,status FROM memory_backfill_jobs WHERE project_id=? AND environment=? AND id=?').get(this.projectId,this.memoryEnvironment,jobId) as {id:string;environment:string;status:BackfillSummary['status']}|undefined;
+    if(!job)throw Error('Backfill job not found in this Store environment');
+    const counts=this.#database.prepare("SELECT count(*) total,sum(status='processed') processed,sum(status='pending') pending,sum(status='obsolete') obsolete FROM memory_backfill_items WHERE project_id=? AND environment=? AND job_id=?").get(this.projectId,this.memoryEnvironment,jobId) as {total:number;processed:number|null;pending:number|null;obsolete:number|null};
+    return{jobId:job.id,environment:job.environment,status:job.status,total:counts.total,processed:counts.processed??0,pending:counts.pending??0,obsolete:counts.obsolete??0};
+  }
+  #commitBackfillNode(input:BackfillNodeWrite):boolean{
+    if(!hasNlpMetadata(input.attributes))throw Error('NLP ingestion is required');
+    return this.#database.transaction(()=>{
+      const row=this.#database.prepare('SELECT id,type,stable_key,display_name,attributes_json FROM nodes WHERE project_id=? AND environment=? AND id=?').get(this.projectId,this.memoryEnvironment,input.id) as {id:string;type:string;stable_key:string;display_name:string;attributes_json:string}|undefined;
+      if(!row){this.#database.prepare("UPDATE memory_backfill_items SET status='obsolete',updated_at=? WHERE project_id=? AND environment=? AND job_id=? AND entity_kind='node' AND entity_id=?").run(new Date().toISOString(),this.projectId,this.memoryEnvironment,input.jobId,input.id);return false;}
+      const currentHash=hashBackfillNode(this.#backfillNodeValue(row));
+      if(currentHash!==input.payloadHash){this.#database.prepare("UPDATE memory_backfill_items SET payload_hash=?,status='pending',updated_at=? WHERE project_id=? AND environment=? AND job_id=? AND entity_kind='node' AND entity_id=?").run(currentHash,new Date().toISOString(),this.projectId,this.memoryEnvironment,input.jobId,input.id);return false;}
+      if(row.type!==input.type||row.stable_key!==input.stable_key)throw Error('Backfill cannot change node identity');
+      const safeValue={type:input.type,stable_key:input.stable_key,display_name:input.display_name,attributes:withoutNlpMetadata(input.attributes)},nextHash=hashBackfillNode(safeValue),json=JSON.stringify(input.attributes),now=new Date().toISOString();
+      if(nextHash!==input.redactedHash){this.#database.prepare("UPDATE memory_backfill_items SET redacted_hash=?,status='pending',updated_at=? WHERE project_id=? AND environment=? AND job_id=? AND entity_kind='node' AND entity_id=?").run(nextHash,now,this.projectId,this.memoryEnvironment,input.jobId,input.id);return false;}
+      this.#database.prepare('UPDATE nodes SET display_name=?,attributes_json=?,updated_at=? WHERE project_id=? AND environment=? AND id=?').run(input.display_name,json,now,this.projectId,this.memoryEnvironment,input.id);
+      const changed=this.#database.prepare("UPDATE memory_backfill_items SET payload_hash=?,redacted_hash=?,status='processed',updated_at=? WHERE project_id=? AND environment=? AND job_id=? AND entity_kind='node' AND entity_id=?").run(nextHash,nextHash,now,this.projectId,this.memoryEnvironment,input.jobId,input.id).changes;
+      if(changed!==1)throw Error('Backfill checkpoint was lost');
+      return true;
+    })();
+  }
+  #commitBackfillEdge(input:BackfillEdgeWrite):boolean{
+    if(!hasNlpMetadata(input.attributes))throw Error('NLP ingestion is required');
+    return this.#database.transaction(()=>{
+      const row=this.#database.prepare('SELECT id,from_node_id,to_node_id,relation_type,attributes_json FROM edges WHERE project_id=? AND environment=? AND id=?').get(this.projectId,this.memoryEnvironment,input.id) as {id:string;from_node_id:string;to_node_id:string;relation_type:string;attributes_json:string}|undefined;
+      if(!row){this.#database.prepare("UPDATE memory_backfill_items SET status='obsolete',updated_at=? WHERE project_id=? AND environment=? AND job_id=? AND entity_kind='edge' AND entity_id=?").run(new Date().toISOString(),this.projectId,this.memoryEnvironment,input.jobId,input.id);return false;}
+      const currentHash=hashBackfillEdge(this.#backfillEdgeValue(row));
+      if(currentHash!==input.payloadHash){this.#database.prepare("UPDATE memory_backfill_items SET payload_hash=?,status='pending',updated_at=? WHERE project_id=? AND environment=? AND job_id=? AND entity_kind='edge' AND entity_id=?").run(currentHash,new Date().toISOString(),this.projectId,this.memoryEnvironment,input.jobId,input.id);return false;}
+      if(row.from_node_id!==input.from_id||row.to_node_id!==input.to_id||row.relation_type!==input.relation)throw Error('Backfill cannot change edge identity');
+      const safeValue={from_id:input.from_id,to_id:input.to_id,relation:input.relation,attributes:withoutNlpMetadata(input.attributes)},nextHash=hashBackfillEdge(safeValue),json=JSON.stringify(input.attributes),now=new Date().toISOString();
+      if(nextHash!==input.redactedHash){this.#database.prepare("UPDATE memory_backfill_items SET redacted_hash=?,status='pending',updated_at=? WHERE project_id=? AND environment=? AND job_id=? AND entity_kind='edge' AND entity_id=?").run(nextHash,now,this.projectId,this.memoryEnvironment,input.jobId,input.id);return false;}
+      this.#database.prepare('UPDATE edges SET attributes_json=?,updated_at=? WHERE project_id=? AND environment=? AND id=?').run(json,now,this.projectId,this.memoryEnvironment,input.id);
+      const changed=this.#database.prepare("UPDATE memory_backfill_items SET payload_hash=?,redacted_hash=?,status='processed',updated_at=? WHERE project_id=? AND environment=? AND job_id=? AND entity_kind='edge' AND entity_id=?").run(nextHash,nextHash,now,this.projectId,this.memoryEnvironment,input.jobId,input.id).changes;
+      if(changed!==1)throw Error('Backfill checkpoint was lost');
+      return true;
+    })();
+  }
     listEdges(nodeId?:string){return nodeId?this.#database.prepare('SELECT * FROM edges WHERE project_id=? AND environment=? AND tombstone=0 AND (from_node_id=? OR to_node_id=?)').all(this.projectId,this.memoryEnvironment,nodeId,nodeId):this.#database.prepare('SELECT * FROM edges WHERE project_id=? AND environment=? AND tombstone=0').all(this.projectId,this.memoryEnvironment);}
   neighbors(nodeId:string,limit=50){return this.#database.prepare('SELECT n.* FROM edges e JOIN nodes n ON n.project_id=e.project_id AND n.environment=e.environment AND n.id=CASE WHEN e.from_node_id=? THEN e.to_node_id ELSE e.from_node_id END WHERE e.project_id=? AND e.environment=? AND e.tombstone=0 AND (e.from_node_id=? OR e.to_node_id=?) AND n.tombstone=0 LIMIT ?').all(nodeId,this.projectId,this.memoryEnvironment,nodeId,nodeId,Math.max(0,Math.min(200,limit)));}
   listConflicts(){return this.#database.prepare(`SELECT 'node' kind,id,canonical_key entity_key,conflict_status FROM nodes WHERE project_id=? AND environment=? AND conflict_status<>'none' UNION ALL SELECT 'edge',id,relation_type,conflict_status FROM edges WHERE project_id=? AND environment=? AND conflict_status<>'none' UNION ALL SELECT 'yaml',entity_id,entity_key,conflict_status FROM yaml_ownership WHERE project_id=? AND environment=? AND conflict_status<>'none'`).all(this.projectId,this.memoryEnvironment,this.projectId,this.memoryEnvironment,this.projectId,this.memoryEnvironment);}

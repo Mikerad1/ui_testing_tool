@@ -23,10 +23,20 @@ export type YamlEdgePlan = {
   source: string;
 };
 
+export type YamlRecordFingerprint = {
+  document_kind:string;
+  document_id:string;
+  source_path:string;
+  raw_hash:string;
+  redacted_hash:string;
+  preparation_key:string;
+};
+
 export type YamlReconciliationPlan = {
   sources: Array<{ path: string; hash: string }>;
   entities: YamlEntityPlan[];
   edges: YamlEdgePlan[];
+  recordFingerprints?:YamlRecordFingerprint[];
 };
 
 export function withNlpMetadata(attributes: Record<string, unknown>, normalized: string): LearningAttributes {

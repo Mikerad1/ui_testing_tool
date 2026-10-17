@@ -8,6 +8,9 @@ const canonical=(value:any):string=>Array.isArray(value)?`[${value.map(canonical
 
 export function commitYamlReconciliation(database:Database.Database,projectId:string,environment:string,plan:YamlReconciliationPlan):number {
   if(plan.entities.some(entity=>!hasNlpMetadata(entity.attrs))||plan.edges.some(edge=>!hasNlpMetadata(edge.attrs)))throw Error('NLP ingestion is required');
+  for(const fingerprint of plan.recordFingerprints??[]){
+    if(!/^[a-z_]{1,40}$/.test(fingerprint.document_kind)||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$/.test(fingerprint.document_id)||!plan.sources.some(source=>source.path===fingerprint.source_path&&source.hash===fingerprint.raw_hash)||![fingerprint.raw_hash,fingerprint.redacted_hash,fingerprint.preparation_key].every(hash=>/^[a-f0-9]{64}$/.test(hash)))throw Error('Invalid YAML record fingerprint');
+  }
   const identity=(type:string,key:string)=>environment===LEGACY_MEMORY_ENVIRONMENT?`${projectId}:${type}:${key}`:`${projectId}:${environment}:${type}:${key}`;
   return database.transaction(()=>{
     const now=new Date().toISOString(),activeNodes=new Set<string>(),activeEdges=new Set<string>(),sourcePaths=new Set(plan.sources.map(source=>source.path));
@@ -65,6 +68,8 @@ export function commitYamlReconciliation(database:Database.Database,projectId:st
       }
     }
     for(const row of database.prepare('SELECT path FROM yaml_sources WHERE project_id=? AND environment=?').all(projectId,environment) as Array<{path:string}>)if(!sourcePaths.has(row.path))database.prepare('UPDATE yaml_sources SET active=0 WHERE project_id=? AND environment=? AND path=?').run(projectId,environment,row.path);
+    for(const fingerprint of plan.recordFingerprints??[])database.prepare(`INSERT INTO yaml_record_fingerprints(project_id,environment,document_kind,document_id,source_path,raw_hash,redacted_hash,preparation_key,updated_at) VALUES(?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(project_id,environment,document_kind,document_id) DO UPDATE SET source_path=excluded.source_path,raw_hash=excluded.raw_hash,redacted_hash=excluded.redacted_hash,preparation_key=excluded.preparation_key,updated_at=excluded.updated_at`).run(projectId,environment,fingerprint.document_kind,fingerprint.document_id,fingerprint.source_path,fingerprint.raw_hash,fingerprint.redacted_hash,fingerprint.preparation_key,now);
     return plan.sources.length;
   })();
 }
