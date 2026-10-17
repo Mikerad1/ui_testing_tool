@@ -2,17 +2,18 @@ name: Release bundles
 
 on:
   push:
-    tags:
-      - 'v*'
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   windows-x64:
-    name: Build Windows x64 bundle
+    name: Build and offline-test Windows x64 bundle
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
         with:
@@ -22,61 +23,79 @@ jobs:
           node-version: 24
           cache: npm
           cache-dependency-path: package-lock.json
-      - name: Verify tag matches package version
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13.16'
+      - name: Verify release tag
+        if: github.event_name == 'push'
         shell: bash
-        run: node --input-type=module -e "import fs from 'node:fs'; const version=JSON.parse(fs.readFileSync('package.json','utf8')).version; if(process.env.GITHUB_REF_NAME !== 'v'+version) { console.error('Tag must be v'+version); process.exit(1); }"
-      - name: Require release tag commit to be reachable from main
-        shell: bash
-        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
-      - name: Install dependencies
+        run: |
+          node --input-type=module -e "import fs from 'node:fs'; const version=JSON.parse(fs.readFileSync('package.json','utf8')).version; if(process.env.GITHUB_REF_NAME !== 'v'+version) process.exit(1);"
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - name: Install Node dependencies
         run: npm ci
-      - name: Build output for Windows updater integration tests
-        run: npm run build
-      - name: Run Windows updater integration tests
-        run: npx tsx --test tests/updater.test.ts
-      - name: Install matching Playwright Chromium for validation
+      - name: Install matching Playwright Chromium for normal integration tests
         run: npx playwright install chromium
-      - name: Typecheck, build, lint, and test
+      - name: Typecheck, build, lint, Node tests, updater/archive tests, and Python tests
+        shell: pwsh
         run: |
           npm run typecheck
           npm run build
           npm run lint
           npm test
-      - name: Download matching private Node runtime
+          python -m unittest discover -s python_tests -v
+      - name: Download and hash-verify pinned target CPython runtime
+        shell: pwsh
+        run: |
+          python scripts/prepare-python-runtime.py windows-x64 --archive "$env:RUNNER_TEMP\python-3.13.16-win32-x64.zip" --output "$env:RUNNER_TEMP\python-runtime"
+          $runtimeRelative = python -c "import json; print(json.load(open(r'$env:RUNNER_TEMP\python-runtime\runtime-input.json', encoding='utf-8'))['python_executable'])"
+          $runtimePython = Join-Path "$env:RUNNER_TEMP\python-runtime" $runtimeRelative
+          if (!(Test-Path -LiteralPath $runtimePython) -or ((& $runtimePython --version 2>&1) -ne 'Python 3.13.16')) { throw 'Hash-verified CPython 3.13.16 executable was not found' }
+          "UMB_TARGET_PYTHON=$runtimePython" >> $env:GITHUB_ENV
+      - name: Build locked PyInstaller onedir sidecar
+        shell: pwsh
+        run: |
+          python scripts/build-memory-sidecar.py --python "$env:UMB_TARGET_PYTHON" --target windows-x64 --runtime-input "$env:RUNNER_TEMP\python-runtime\runtime-input.json" --output "$env:RUNNER_TEMP\memory-sidecar"
+          if (!(Test-Path "$env:RUNNER_TEMP\memory-sidecar\umb-memory-sidecar.exe")) { throw 'Windows sidecar executable missing' }
+      - name: Download and verify private Node runtime
         shell: pwsh
         run: |
           $version = node -p "process.version"
-          "NODE_RUNTIME_VERSION=$version" >> $env:GITHUB_ENV
           $archive = Join-Path $env:RUNNER_TEMP 'node-runtime.zip'
           $runtimeRoot = Join-Path $env:RUNNER_TEMP 'node-runtime'
           $archiveName = "node-$version-win-x64.zip"
           Invoke-WebRequest -UseBasicParsing "https://nodejs.org/dist/$version/$archiveName" -OutFile $archive
-          $checksums = Join-Path $env:RUNNER_TEMP 'SHASUMS256.txt'
-          Invoke-WebRequest -UseBasicParsing "https://nodejs.org/dist/$version/SHASUMS256.txt" -OutFile $checksums
-          $line = Get-Content -LiteralPath $checksums | Where-Object { $_ -match ("\s" + [regex]::Escape($archiveName) + "$") } | Select-Object -First 1
-          if (!$line) { throw 'Node runtime checksum entry was not found' }
+          Invoke-WebRequest -UseBasicParsing "https://nodejs.org/dist/$version/SHASUMS256.txt" -OutFile (Join-Path $env:RUNNER_TEMP 'SHASUMS256.txt')
+          $line = Get-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'SHASUMS256.txt') | Where-Object { $_ -match ("\s" + [regex]::Escape($archiveName) + "$") } | Select-Object -First 1
+          if (!$line) { throw 'Node runtime checksum entry missing' }
           $expected = ($line.Trim() -split '\s+')[0].ToLowerInvariant()
-          $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($actual -ne $expected) { throw 'Node runtime checksum verification failed' }
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) { throw 'Node runtime hash verification failed' }
           Expand-Archive -LiteralPath $archive -DestinationPath $runtimeRoot
           "NODE_RUNTIME_DIR=$(Join-Path $runtimeRoot "node-$version-win-x64")" >> $env:GITHUB_ENV
-      - name: Stage production dependencies and bundle
+      - name: Package, compress, extract, relocate, corrupt-model test copy, and firewall-test
         shell: pwsh
         run: |
           npm prune --omit=dev
           $bundle = Join-Path $env:RUNNER_TEMP 'umb-windows-x64'
-          node scripts/package-release.mjs --platform windows --node-runtime "$env:NODE_RUNTIME_DIR" --output "$bundle"
-          Push-Location $bundle
-          try {
-            & .\umb.cmd --help
-            if ($LASTEXITCODE -ne 0) { throw 'umb.cmd --help failed' }
-            & .\payload\runtime\node.exe -e "const Database=require('./payload/node_modules/better-sqlite3');const db=new Database(':memory:');if(db.prepare('select 7 as value').get().value!==7)process.exit(1);db.close()"
-            if ($LASTEXITCODE -ne 0) { throw 'Bundled Node SQLite smoke failed' }
-          } finally { Pop-Location }
+          node scripts/package-release.mjs --platform windows --node-runtime "$env:NODE_RUNTIME_DIR" --memory-sidecar "$env:RUNNER_TEMP\memory-sidecar" --output "$bundle"
           $archive = Join-Path $env:RUNNER_TEMP 'umb-windows-x64.zip'
           Compress-Archive -Path $bundle -DestinationPath $archive -Force
-          $checksum = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          $checksum = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
           Set-Content -Path "$archive.sha256" -Value "$checksum  umb-windows-x64.zip" -Encoding ascii
+          node scripts/validate-release-archive.mjs "$archive" umb-windows-x64
+          $extracted = Join-Path $env:RUNNER_TEMP 'windows-extracted'
+          Expand-Archive -LiteralPath $archive -DestinationPath $extracted -Force
+          $relocation = Join-Path $env:RUNNER_TEMP 'relocated-root'
+          New-Item -ItemType Directory -Path $relocation -Force | Out-Null
+          $relocated = Join-Path $relocation 'umb-windows-x64'
+          Move-Item -LiteralPath (Join-Path $extracted 'umb-windows-x64') -Destination $relocated
+          $sidecar = Join-Path $relocated 'payload\runtime\memory-sidecar\umb-memory-sidecar.exe'
+          $missing = Join-Path $env:RUNNER_TEMP 'corrupted-memory-sidecar'
+          $unrelatedCwd = Join-Path $env:RUNNER_TEMP 'unrelated-cwd'
+          New-Item -ItemType Directory -Path $unrelatedCwd -Force | Out-Null
+          python scripts/corrupt-sidecar-model.py --source (Join-Path $relocated 'payload\runtime\memory-sidecar') --output $missing
+          $missingExe = Join-Path $missing 'umb-memory-sidecar.exe'
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/offline-archive-smoke-windows.ps1 -BundleRoot $relocated -SidecarExecutable $sidecar -MissingModelExecutable $missingExe -SmokeHarness (Resolve-Path tests/memory-sidecar-archive-smoke.mjs).Path -NetworkProbe (Resolve-Path tests/assert-network-blocked.mjs).Path -UnrelatedCwd $unrelatedCwd
       - uses: actions/upload-artifact@v4
         with:
           name: bundle-windows-x64
@@ -84,11 +103,21 @@ jobs:
             ${{ runner.temp }}/umb-windows-x64.zip
             ${{ runner.temp }}/umb-windows-x64.zip.sha256
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: memory-build-provenance-windows-x64
+          path: |
+            ${{ runner.temp }}/memory-sidecar/build-inputs.json
+            python/requirements-windows-x64.lock
+            python/requirements.in
+            python/runtime-artifacts.json
+            python/lock-generation.json
+          if-no-files-found: error
 
   linux-x64:
-    name: Build Linux x64 bundle
+    name: Build and offline-test Linux x64 bundle
     runs-on: ubuntu-22.04
-    timeout-minutes: 45
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
         with:
@@ -98,46 +127,64 @@ jobs:
           node-version: 24
           cache: npm
           cache-dependency-path: package-lock.json
-      - name: Verify tag matches package version
-        run: node --input-type=module -e "import fs from 'node:fs'; const version=JSON.parse(fs.readFileSync('package.json','utf8')).version; if(process.env.GITHUB_REF_NAME !== 'v'+version) { console.error('Tag must be v'+version); process.exit(1); }"
-      - name: Require release tag commit to be reachable from main
-        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
-      - name: Install dependencies
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13.16'
+      - name: Verify release tag
+        if: github.event_name == 'push'
+        run: |
+          node --input-type=module -e "import fs from 'node:fs'; const version=JSON.parse(fs.readFileSync('package.json','utf8')).version; if(process.env.GITHUB_REF_NAME !== 'v'+version) process.exit(1);"
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - name: Install Node dependencies
         run: npm ci
-      - name: Install matching Playwright Chromium and Linux system dependencies for validation
+      - name: Install Playwright Chromium and system dependencies
         run: npx playwright install --with-deps chromium
-      - name: Typecheck, build, lint, and test
+      - name: Typecheck, build, lint, Node tests, updater/archive tests, and Python tests
         run: |
           npm run typecheck
           npm run build
           npm run lint
           npm test
-      - name: Download matching private Node runtime
-        shell: bash
+          python3 -m unittest discover -s python_tests -v
+      - name: Download and hash-verify pinned target CPython runtime
         run: |
-          NODE_RUNTIME_VERSION="$(node -p 'process.version')"
-          echo "NODE_RUNTIME_VERSION=$NODE_RUNTIME_VERSION" >> "$GITHUB_ENV"
+          python3 scripts/prepare-python-runtime.py linux-x64 --archive "$RUNNER_TEMP/python-3.13.16-linux-22.04-x64.tar.gz" --output "$RUNNER_TEMP/python-runtime"
+          PYTHON_RELATIVE="$(python3 -c "import json; print(json.load(open('$RUNNER_TEMP/python-runtime/runtime-input.json'))['python_executable'])")"
+          PYTHON_RUNTIME="$RUNNER_TEMP/python-runtime/$PYTHON_RELATIVE"
+          test -x "$PYTHON_RUNTIME"
+          "$PYTHON_RUNTIME" --version | grep -Fx 'Python 3.13.16'
+          echo "UMB_TARGET_PYTHON=$PYTHON_RUNTIME" >> "$GITHUB_ENV"
+      - name: Build locked PyInstaller onedir sidecar
+        run: |
+          python3 scripts/build-memory-sidecar.py --python "$UMB_TARGET_PYTHON" --target linux-x64 --runtime-input "$RUNNER_TEMP/python-runtime/runtime-input.json" --output "$RUNNER_TEMP/memory-sidecar"
+          test -x "$RUNNER_TEMP/memory-sidecar/umb-memory-sidecar"
+      - name: Download and verify private Node runtime
+        run: |
+          NODE_VERSION="$(node -p 'process.version')"
+          NODE_ARCHIVE="node-${NODE_VERSION}-linux-x64.tar.xz"
           mkdir -p "$RUNNER_TEMP/node-runtime"
-          NODE_ARCHIVE="node-${NODE_RUNTIME_VERSION}-linux-x64.tar.xz"
-          curl --fail --location --silent --show-error "https://nodejs.org/dist/${NODE_RUNTIME_VERSION}/${NODE_ARCHIVE}" --output "$RUNNER_TEMP/$NODE_ARCHIVE"
-          curl --fail --location --silent --show-error "https://nodejs.org/dist/${NODE_RUNTIME_VERSION}/SHASUMS256.txt" --output "$RUNNER_TEMP/SHASUMS256.txt"
+          curl --fail --location --silent --show-error "https://nodejs.org/dist/${NODE_VERSION}/${NODE_ARCHIVE}" --output "$RUNNER_TEMP/$NODE_ARCHIVE"
+          curl --fail --location --silent --show-error "https://nodejs.org/dist/${NODE_VERSION}/SHASUMS256.txt" --output "$RUNNER_TEMP/SHASUMS256.txt"
           EXPECTED_SHA="$(awk -v file="$NODE_ARCHIVE" '$2 == file || $2 == "*"file { print $1; exit }' "$RUNNER_TEMP/SHASUMS256.txt")"
-          if [ -z "$EXPECTED_SHA" ]; then echo 'Node runtime checksum entry was not found' >&2; exit 1; fi
-          echo "$EXPECTED_SHA  $RUNNER_TEMP/$NODE_ARCHIVE" | sha256sum --check --status
+          test -n "$EXPECTED_SHA"
+          echo "$EXPECTED_SHA  $RUNNER_TEMP/$NODE_ARCHIVE" | sha256sum --check
           tar -xJf "$RUNNER_TEMP/$NODE_ARCHIVE" -C "$RUNNER_TEMP/node-runtime"
-          echo "NODE_RUNTIME_DIR=$RUNNER_TEMP/node-runtime/node-${NODE_RUNTIME_VERSION}-linux-x64" >> "$GITHUB_ENV"
-      - name: Stage production dependencies and bundle
-        shell: bash
+          echo "NODE_RUNTIME_DIR=$RUNNER_TEMP/node-runtime/node-${NODE_VERSION}-linux-x64" >> "$GITHUB_ENV"
+      - name: Package, compress, extract, relocate, corrupt-model test copy, and network-namespace-test
         run: |
+          chmod +x scripts/offline-archive-smoke-linux.sh
           npm prune --omit=dev
           BUNDLE="$RUNNER_TEMP/umb-linux-x64"
-          node scripts/package-release.mjs --platform linux --node-runtime "$NODE_RUNTIME_DIR" --output "$BUNDLE"
-          cd "$BUNDLE"
-          ./umb --help
-          ./payload/runtime/bin/node -e "const Database=require('./payload/node_modules/better-sqlite3');const db=new Database(':memory:');if(db.prepare('select 7 as value').get().value!==7)process.exit(1);db.close()"
+          node scripts/package-release.mjs --platform linux --node-runtime "$NODE_RUNTIME_DIR" --memory-sidecar "$RUNNER_TEMP/memory-sidecar" --output "$BUNDLE"
           tar -czf "$RUNNER_TEMP/umb-linux-x64.tar.gz" -C "$RUNNER_TEMP" umb-linux-x64
-          cd "$RUNNER_TEMP"
-          sha256sum umb-linux-x64.tar.gz > umb-linux-x64.tar.gz.sha256
+          sha256sum "$RUNNER_TEMP/umb-linux-x64.tar.gz" > "$RUNNER_TEMP/umb-linux-x64.tar.gz.sha256"
+          node scripts/validate-release-archive.mjs "$RUNNER_TEMP/umb-linux-x64.tar.gz" umb-linux-x64
+          mkdir -p "$RUNNER_TEMP/linux-extracted"
+          tar -xzf "$RUNNER_TEMP/umb-linux-x64.tar.gz" -C "$RUNNER_TEMP/linux-extracted"
+          mkdir -p "$RUNNER_TEMP/relocated-root" "$RUNNER_TEMP/unrelated-cwd"
+          mv "$RUNNER_TEMP/linux-extracted/umb-linux-x64" "$RUNNER_TEMP/relocated-root/umb-linux-x64"
+          python3 scripts/corrupt-sidecar-model.py --source "$RUNNER_TEMP/relocated-root/umb-linux-x64/payload/runtime/memory-sidecar" --output "$RUNNER_TEMP/corrupted-memory-sidecar"
+          scripts/offline-archive-smoke-linux.sh "$(command -v node)" "$GITHUB_WORKSPACE/tests/assert-network-blocked.mjs" "$GITHUB_WORKSPACE/tests/memory-sidecar-archive-smoke.mjs" "$RUNNER_TEMP/relocated-root/umb-linux-x64" "$RUNNER_TEMP/relocated-root/umb-linux-x64/payload/runtime/memory-sidecar/umb-memory-sidecar" "$RUNNER_TEMP/corrupted-memory-sidecar/umb-memory-sidecar" "$RUNNER_TEMP/unrelated-cwd"
       - uses: actions/upload-artifact@v4
         with:
           name: bundle-linux-x64
@@ -145,9 +192,20 @@ jobs:
             ${{ runner.temp }}/umb-linux-x64.tar.gz
             ${{ runner.temp }}/umb-linux-x64.tar.gz.sha256
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: memory-build-provenance-linux-x64
+          path: |
+            ${{ runner.temp }}/memory-sidecar/build-inputs.json
+            python/requirements-linux-x64.lock
+            python/requirements.in
+            python/runtime-artifacts.json
+            python/lock-generation.json
+          if-no-files-found: error
 
   publish:
     name: Publish GitHub Release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: [windows-x64, linux-x64]
     runs-on: ubuntu-latest
     permissions:

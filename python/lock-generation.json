@@ -1,0 +1,11 @@
+{
+  "tool": "uv",
+  "version": "0.11.14",
+  "source": "python/requirements.in",
+  "index": "https://pypi.org/simple",
+  "options": ["--generate-hashes", "--only-binary=:all:"],
+  "resolutions": {
+    "windows-x64": {"python": "3.13", "platform": "x86_64-pc-windows-msvc", "lock": "python/requirements-windows-x64.lock"},
+    "linux-x64": {"python": "3.13", "platform": "x86_64-manylinux_2_17", "lock": "python/requirements-linux-x64.lock"}
+  }
+}

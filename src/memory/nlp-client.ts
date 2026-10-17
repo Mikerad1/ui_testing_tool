@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
+import path from 'node:path';
 import {
   NLP_GENERIC_ERROR, NLP_MAX_LINE_BYTES, NLP_MAX_OUTSTANDING, NLP_MAX_SPANS,
   NLP_MAX_TEXT_BYTES, NLP_PROTOCOL_VERSION, NLP_TIMEOUT_MS,
@@ -27,7 +28,9 @@ function validateResponse(value: unknown, id: string, sourceLength?: number): Nl
   if (value.op === 'health') {
     const health = value.health;
     if (!isRecord(health) || health.protocol !== NLP_PROTOCOL_VERSION || typeof health.python !== 'string' ||
-      typeof health.spacy !== 'string' || typeof health.model !== 'string' || typeof health.rules !== 'string' || typeof health.ready !== 'boolean') throw new Error(NLP_GENERIC_ERROR);
+      typeof health.spacy !== 'string' || typeof health.model !== 'string' || typeof health.model_version !== 'string' ||
+      !/^\d+\.\d+\.\d+(?:[.+-][A-Za-z0-9.-]+)?$/.test(health.model_version) ||
+      typeof health.rules !== 'string' || typeof health.ready !== 'boolean') throw new Error(NLP_GENERIC_ERROR);
   } else if (value.op === 'analyze') {
     const normalized = value.normalized;
     if (typeof normalized !== 'string' || Buffer.byteLength(normalized, 'utf8') > NLP_MAX_TEXT_BYTES ||
@@ -48,9 +51,14 @@ export class NlpClient {
   private readonly timeoutMs: number;
 
   constructor(options: NlpClientOptions) {
-    if (!options.executable || !Array.isArray(options.args) || options.args.some(arg => typeof arg !== 'string')) throw new Error(NLP_GENERIC_ERROR);
+    if (!options.executable || !path.isAbsolute(options.executable) || !Array.isArray(options.args) || options.args.some(arg => typeof arg !== 'string')) throw new Error(NLP_GENERIC_ERROR);
     this.timeoutMs = options.timeoutMs ?? NLP_TIMEOUT_MS;
-    try { this.child = (options.spawnProcess ?? spawn)(options.executable, [...options.args], { shell: false, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true }); }
+    const env: NodeJS.ProcessEnv = {};
+    for (const key of ['SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'LANG', 'LC_ALL']) {
+      const value = process.env[key];
+      if (value !== undefined) env[key] = value;
+    }
+    try { this.child = (options.spawnProcess ?? spawn)(options.executable, [...options.args], { shell: false, cwd: path.dirname(options.executable), env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true }); }
     catch { throw new Error(NLP_GENERIC_ERROR); }
     this.child.stdout?.on('data', chunk => this.onData(chunk));
     this.child.stderr?.on('data', () => { /* stderr is deliberately discarded */ });
@@ -60,7 +68,7 @@ export class NlpClient {
 
   async health(): Promise<Extract<NlpResponse, { op: 'health' }>> {
     this.ready = false;
-    const response = await this.request({ version: 1, id: randomUUID(), op: 'health' });
+    const response = await this.request({ version: NLP_PROTOCOL_VERSION, id: randomUUID(), op: 'health' });
     if (!response.ok || response.op !== 'health' || !response.health.ready) throw new Error(NLP_GENERIC_ERROR);
     this.ready = true;
     return response;
@@ -68,13 +76,13 @@ export class NlpClient {
   async analyze(text: string): Promise<Extract<NlpResponse, { op: 'analyze' }>> {
     if (!this.ready || typeof text !== 'string' || Buffer.byteLength(text, 'utf8') > NLP_MAX_TEXT_BYTES) throw new Error(NLP_GENERIC_ERROR);
     const sourceLength = Array.from(text).length;
-    const response = await this.request({ version: 1, id: randomUUID(), op: 'analyze', text }, sourceLength);
+    const response = await this.request({ version: NLP_PROTOCOL_VERSION, id: randomUUID(), op: 'analyze', text }, sourceLength);
     if (!response.ok || response.op !== 'analyze') throw new Error(NLP_GENERIC_ERROR);
     return response;
   }
   async shutdown(): Promise<void> {
     if (this.closed) return;
-    try { await this.request({ version: 1, id: randomUUID(), op: 'shutdown' }); } catch { /* teardown remains best-effort */ }
+    try { await this.request({ version: NLP_PROTOCOL_VERSION, id: randomUUID(), op: 'shutdown' }); } catch { /* teardown remains best-effort */ }
     this.closed = true;
     this.child.stdin?.end();
     if (this.child.exitCode === null && this.child.signalCode === null) this.child.kill();

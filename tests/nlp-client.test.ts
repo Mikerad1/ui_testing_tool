@@ -30,8 +30,10 @@ class FakeChild extends EventEmitter {
 function makeClient(respond: ConstructorParameters<typeof FakeChild>[0], timeoutMs = 100) {
   let child: FakeChild;
   const client = new NlpClient({ executable: '/explicit/python', args: ['worker.py'], timeoutMs,
-    spawnProcess: ((file: string, args: string[]) => {
+    spawnProcess: ((file: string, args: string[], options: import('node:child_process').SpawnOptions) => {
       assert.equal(file, '/explicit/python'); assert.deepEqual(args, ['worker.py']);
+      assert.equal(options.shell, false); assert.equal(options.cwd, '/explicit');
+      assert.equal(options.env?.PYTHONPATH, undefined); assert.equal(options.env?.PATH, undefined);
       child = new FakeChild(respond); return child as unknown as ChildProcess;
     }) as never });
   return { client, child: () => child! };
@@ -39,14 +41,32 @@ function makeClient(respond: ConstructorParameters<typeof FakeChild>[0], timeout
 
 test('client sends versioned JSONL and accepts health and bounded analysis', async () => {
   const fixture = makeClient((request, child) => {
-    const base = { version: 1, id: request.id, ok: true };
-    if (request.op === 'health') child.send({ ...base, op: 'health', health: { protocol: 1, python: '3', spacy: '3', model: 'fake', rules: '1', ready: true } });
+    const base = { version: 2, id: request.id, ok: true };
+    assert.equal(request.version, 2);
+    if (request.op === 'health') child.send({ ...base, op: 'health', health: { protocol: 2, python: '3', spacy: '3', model: 'fake', model_version: '3.8.0', rules: '1', ready: true } });
     else child.send({ ...base, op: request.op, normalized: 'hello', tokens: [{ start: 0, end: 5, text: 'hello', label: 'TOKEN' }], entities: [] });
   });
   assert.equal((await fixture.client.health()).health.model, 'fake');
   assert.equal((await fixture.client.analyze('hello')).normalized, 'hello');
   assert.equal(fixture.child().requests.length, 2);
   await fixture.client.shutdown();
+});
+
+test('spawn ignores hostile ambient Python and PATH variables and uses executable cwd', () => {
+  const saved = Object.fromEntries(['PYTHONPATH', 'PYTHONHOME', 'PATH'].map(key => [key, process.env[key]]));
+  process.env.PYTHONPATH = '/hostile/imports'; process.env.PYTHONHOME = '/hostile/python'; process.env.PATH = '/hostile/bin';
+  try {
+    let child: FakeChild | undefined;
+    new NlpClient({ executable: '/bundle/runtime/memory-sidecar/sidecar', args: [], spawnProcess: ((file: string, _args: string[], options: import('node:child_process').SpawnOptions) => {
+      assert.equal(file, '/bundle/runtime/memory-sidecar/sidecar');
+      assert.equal(options.shell, false); assert.equal(options.cwd, '/bundle/runtime/memory-sidecar');
+      assert.equal(options.env?.PYTHONPATH, undefined); assert.equal(options.env?.PYTHONHOME, undefined); assert.equal(options.env?.PATH, undefined);
+      child = new FakeChild(() => undefined); return child as unknown as ChildProcess;
+    }) as never });
+    child?.kill();
+  } finally {
+    for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+  }
 });
 
 test('malformed and version-mismatched responses reject generically', async () => {
@@ -64,11 +84,11 @@ test('unavailable child process errors reject generically', async () => {
 test('analysis requires ready health and validates spans against Unicode source offsets', async () => {
   const fixture = makeClient((request, child) => {
     if (request.op === 'health') {
-      child.send({ version: 1, id: request.id, ok: true, op: 'health', health: { protocol: 1, python: '3', spacy: '3', model: 'fake', rules: '1', ready: true } });
+      child.send({ version: 2, id: request.id, ok: true, op: 'health', health: { protocol: 2, python: '3', spacy: '3', model: 'fake', model_version: '3.8.0', rules: '1', ready: true } });
     } else if (request.op === 'analyze') {
-      child.send({ version: 1, id: request.id, ok: true, op: 'analyze', normalized: 'x',
+      child.send({ version: 2, id: request.id, ok: true, op: 'analyze', normalized: 'x',
         tokens: [{ start: 0, end: 1, text: 'short', label: 'TOKEN' }], entities: [] });
-    } else child.send({ version: 1, id: request.id, ok: true, op: 'shutdown' });
+    } else child.send({ version: 2, id: request.id, ok: true, op: 'shutdown' });
   });
   await assert.rejects(fixture.client.analyze('😀 ran'), /NLP sidecar request failed/);
   await fixture.client.health();

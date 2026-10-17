@@ -55,9 +55,13 @@ test('YAML fingerprints invalidate for redaction policy and NLP profile changes'
     const repeated:string[]=[],redactedWriter=testLearningWriter(store,{inputs:repeated,sensitivePaths:['/name']});await reconcile(knowledge,store,redactedWriter);assert.equal(repeated.length,1,'redaction-policy change invalidates prepared data');
     assert.equal((store.getByTypeKey('screen','home') as any).display_name,'[REDACTED]');
     const rulesChanged:string[]=[],newRules=testLearningWriter(store,{inputs:rulesChanged,rules:'rules-v2'});await reconcile(knowledge,store,newRules);assert.equal(rulesChanged.length,1,'NLP rules change invalidates prepared data');
-    const protocolChanged:string[]=[],newProtocol=testLearningWriter(store,{inputs:protocolChanged,protocol:2});await reconcile(knowledge,store,newProtocol);assert.equal(protocolChanged.length,1,'NLP protocol change invalidates prepared data');
+    const protocolChanged:string[]=[],newProtocol=testLearningWriter(store,{inputs:protocolChanged,protocol:3});await reconcile(knowledge,store,newProtocol);assert.equal(protocolChanged.length,1,'NLP protocol change invalidates prepared data');
     const modelChanged:string[]=[],newModel=testLearningWriter(store,{inputs:modelChanged,model:'different-model'});await reconcile(knowledge,store,newModel);assert.equal(modelChanged.length,1,'NLP model change invalidates prepared data');
-    const projectionChanged:string[]=[],projectionWriter=testLearningWriter(store,{inputs:projectionChanged,model:'different-model'});
+    const baselineProfile=await testLearningWriter(store,{model:'different-model',modelVersion:'3.8.0'}).pipelineFingerprint();
+    const modelVersionChanged:string[]=[],newModelVersion=testLearningWriter(store,{inputs:modelVersionChanged,model:'different-model',modelVersion:'3.8.1'});
+    assert.notEqual(await newModelVersion.pipelineFingerprint(),baselineProfile,'exact model version participates in the NLP profile fingerprint');
+    await reconcile(knowledge,store,newModelVersion);assert.equal(modelVersionChanged.length,1,'model-version change invalidates cached YAML normalization');
+    const projectionChanged:string[]=[],projectionWriter=testLearningWriter(store,{inputs:projectionChanged,model:'different-model',modelVersion:'3.8.1'});
     const projectionInput=await projectionWriter.validateYamlDocument({schema_version:1,kind:'screen',id:'home',name:'[REDACTED]'}, {sourcePath:'home.yaml',documentKind:'screen',documentId:'home',rawHash:(store.db.prepare("SELECT raw_hash FROM yaml_record_fingerprints WHERE project_id=? AND environment=? AND document_kind='screen' AND document_id='home'").get(store.projectId,store.memoryEnvironment) as any).raw_hash,projectionVersion:'yaml-projection-v2'},value=>value);
     await projectionWriter.normalizeYamlDocument(projectionInput);
     assert.equal(projectionChanged.length,1,'YAML projection version is part of the preparation key');

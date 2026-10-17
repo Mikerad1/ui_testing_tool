@@ -11,13 +11,13 @@ const log = process.argv[3]!;
 const store = new Store(path.join(root, 'memory.sqlite'), 'stdio-drain');
 const nlp: NlpProcessor = {
   async health() {
-    return { version: 1, id: 'health', ok: true, op: 'health', health: { protocol: 1, python: 'test', spacy: 'fake', model: 'fake', rules: '1', ready: true } };
+    return { version: 2, id: 'health', ok: true, op: 'health', health: { protocol: 2, python: 'test', spacy: 'fake', model: 'fake', model_version: '1.0.0', rules: '1', ready: true } };
   },
   async analyze(text) {
     await appendFile(log, 'analyze-start\n');
     await new Promise(resolve => setTimeout(resolve, 300));
     await appendFile(log, 'analyze-done\n');
-    return { version: 1, id: 'analyze', ok: true, op: 'analyze', normalized: text.toLowerCase(), tokens: [], entities: [] };
+    return { version: 2, id: 'analyze', ok: true, op: 'analyze', normalized: text.toLowerCase(), tokens: [], entities: [] };
   },
   async shutdown() { await appendFile(log, 'shutdown\n'); },
 };

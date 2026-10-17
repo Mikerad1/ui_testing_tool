@@ -106,7 +106,7 @@ export class LearningWriter {
   async pipelineFingerprint():Promise<string>{
     await this.ensureReady();
     const health=this.healthResponse!.health;
-    return createHash('sha256').update(JSON.stringify({protocol:NLP_PROTOCOL_VERSION,healthProtocol:health.protocol,python:health.python,spacy:health.spacy,model:health.model,rules:health.rules,redaction:this.redactor!.policyFingerprint})).digest('hex');
+    return createHash('sha256').update(JSON.stringify({protocol:NLP_PROTOCOL_VERSION,healthProtocol:health.protocol,python:health.python,spacy:health.spacy,model:health.model,modelVersion:health.model_version,rules:health.rules,redaction:this.redactor!.policyFingerprint})).digest('hex');
   }
 
   async propose(input: ProposedNode) {
@@ -217,6 +217,6 @@ export class LearningWriter {
   private yamlPreparationKey(projectionVersion:string):string{
     if(!/^[a-z0-9._-]{1,80}$/i.test(projectionVersion)||!this.healthResponse)throw new Error(NLP_GENERIC_ERROR);
     const health=this.healthResponse.health;
-    return createHash('sha256').update(JSON.stringify({projectionVersion,protocol:NLP_PROTOCOL_VERSION,healthProtocol:health.protocol,python:health.python,spacy:health.spacy,model:health.model,rules:health.rules,redaction:this.redactor!.policyFingerprint})).digest('hex');
+    return createHash('sha256').update(JSON.stringify({projectionVersion,protocol:NLP_PROTOCOL_VERSION,healthProtocol:health.protocol,python:health.python,spacy:health.spacy,model:health.model,modelVersion:health.model_version,rules:health.rules,redaction:this.redactor!.policyFingerprint})).digest('hex');
   }
 }

@@ -7,7 +7,7 @@ import sys
 import platform
 from typing import Any, Callable
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 MAX_LINE_BYTES = 1024 * 1024
 MAX_TEXT_BYTES = 64 * 1024
 MAX_SPANS = 1000
@@ -25,10 +25,15 @@ class Sidecar:
         self.loader = loader
         self.nlp: Any = None
         self.spacy_version = "unavailable"
+        self.model_version = "unavailable"
 
     def _load(self) -> Any:
         if self.nlp is None:
-            self.nlp, self.spacy_version = self.loader(self.model_name)
+            nlp, spacy_version = self.loader(self.model_name)
+            version = nlp.meta.get("version") if isinstance(getattr(nlp, "meta", None), dict) else None
+            if not isinstance(version, str) or not version:
+                raise RuntimeError("model version unavailable")
+            self.nlp, self.spacy_version, self.model_version = nlp, spacy_version, version
         return self.nlp
 
     def handle(self, request: Any) -> dict[str, Any]:
@@ -40,12 +45,14 @@ class Sidecar:
         if op == "health":
             try:
                 self._load()
+                # Exercise the loaded pipeline as part of readiness, without exposing output.
+                self.nlp("UMB sidecar readiness check.")
                 ready = True
             except Exception:
                 ready = False
             return {"version": PROTOCOL_VERSION, "id": safe_id, "ok": True, "op": "health", "health": {
                 "protocol": PROTOCOL_VERSION, "python": platform.python_version(), "spacy": self.spacy_version,
-                "model": self.model_name, "rules": RULES_VERSION, "ready": ready,
+                "model": self.model_name, "model_version": self.model_version, "rules": RULES_VERSION, "ready": ready,
             }}
         if op == "shutdown":
             return {"version": PROTOCOL_VERSION, "id": safe_id, "ok": True, "op": "shutdown"}

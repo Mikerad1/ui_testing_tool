@@ -114,7 +114,7 @@ test('production runtime keeps persistent learning writes disabled before Phase 
     store = new Store(path.join(dir, 'memory.sqlite'), 'p');
     const config = { memory: { database: path.join(dir, 'memory.sqlite'), sensitive_paths: [], sensitive_values_env: [] } } as Config;
     const writer = createLearningWriter(store, config, { nlp: {
-      async health() { healthCalls += 1; return { version: 1, id: 'health', ok: true, op: 'health', health: { protocol: 1, python: 'test', spacy: 'fake', model: 'fake', rules: '1', ready: true } }; },
+      async health() { healthCalls += 1; return { version: 2, id: 'health', ok: true, op: 'health', health: { protocol: 2, python: 'test', spacy: 'fake', model: 'fake', model_version: '1.0.0', rules: '1', ready: true } }; },
       async analyze() { analyzeCalls += 1; throw new Error('must not be reached'); },
     } });
     await assert.rejects(() => writer.propose({ type: 'note', stable_key: 'release-gated', display_name: 'Blocked' }));
