@@ -19,11 +19,14 @@ import { generateWorkflowSpec, writeWorkflowSpec } from '../workflow/export.js';
 import { stringify } from 'yaml';
 import { access, rmdir, unlink } from 'node:fs/promises';
 import { checkForUpdate, updateBundle, updateCheckEnabled } from './updater.js';
+import { registerAgentCommands } from '../agent/cli.js';
+import { publishJiraScreenshotComment } from '../jira/comment.js';
 
 const cli = new Command().name('umb').description('UI Memory Browser').option('--update','Update an official prebuilt UMB bundle').action(async options => {
  if (!options.update) cli.help();
  try { console.error(await updateBundle()); } catch (error) { console.error(`Update failed safely: ${(error as Error).message}`); process.exitCode = 1; }
 }).addHelpText('after', '\nExamples:\n  $ umb init\n  $ umb knowledge validate --json\n  $ umb doctor --json');
+registerAgentCommands(cli);
 cli.command('update').description('Update an official prebuilt UMB bundle from GitHub Releases').action(async () => {
  try { console.error(await updateBundle()); } catch (error) { console.error(`Update failed safely: ${(error as Error).message}`); process.exitCode = 1; }
 });
@@ -50,6 +53,11 @@ cli.command('doctor').description('Read-only diagnostics with remediation guidan
   catch { if(o.json)console.log(JSON.stringify({ok:false,checks:[{id:'doctor.unexpected-error',name:'unexpected-error',status:'fail',message:'Doctor could not complete.',remediation:'Check the config path and permissions, then retry.'}]})); console.error('Doctor failed safely.'); process.exitCode = 1; }
 });
 const knowledge=cli.command('knowledge').description('Manage YAML knowledge and local locator proposals');
+const jira=cli.command('jira').description('Explicit, experimental Jira screenshot publishing');
+jira.command('comment <issue_key>').description('Comment on one explicitly keyed Jira issue with a managed screenshot').requiredOption('--site <origin>','HTTPS Jira Cloud site origin (for example https://example.atlassian.net)').requiredOption('--image <path>','Project-relative image path inside the configured managed artifact directory').option('--config <path>','Config file','umb.config.yaml').option('--write','Make Jira API requests; otherwise this is local-only dry-run').option('--experimental-inline-wiki','Opt in to unverified legacy wiki-style inline image rendering').option('--table','Use a fixed two-column experimental Jira wiki table').option('--email-env <name>','Environment variable containing Jira account email','JIRA_EMAIL').option('--token-env <name>','Environment variable containing Jira API token','JIRA_API_TOKEN').action(async(issueKey,o)=>{
+ try{const{config,root}=await loadConfig(o.config);const result=await publishJiraScreenshotComment(config,root,{issueKey,site:o.site,image:o.image,write:Boolean(o.write),experimentalInlineWiki:Boolean(o.experimentalInlineWiki),table:Boolean(o.table),emailEnv:o.emailEnv,tokenEnv:o.tokenEnv});console.log(result);}
+ catch(error){console.error(`Jira comment failed safely: ${(error as Error).message}`);process.exitCode=1;}
+});
 cli.command('memory').description('Manage scoped persistent memory maintenance').command('backfill').description('Resume redacted NLP processing of stored memory records').option('--config <path>','Config file','umb.config.yaml').action(async o=>{
   let store:Store|undefined,learningWriter:ReturnType<typeof createLearningWriter>|undefined,lock:Awaited<ReturnType<typeof acquireProjectLock>>|undefined;
   try{

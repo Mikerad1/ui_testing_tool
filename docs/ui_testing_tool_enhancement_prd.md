@@ -2,23 +2,23 @@
 
 **Version:** 1.2<br>
 **Date:** 2026-10-17<br>
-**Status:** Ready for engineering refinement — includes mandatory spaCy memory enhancement<br>
-**Applies to:** Existing CLI-based headless browser testing tool with MCP navigation, SQLite graph memory, YAML ingestion, and ticket context.
+**Status:** Phases 2/4 agent-workflow instructions and Phase 3 Codex/Copilot skill lifecycle are implemented. Phase 5 is complete: the one authorized structured `jira_publish_screenshot_table` call on non-production `SCRUM-1` published comment `10002`, reusing attachment `10000`, and read-only Jira verification confirmed the table and inline image. The result reports `rendering: experimental_unverified`; the user has visually inspected comment `10002` on `SCRUM-1` and confirms it looks good. The fixed CLI table renderer had passed its earlier sandbox check. Independent review and full local checks passed; AC-driven UI execution/reporting is not required (AC extraction/testing is separate Phases 2/4). The exact one-write authorization is consumed; no further Jira writes are authorized. No production, discovery, status/deletion, or persistent learning. `SCRUM-2` remains separate Phase 2 source-handling evidence. Phase 6 is not started; README reconciliation is not Phase 6 acceptance.<br>
+**Applies to:** Existing CLI-based headless browser testing tool with MCP navigation, SQLite graph memory, YAML ingestion, and operational run/evidence records. Jira access is supplied by the user's configured Jira MCP, not an existing UMB ticket context.
 
 ## 1. Executive summary
 
-Enhance the existing UI testing CLI so that an installable, runtime-compatible testing agent can autonomously validate Jira acceptance criteria (ACs) against a running application, reuse previously learned navigation knowledge, conduct positive and negative tests, persist new learnings, and publish a traceable Jira comment with screenshots and results. Upgrade the existing SQLite graph memory so **spaCy is a mandatory NLP processing stage for all new or updated persistent learnings**, including YAML-ingested knowledge and agent-authored memory writes.
+Enhance UMB with an installable portable Agent Skill whose instructions use the user's configured Jira MCP for Jira actions and existing UMB browser/memory MCP tools for app testing and context. One canonical `SKILL.md` content supports Codex, GitHub Copilot CLI, and VS Code Copilot through their native skill paths. The agent receives an explicit `issue_key`, reads that issue's ACs, plans and conducts positive/negative UI tests, and produces a traceable report with evidence. Jira transport ownership is not presumed. Three exact-generated-command Jira MCP uploads previously failed with invalid signatures. The first authorized UMB publisher write succeeded on non-production `SCRUM-1`: attachment ID `10000` (`umb-screenshot-989bda810665b5522fa81ed3.png`, 1685 bytes), image comment ID `10000`, user-confirmed inline image. The exactly-one additional authorized table comment succeeded as comment ID `10001`, reusing the same attachment/media ID; read-only HTML contained a real two-column table with the image in a cell and the user reports it works. No new attachment, status change, or deletion occurred. The reviewed publisher confines uploads to `<artifacts.directory>/.umb-managed/`, requires redaction enabled, checks markers after bounded comment pagination, reuses deterministic attachments only when size matches, and fails closed on conflicts. Experimental `--table` mode is fixed test content, not arbitrary AC/report-table payload. Narrow sandbox format validation is complete; legacy wiki behavior remains experimental and is not generally guaranteed for Jira Cloud. Independent review and full local checks passed; its focused mocked/offline publisher/MCP/agent subset passes 30 tests. The exact structured call is complete and read-only verified; the user has visually inspected comment `10002` on `SCRUM-1` and confirms it looks good. Its exact one-write authorization is consumed; no further writes are authorized. Phase 5 is complete; the structured comment has been published and read-only verified. Independent code review and full local checks passed; an AC-driven UI/report run is not a gate. Copilot host recognition/invocation is not verified locally: Copilot CLI is absent, and VS Code 1.133.0 is installed without the Copilot extension; CLI minimum version is undocumented. Upgrade SQLite graph memory so **spaCy is mandatory for any separately approved persistent learning writes**, including YAML ingestion; the agent workflow here remains read-only for persistent memory.
 
-The tool already has knowledge of the current ticket. **Do not rebuild ticket discovery, ticket selection, or ticket context management.** Extend the existing ticket context and add only the missing Jira read/write operations needed to obtain acceptance criteria and publish results with attached evidence.
+UMB does not provide the current Jira ticket as agent context. The user/agent supplies the exact `issue_key` for each task. Never add UMB ticket discovery, search, selection, a Jira client, AC endpoint, or Jira MCP tools for Phase 2/4. Preserve that supplied key and AC identity on UMB run/assertion/evidence records only if current interfaces support it; otherwise document a contract gap rather than inventing an API. Operational run/assertion/evidence writes are available and distinct from persistent learning writes, which remain hard-disabled in production.
 
 ## 2. Goals and non-goals
 
 ### Goals
-1. First-party Jira integration for reliable screenshot attachment uploads and Jira comments, independent of the agent runtime's generic Jira MCP connector.
-2. A CLI command that installs/configures a reusable UI testing agent for supported runtimes, starting with GitHub Copilot and OpenAI Codex.
-3. Agent retrieves current ticket's ACs, creates coverage-oriented test cases, executes positive and negative scenarios, and records verifiable results.
-4. Agent queries SQLite graph memory before testing and writes validated navigation/test learnings through existing memory MCP tools as it works.
-5. Agent posts a single coherent Jira result comment with evidence references, with safe retries and no duplicate reports.
+1. Inline screenshot images in Jira comment tables. The authorized fixed two-column `--table` test on non-production `SCRUM-1` reused the existing image; read-only HTML and user visual confirmation verified it. The structured payload has been published and read-only verified; Phase 5 is complete, not an AC-driven UI/report run.
+2. A CLI command that safely installs one portable `SKILL.md` for Codex, GitHub Copilot CLI, and VS Code Copilot using their documented native skill roots. The expanded scope passed a fresh Oracle gate; local Copilot host invocation remains unverified until supported hosts/extensions are installed.
+3. Agent uses an explicit supplied `issue_key` with the user's configured Jira MCP to retrieve ACs, plans coverage-oriented cases, executes positive and negative scenarios through existing UMB browser MCP, and records verifiable results.
+4. Agent queries SQLite graph memory before testing in read-only mode for persistent knowledge. It does not call persistent learning mutation tools or claim learnings saved; production persistent-learning writes remain disabled. Operational run/assertion/evidence records remain available and separate.
+5. Agent produces a single coherent report with confirmed evidence references. Duplicate-safe retry/recovery is claimed only after sandbox validation. `umb jira comment <issue_key>` is implemented in `src/cli/index.ts` with publisher logic in `src/jira/comment.ts`. It is limited to the experimental sandbox publisher: private CLI API-token auth from environment references; explicit site and exact supplied issue key; existing managed redacted UMB artifact only; dry-run by default; both `--write` and `--experimental-inline-wiki` opt-ins required for one attachment plus one marked wiki-markup comment; mock tests. It must not discover issues, change issue status, delete, provide general Jira client behavior, or write persistent learning. No production Jira.
 6. Reuse the existing lightweight headless browser, Playwright compatibility, YAML knowledge ingestion, and MCP server.
 7. Require spaCy-based entity/relation extraction, normalization, and deduplication in the graph-memory write path; migrate existing learnings without data loss.
 
@@ -28,6 +28,7 @@ The tool already has knowledge of the current ticket. **Do not rebuild ticket di
 - Automatically changing ticket status, assigning tickets, or approving releases.
 - Assuming all acceptance criteria are UI-testable; explicitly flag API-only, manual, ambiguous, or blocked requirements.
 - Uploading secrets, unredacted credentials, or sensitive customer data in screenshots.
+- UMB Jira ticket discovery/selection, a general-purpose Jira client or AC API, a new autonomous UMB AC planning/execution engine, Copilot plugins, custom-agent definitions, or MCP configuration registration. The only narrow Jira write exceptions are the CLI screenshot publisher and structured `jira_publish_screenshot_table` MCP publisher described in FR-01; the structured tool is locally implemented but has passed read-only Jira verification and is visually confirmed by the user. Independent review and full local checks passed. The prior fixed-table/image authorization and the separate one-call structured comment authorization are both consumed; no further writes are authorized.
 
 ## 3. Personas and primary workflow
 
@@ -35,78 +36,85 @@ The tool already has knowledge of the current ticket. **Do not rebuild ticket di
 
 **Happy path:**
 1. User starts the CLI and connects the runtime through MCP.
-2. User invokes the installed testing agent for the ticket already selected by the tool.
-3. Agent reads ticket context and fetches fresh ACs through the first-party Jira integration.
+2. User invokes the installed testing agent and supplies the exact `issue_key`.
+3. Agent uses the user's already-configured Jira MCP to read ACs for that same key; UMB does not discover, search, or select issues.
 4. Agent retrieves relevant graph memory, YAML seed knowledge, known routes, selectors, and prior test outcomes.
 5. Agent produces a test plan mapping each AC to positive and negative test cases.
 6. Agent navigates the application using browser MCP tools, captures screenshots, and records assertions.
-7. Agent saves new, verified learnings through memory MCP tools; the underlying memory service processes writes with spaCy before persisting them to the SQLite graph.
-8. Agent uploads selected screenshots as Jira attachments, then publishes a formatted comment with AC-by-AC results and evidence links.
+7. Agent uses graph memory read/search tools only for persistent knowledge. It does not call persistent learning mutation tools or claim learning writes succeeded. Production persistent-learning writes remain disabled; any future enablement requires a separately approved change through the existing spaCy boundary. Operational run/assertion/evidence records are separate and remain available.
+8. Agent reports AC-by-AC results as part of the separate AC-driven workflow. The fixed table/image renderer check is independent of an AC-driven UI/report run; read-only verification of the structured payload is complete; only the user has visually inspected comment `10002` on `SCRUM-1` and confirms it looks good. Independent code review and full local checks passed. Do not presume broader UMB transport ownership or general Jira Cloud rendering support.
 9. Agent returns a structured final run summary and exit status to the caller.
 
 ## 4. Functional requirements
 
-### FR-01: First-party Jira integration (P0)
-- Add a Jira client module owned by the CLI, separate from the external Jira MCP integration.
-- Support Jira Cloud first; abstract authentication and endpoints to allow Jira Data Center later.
-- Configure base URL, auth mode, credentials reference, project allowlist, attachment limits, and report behavior.
-- Support secure Jira Cloud authentication using an approved API token or OAuth mechanism; store secrets in environment variables/OS credential store, never in YAML, SQLite graph nodes, logs, or screenshots.
-- Use the existing current-ticket identifier and existing ticket context; fetch ACs from configured Jira description sections and/or designated custom fields. Support Atlassian Document Format (ADF) parsing to normalized plain text while retaining source references.
-- Respect Jira permissions and distinguish authentication, authorization, missing attachment permission, disabled attachments, network failures, and rate limits.
-- Upload screenshots via Jira's attachment endpoint using multipart form data and the required Jira attachment header; create comments using the applicable Jira REST API and valid ADF body for Jira Cloud.
-- Capture uploaded attachment IDs and URLs; include stable references in the comment. Do not assume inline rendering works identically across Jira deployments.
-- Sanitize attachments and redact configured selectors/regions before upload; allow opt-out of upload while preserving local evidence.
-- Retry transient errors with exponential backoff and bounded attempts; do not blindly retry non-idempotent operations without reconciliation.
-- If uploads fail, publish a clearly marked evidence-incomplete report only if configured to do so; never claim an attachment exists when it does not.
+### FR-01: Explicit-key Jira workflow and reporting capability gate (P0)
+- Agent instructions require an explicit user/agent-supplied `issue_key` and use only the user's configured Jira MCP for Jira reads/actions. Never discover/search/select issues or silently change the key.
+- AC reads and parsing, including ADF/source references where supported by the configured MCP, are agent workflow responsibilities; no UMB Jira client/API for AC access, AC endpoint, Jira MCP tools, or Jira configuration is in scope. The narrow CLI publisher and `jira_publish_screenshot_table` MCP tool described below are the only approved UMB Jira write exceptions; do not generalize them into a Jira client.
+- Keep the same supplied issue key associated with UMB run/assertion/evidence records only if existing interfaces support this. If unsupported, document a concrete contract gap; do not invent or presume an API/schema.
+- Initial sandbox authorization was limited to one synthetic attachment and one marked comment on non-production `SCRUM-1`. Read-only Jira MCP access succeeded (placeholder ACs); two earlier and one fresh exact-generated-command upload failed with `JwtAuthoriser:AuthenticationError: invalid signature`, creating nothing. The initial UMB publisher write has since succeeded: attachment ID `10000`, `umb-screenshot-989bda810665b5522fa81ed3.png`, 1685 bytes; marked comment ID `10000`. Jira MCP returned comment HTML with a `media-single` figure, and the user saw the image inline.
+- The reviewed experimental publisher is implemented as `src/jira/comment.ts` and `umb jira comment <issue_key>` in `src/cli/index.ts`: private CLI API-token auth from environment references only; explicit site and exact supplied key; managed artifact under `<artifacts.directory>/.umb-managed/` only, redaction required; dry-run default; `--write` and `--experimental-inline-wiki` are required write opt-ins. It bounds comment pagination before marker checks, reuses deterministic attachments only when size matches, and fails closed on conflicts. No issue discovery, status changes, deletes, general Jira client, autonomous engine, persistent-learning writes, or production Jira.
+- User authorized exactly one additional marked comment on `SCRUM-1`, reusing attachment `10000` and creating no new attachment, to test fixed table formatting. It succeeded as comment ID `10001`; read-only HTML shows a real two-column table with the same `media-single` image in a cell, and the user reports the table works. This renderer validation is preserved evidence for the table goal; it does not require AC-driven UI execution/reporting. No status change or deletion occurred; this fixed-renderer authorization is consumed.
+- The structured bounded MCP publisher `jira_publish_screenshot_table` is locally implemented, separate from CLI `umb jira comment --table` (which remains a fixed two-column test mode). It accepts exact issue key/site, a managed image path relative to configured `artifacts.directory` and confined to `.umb-managed`, headers/rows, and zero-based `image_cell`. Before any network request, it enforces 2–6 headers, 1–25 equal-width rows, <=500 characters/cell, <=16KB table payload, NFC, and a strict allowlist (Unicode letters/numbers/marks, spaces, `. , : ; ' " ( )`). It rejects markup punctuation including `| ! + -`, URLs, controls/format characters, and newlines. UMB generates Jira legacy wiki internally, uploads/reuses the deterministic image, posts the table comment with a content-derived marker, and returns structured attachment/comment IDs. Dry-run is default; writes require both `write=true` and `experimental_inline_wiki=true`, plus exact task-specific authorization for non-production only. Normal comments remain via Jira MCP; no upload-ID handoff. Mocked/offline tests passed. The single structured payload call has been published and read-only verified; the user has visually inspected comment `10002` on `SCRUM-1` and confirms it looks good.
+- Independent review found no remaining code changes. Following the final upload-path test, `npm run typecheck`, `npm run build`, full `npm test` (212 tests: 203 passed, 9 skipped, 0 failed), `npm run lint`, and `git diff --check` passed. The focused publisher/MCP/agent subset passes 30 tests. Mock coverage includes unsafe payload rejection before network, dry-run and both write opt-ins, first upload with UMB-generated filename and structured attachment/comment IDs, table-body generation, and duplicate suppression. No Jira calls or live writes occurred during those local checks. The one authorized structured call was subsequently made and read-only Jira verification confirmed its table/image output; Phase 5 is complete. The exact one-write authorization is consumed; no further Jira writes are authorized.
+- **Completed one-call authorization and read-only verification:** The user authorized exactly one `jira_publish_screenshot_table` call on non-production `SCRUM-1` at `https://mfrtechnologiesdev.atlassian.net`, headers `['Field','Result']`, row `['Rendering','Pass']`, `image_cell: {row: 0, column: 1}`, using the existing managed synthetic screenshot. Read-only preflight confirmed `.umb/artifacts/.umb-managed/synthetic-screenshot.png` was 1685 bytes with SHA-256 `989bda810665b5522fa81ed3dbd9a6cc76abbf44be36f39983dd781ae21132cf`; Jira attachment ID `10000` had matching generated filename and size. The single call returned `status: published`, marker `UMB-JIRA-STRUCTURED-TABLE:af923d40e9dfa1519668699d056a8f34ab1a0d3c25fad0eaa49a454f75980bb4`, filename `umb-screenshot-989bda810665b5522fa81ed3.png`, `comment_id: 10002`, `attachment_id: 10000`, `rendering: experimental_unverified`. It reused the image; no upload occurred. Read-only `listJiraIssueComments` returned 3 comments; `10002` body contained table headers Field/Result, row Rendering/Pass, and image/media node in the second cell. Read-only rendered HTML contains the table and inline attachment URL/ID. No status change or deletion. The exact one-write authorization is consumed; no further writes are authorized. The user visually inspected comment `10002` on `SCRUM-1` and confirms it looks good.
+- Official REST v3 attachment/v2 comment APIs are documented, but inline rendering through legacy wiki markup in Jira Cloud is not officially guaranteed; the ADF media-ID/collection bridge is undocumented. Do not claim a guarantee or generate unconfirmed links.
+- Reports may be local JSON/Markdown. Attachments/references are valid only after Jira confirms upload metadata. Redact/suppress sensitive evidence before external submission.
 
-**Acceptance criteria:** Given a valid Jira ticket and credentials with permissions, the tool retrieves ACs, uploads at least one screenshot, and creates a comment linking to that actual attachment. Missing permission produces a clear actionable error; no false success is reported.
+**Acceptance criteria:** Agent uses only the exact supplied key, does no Jira discovery, and produces accurate report data. The image comment and one authorized fixed-table comment succeeded on non-production `SCRUM-1`, reusing the same one attachment; read-only HTML and user visual confirmation verified inline-image/table rendering. The structured table MCP payload is live read-back verified and visually confirmed by the user; the tool result remains labeled `experimental_unverified`. Phase 5 is complete after that confirmation; AC-driven UI execution/report is not a gate. Any unsupported UMB key binding is recorded as a gap. No production Jira actions or unverified general Jira Cloud guarantees.
 
-### FR-02: Installable agent for multiple runtimes (P0)
+### FR-02: Portable native Agent Skill installer (P0; expanded scope approved by Oracle)
 - Provide CLI commands:
-  - `uitest agent list`
-  - `uitest agent install --runtime copilot [--scope project|user] [--force]`
-  - `uitest agent install --runtime codex [--scope project|user] [--force]`
-  - `uitest agent uninstall --runtime <runtime> [--scope project|user]`
-  - `uitest agent doctor --runtime <runtime>`
+  - `umb agent list`
+  - `umb agent install --runtime codex --scope project|user [--force]`
+  - `umb agent install --runtime copilot --scope project|user [--force]`
+  - `umb agent uninstall --runtime codex --scope project|user`
+  - `umb agent uninstall --runtime copilot --scope project|user`
+  - `umb agent doctor --runtime codex`
+  - `umb agent doctor --runtime copilot`
 - **Command names are proposed**; adapt to the actual CLI executable name without breaking existing commands.
-- Maintain a canonical versioned agent specification with runtime-specific adapters that generate native agent instructions/configuration in the correct supported location and format for each runtime.
-- Install or reference the existing MCP server configuration without overwriting unrelated user MCP settings. Handle JSON/TOML/Markdown or other runtime-native formats according to the adapter.
-- Detect runtime presence/version where possible, back up files before modifying, use atomic writes, and make repeated installs idempotent.
-- Installation should work offline for bundled templates and provide dry-run preview of file changes.
-- Installed agent instructions must explain available browser, memory, and Jira tools, expected workflow, evidence standards, and reporting constraints.
-- Document invocation instructions per runtime; do not assume a common slash command syntax.
+- One canonical Agent Skills `SKILL.md` content adapter serves both Copilot surfaces; no Copilot custom-agent definition, plugin (`plugin.json`/`skills/`), or MCP registration is needed or in scope.
+- Codex skill paths: project `.agents/skills/<name>/SKILL.md`, user `~/.agents/skills/<name>/SKILL.md`.
+- Copilot CLI and VS Code Copilot share these selected roots: project `.github/skills/<name>/SKILL.md`, user `~/.copilot/skills/<name>/SKILL.md`. VS Code supports other roots, but use the common paths to support both surfaces.
+- Use skill name `umb-ui-testing` (matches its directory; lowercase letters/numbers/hyphens, at most 64 characters) and valid skill frontmatter with required `name` and `description` (description at most 1024 characters).
+- Validate project and user scopes separately. Copilot CLI project skills take precedence over same-name personal skills; VS Code duplicate discovery rules vary by roots. Refuse an existing unrelated target by default; `--force` backs it up; uninstall removes only exact UMB-managed content.
+- User separately configures Jira MCP and existing UMB MCPs. Installer only manages skill files; never add/edit/delete `config.toml`, other MCP configuration/registration, plugins, or custom-agent files.
+- Detect host presence/version where possible, but distinguish static path/format validation from runtime recognition. Current environment: Copilot CLI is absent; VS Code `1.133.0` is installed but no Copilot-related extension is installed. Copilot CLI feature minimum version is undocumented, and runtime CLI docs do not provide a single minimum version. Do not claim host recognition/invocation based on static research alone.
+- For absent targets, install with no-clobber creation; for replacement/removal, move the target into a private same-parent quarantine and verify the moved entry's type, identity and contents before replacing/deleting it. Restore only with no-clobber semantics; on failure, preserve and report the exact recovery path. Add deterministic race tests. Do not claim atomic force replacement where the platform/API does not guarantee it. Document trusted-parent/no-concurrent-mutation assumptions for portable path APIs.
+- Abrupt process termination between quarantine and publication/removal can leave the target absent while its data remains in a `.umb-skill-quarantine-*` directory. There is no automatic recovery; document manual inspection/recovery and do not describe force replacement as atomic or crash-recoverable.
+- Make repeated installs idempotent, work offline for bundled templates, and provide an inert dry-run preview.
+- Installed instructions require the supplied `issue_key`; use the user's separately configured Jira MCP and existing UMB browser/memory MCPs. Explain read-only persistent memory, evidence standards, report capability gate, and constraints. Do not claim Jira MCP capabilities before Phase 5 validation.
 
-**Acceptance criteria:** Installing for Copilot and Codex yields valid native agent definitions and MCP connection instructions, passes `agent doctor`, and does not damage pre-existing configuration. Reinstall is safe; uninstall removes only managed artifacts.
+**Acceptance criteria:** Codex project/user and Copilot project/user installs target the exact paths above and are independently verified for scope, safe collision refusal, forced backup, idempotent reinstall, and exact-managed-content uninstall. Deterministic tests cover target replacement and same-inode byte mutation between preflight and quarantine and prove competing/changed bytes are not lost; failed restoration leaves a reported recovery path. Installer leaves MCP configuration/registration, plugins and custom-agent files untouched. Document trusted-parent/no-concurrent-same-user-mutation assumptions and the possibility that abrupt termination leaves data in a quarantine directory with no automatic recovery. Do not claim atomic or crash-recoverable force replacement. Static path/format validation is separate from host recognition. In the current environment, Copilot host recognition/invocation is unverified (CLI absent; VS Code extension absent); document this and do not claim local execution. Expanded scope and implementation review passed Oracle; Phase 3 is complete within these documented limitations.
 
-### FR-03: Ticket AC ingestion and test planning (P0)
-- Resolve ticket from existing tool context; error if none selected rather than silently picking a different issue.
-- Refresh ACs from Jira immediately before planning, with source field and retrieval timestamp.
+### FR-03: Agent AC workflow and test planning (P0)
+- Agent requires an explicit supplied `issue_key`, and reads only that issue through the user's configured Jira MCP. Do not resolve from UMB context or select another issue.
+- Collect ACs from both the issue description and any exposed custom fields; do not assume a dedicated Acceptance Criteria custom field exists. Refresh ACs through that MCP immediately before planning where supported; retain each AC's source (description or custom field, with field identity when available) and retrieval time in the agent report. When supported, use an evidence/full Jira MCP view in addition to summaries so omitted custom fields are not mistaken for absence of criteria. No UMB AC API/client.
 - Parse numbered lists, bullets, tables, and ADF content. Preserve the original AC text and assign stable local AC IDs.
 - Detect empty, contradictory, vague, or non-UI-testable ACs and mark as `needs_clarification` or `not_ui_testable` rather than inventing requirements.
-- Generate a traceability matrix: AC -> test case -> assertion -> evidence -> result.
+- Generate a traceability matrix: supplied issue key + AC identity -> test case -> assertion -> evidence -> result. Store key/identity in UMB operational records only where existing interfaces support it; otherwise call out the contract gap.
 - For each testable AC, generate at least one positive test and at least one meaningful negative/boundary test where applicable. When a negative test is not applicable, record a reason.
 - Test case results: `passed`, `failed`, `blocked`, `skipped`, `not_applicable`. Aggregate AC results deterministically; an AC must not pass when required tests are failed or unexecuted.
 - Never mark an AC passed based solely on successful navigation or a screenshot; require observable assertions.
 
-**Acceptance criteria:** Every fetched AC is represented in the final traceability report, including unsupported/ambiguous ones, with explicit coverage status.
+**Acceptance criteria:** Every AC read from the description or exposed custom fields for the explicitly supplied key is represented in the agent's final traceability report with its source, including unsupported/ambiguous ones, and explicit coverage status. If only a summary view is available, disclose that limitation rather than treating omitted fields as no criteria. No UMB autonomous planner/engine is introduced.
 
-### FR-04: Memory-first autonomous execution (P0)
+### FR-04: Memory-first agent workflow instructions (P0)
 - Before navigating, call existing graph-memory MCP search/read tools using project ID, application identity, relevant page/feature, and AC terms.
 - Use existing YAML-ingested seed knowledge as initial guidance, but treat it as potentially stale and validate against the live UI.
 - Prefer known stable routes/selectors and accessible element roles; fall back to semantic DOM inspection and exploration when memory is stale.
 - Use the existing browser MCP navigation and screenshot tools; do not build a second browser automation stack.
-- Write memory through the existing memory MCP interface, not by bypassing it with direct SQLite mutations. The memory service MUST execute the spaCy pipeline defined in FR-07 before persisting new or updated learnings.
-- Store learnings about pages, transitions, reliable locators, required preconditions, workflows, known validation messages, environment constraints, and previously verified tests.
-- Attach provenance: project/environment, application version when known, URL pattern, timestamp, source run, observed outcome, confidence, and verification status.
-- Use graph relationships such as `PAGE -> HAS_ACTION -> ACTION`, `ACTION -> NAVIGATES_TO -> PAGE`, `TEST -> COVERS -> AC`, `LOCATOR -> BELONGS_TO -> PAGE`, and `OBSERVATION -> SUPPORTS -> LEARNING` (adapt to existing schema).
-- Deduplicate/merge learnings using spaCy-normalized entities together with graph identifiers, project scope, provenance and verification; mark stale/conflicting edges instead of accumulating contradictory facts.
-- Separate exploratory hypotheses from verified facts; only promote a learning after direct confirmation.
+- Persistent-memory workflow is read-only: use existing search/read tools and do not call persistent learning mutation tools or direct SQLite mutations. Do not claim learnings were saved. Production persistent-learning writes remain disabled; enabling them is a future separately approved change through the existing spaCy pipeline in FR-07.
+- The agent may create operational run/assertion/evidence records using existing interfaces; these are not persistent learning writes and remain available.
+- For any future separately approved persistent-learning write, attach provenance: project/environment, application version when known, URL pattern, timestamp, source run, observed outcome, confidence, and verification status.
+- If persistent learning writes are enabled by a future separately approved change, use graph relationships such as `PAGE -> HAS_ACTION -> ACTION`, `ACTION -> NAVIGATES_TO -> PAGE`, `TEST -> COVERS -> AC`, `LOCATOR -> BELONGS_TO -> PAGE`, and `OBSERVATION -> SUPPORTS -> LEARNING` (adapt to existing schema).
+- For that separately approved future write path, deduplicate/merge using spaCy-normalized entities with graph identifiers, project scope, provenance and verification; mark stale/conflicting edges instead of accumulating contradictory facts.
+- Separate exploratory hypotheses from verified facts; any future learning promotion requires direct confirmation and the separately approved spaCy-enforced write path.
 - Scope memory by project and environment to avoid leaking selectors, credentials, or workflows across applications.
 - Do not persist passwords, session cookies, tokens, personal data, or full sensitive page contents.
 
-**Acceptance criteria:** A second run reuses verified navigation learnings; a changed selector triggers revalidation and updates stale memory; all memory changes are traceable to a run. All newly persisted learnings pass through the centralized spaCy preprocessing stage (FR-07).
+**Acceptance criteria:** Agent instructions use existing memory MCP read/search tools only and require revalidation; they do not call persistent learning mutation tools or claim writes saved. Production learning writes remain disabled and no phase here enables them. Operational records remain separate and available. Any future separately approved persistent-learning write must pass centralized spaCy preprocessing.
 
-### FR-05: Positive and negative testing (P0)
+### FR-05: Positive and negative testing agent instructions (P0)
 - Execute happy-path behavior and failure/boundary behavior, including missing required fields, invalid formats, authorization restrictions, invalid transitions, duplicate operations, and boundary values when relevant to the AC.
 - Use isolated test accounts and test data. Prevent destructive actions on production by default; require explicit environment policy approval for write/destructive scenarios.
 - Validate outcomes using DOM state, visible error messages, URL changes, network results when available, and persisted UI state as appropriate.
@@ -115,19 +123,19 @@ The tool already has knowledge of the current ticket. **Do not rebuild ticket di
 - Respect configurable test count, time budget, retries, and parallelism; browser sessions must be isolated when tests run concurrently.
 - Record test data setup/cleanup outcomes; failures to clean up must be visible.
 
-**Acceptance criteria:** The run produces both positive and negative cases with independently asserted results and reproducible failure descriptions.
+**Acceptance criteria:** Agent workflow instructions require applicable positive and negative cases with independently asserted results and reproducible failure descriptions. This does not specify a new UMB autonomous test engine.
 
-### FR-06: Jira reporting with screenshot evidence (P0)
-- Produce one human-readable report comment per completed run, not one comment per test case.
+### FR-06: Required evidence/report outcome (P0; Jira transport conditional)
+- Produce one coherent human-readable report per completed run, not one report per test case. Jira comment transport is via the user's configured Jira MCP if Phase 5 sandbox testing confirms adequacy; do not presume UMB ownership.
 - Include: run ID, timestamp, environment, application version if available, overall status, AC coverage, passed/failed/blocked counts, positive/negative results, failed assertions, repro steps, and evidence attachment links.
-- Attach screenshots before posting the comment, and include only successfully uploaded evidence links.
+- Attach screenshots before reporting, and include only confirmed attachment references. The chosen MCP/capability must be tested before claiming this behavior.
 - Provide a machine-readable local JSON report plus a Markdown report for auditing and troubleshooting.
-- Use a deterministic run marker in the Jira comment (e.g. `UI-TEST-RUN:<uuid>`) and check for an existing report before retrying comment creation.
+- Use a deterministic run marker in the report and check for an existing report before retrying comment creation where supported by the validated Jira MCP/capability.
 - If the report was already posted, do not duplicate it; optionally update it if supported and explicitly configured.
 - Include clear `partial` status when some test cases or attachments are missing.
-- Provide `--report-only` to retry reporting an existing saved run without rerunning UI tests.
+- Provide report-only recovery through the agent workflow or validated transport, without rerunning UI tests, if supported by the capability under test.
 
-**Acceptance criteria:** A failed test with a screenshot results in a Jira comment with repro steps and a working attachment link. Repeating the report command does not create duplicate comments.
+**Acceptance criteria:** A failed test report includes repro steps and only confirmed working attachment references. The three Jira MCP media uploads previously failed with invalid-signature authentication errors. The image publisher write succeeded: attachment ID `10000` (`umb-screenshot-989bda810665b5522fa81ed3.png`, 1685 bytes), comment ID `10000`; Jira HTML included a `media-single` figure and user saw the image inline. Fixed table comment ID `10001` reused the same image; Jira HTML contains a real table with the image in a cell and user reports it works. This fixed-content renderer validation is preserved; it is distinct from the locally implemented structured table payload, whose mocked/offline tests pass (30 tests in the focused publisher/MCP/agent subset). The structured call is now read-only verified; Phase 5 is complete. AC-driven UI execution/reporting is separate Phases 2/4 and not a gate for this capability.
 
 ### FR-07: Mandatory spaCy-powered graph memory upgrade (P0)
 
@@ -181,24 +189,22 @@ The tool already has knowledge of the current ticket. **Do not rebuild ticket di
 - On changing spaCy model/rules versions, provide an explicit controlled re-index/reprocess workflow (e.g. `uitest memory reindex --dry-run`) instead of silently rewriting all existing knowledge on startup.
 - Produce migration summaries showing scanned, migrated, merged, rejected, stale, and failed records; no silent drops or destructive migration without an operator-visible plan.
 
-**Acceptance criteria:** Agent-authored and YAML-imported persistent learnings both run through spaCy; UI-specific entities/edges are normalized and linked without damaging exact selectors; duplicate learnings in the same context are reconciled; project/environment boundaries remain intact; existing memory is migrated without losing provenance; retrieval remains compatible through MCP; missing spaCy prevents new persistent writes and reports a clear diagnostic.
+**Acceptance criteria:** Existing YAML-imported persistent learnings run through spaCy; any future agent-authored learning writes require a separately approved enablement and also run through spaCy. UI-specific entities/edges are normalized and linked without damaging exact selectors; duplicate learnings in the same context are reconciled; project/environment boundaries remain intact; existing memory is migrated without losing provenance; retrieval remains compatible through MCP; missing spaCy prevents new persistent writes and reports a clear diagnostic. Current agent workflow remains persistent-memory read-only.
 
 ## 5. Proposed architecture
 
 ```text
-CLI / Current Ticket Context
+CLI / Existing UMB operational run, assertion and evidence records
   |-- Agent Installer
   |     |-- Canonical Agent Definition
-  |     |-- Copilot Adapter
-  |     `-- Codex Adapter
-  |-- Test Run Orchestrator
-  |     |-- Jira AC Reader (first-party)
-  |     |-- AC Planner / Traceability
-  |     |-- Browser MCP Client (existing)
-  |     |-- Graph Memory MCP Client (existing)
-  |     |-- Evidence Collector / Redactor
-  |     `-- Jira Reporter (first-party)
-  `-- Run Store (local JSON + Markdown reports)
+  |     |-- Codex Skill Path Adapter (project/user scopes)
+  |     `-- Copilot Shared Agent-Skills Path Adapter (CLI + VS Code; project/user scopes)
+  |-- Reusable Runtime Agent (instructions; reasoning/execution layer)
+  |     |-- User-configured Jira MCP (explicit issue_key; capabilities validated in Phase 5)
+  |     |-- Existing Browser MCP (app navigation/assertions/screenshots)
+  |     `-- Existing Graph Memory MCP (context; persistent learning writes remain disabled)
+  |-- Operational Run Store (existing; key binding only if supported)
+  `-- Local JSON + Markdown report/evidence manifest
 
 Existing MCP Server: Browser Tools + Graph Memory Tools
 Existing Memory Service: mandatory spaCy NLP stage on all persistent writes
@@ -208,55 +214,31 @@ Existing Memory Service: mandatory spaCy NLP stage on all persistent writes
 Existing YAML Loader: startup seed knowledge ingestion -> spaCy pipeline
 ```
 
-The installed runtime agent is the reasoning/execution layer; the CLI owns deterministic Jira transport, evidence management, report persistence, and safe retries. Prefer exposing high-level CLI operations through MCP where needed, without duplicating the existing browser/memory interfaces.
+The installed runtime agent is the reasoning/execution layer. Jira reads and normal comments use the user's configured Jira MCP. The two narrow UMB publishing paths are limited to the CLI screenshot publisher and structured `jira_publish_screenshot_table` MCP tool; the structured payload has passed read-only Jira verification and is visually confirmed by the user. Independent review and full local checks passed. UMB already supports browser/memory MCP and operational run/assertion/evidence writes. Do not introduce a general Jira client/transport, second browser/memory store, or test engine.
 
 ## 6. Proposed interfaces
 
-### CLI
+### CLI (proposed agent installer; executable is `umb`)
 
 ```bash
-uitest agent install --runtime codex --scope project
-uitest agent install --runtime copilot --scope project
-uitest agent doctor --runtime codex
-uitest test run --ticket current --positive --negative
-uitest test report --run-id <run-id> --jira
-uitest test report --run-id <run-id> --jira --report-only
+umb agent install --runtime codex --scope project
+umb agent doctor --runtime codex
+umb agent install --runtime copilot --scope project
+umb agent install --runtime copilot --scope user
+umb agent doctor --runtime copilot
 ```
 
-### New MCP tools (names illustrative)
+Codex paths are `.agents/skills/umb-ui-testing/SKILL.md` and `~/.agents/skills/umb-ui-testing/SKILL.md`. The same Copilot skill supports both Copilot CLI and VS Code through `.github/skills/umb-ui-testing/SKILL.md` and `~/.copilot/skills/umb-ui-testing/SKILL.md`. These commands install/check skill files; they do not register MCP servers or install plugins/custom agents, and a successful file check does not prove the host recognizes or invokes the skill.
 
-| Tool | Purpose |
-|---|---|
-| `jira_get_acceptance_criteria` | Read ACs for the ticket already in context |
-| `jira_upload_test_evidence` | Upload validated/redacted screenshot to ticket |
-| `jira_publish_test_report` | Publish or reconcile one report comment |
-| `test_get_run` | Retrieve persisted run, coverage, and evidence manifest |
+No Jira MCP tools or general-purpose UMB Jira API are proposed. Use the user's configured Jira MCP for Jira reads/actions and existing UMB browser/memory MCP tools. The sole approved UMB Jira write exception is the narrow experimental Phase 5 publisher in FR-01; its structured payload has now been published, read-only verified, and visually confirmed by the user on non-production `SCRUM-1`. The `experimental_unverified` tool label remains recorded; this validation does not establish a general Jira Cloud guarantee. The exact one-write authorization is consumed; no further Jira writes are authorized. AC extraction/testing workflow remains separate in Phases 2/4. Do not claim supplied-key binding in UMB records unless current operational interfaces support it; record a gap otherwise. Additive diagnostics and reindex operations for spaCy are permissible (FR-07).
 
-Existing browser navigation and graph memory MCP tools remain authoritative. Do not add redundant memory or browser tools. Additive diagnostics and reindex operations for spaCy are permissible (FR-07).
+### Configuration boundary
 
-### Example configuration
+There is no UMB Jira configuration. The user separately configures Jira MCP in their agent runtime and configures the existing UMB MCP there as well. Phase 3's Codex/Copilot skill installer must not modify runtime MCP registration, `config.toml`, or any other MCP configuration. Jira credentials, Jira AC sources, attachment settings, and reporting settings belong to the user's Jira MCP/runtime configuration and are not validated by UMB at startup.
+
+The following is an illustrative UMB-only memory/testing configuration, not a Jira configuration:
 
 ```yaml
-jira:
-  enabled: true
-  deployment: cloud
-  base_url: https://example.atlassian.net
-  auth:
-    mode: api_token
-    email_env: UITEST_JIRA_EMAIL
-    token_env: UITEST_JIRA_API_TOKEN
-  acceptance_criteria:
-    sources:
-      - description_heading: Acceptance Criteria
-      - custom_field: customfield_12345
-  evidence:
-    upload: true
-    max_file_mb: 10
-    redact_selectors:
-      - '[data-sensitive="true"]'
-  reporting:
-    comment_on_completion: true
-    allow_partial_evidence: true
 memory:
   nlp:
     provider: spacy  # mandatory; other values invalid in this version
@@ -268,6 +250,7 @@ memory:
 agent:
   default_runtime: codex
   memory_first: true
+  persistent_memory_read_only: true
 testing:
   positive: true
   negative: true
@@ -276,23 +259,23 @@ testing:
   timeout_minutes: 30
 ```
 
-Configuration must validate custom-field IDs and environment variables at startup. Never store actual credentials in this file. The spaCy configuration shown is illustrative; integrate it into the existing config layout rather than introducing a conflicting config format.
+The spaCy configuration shown is illustrative; integrate it into the existing config layout rather than introducing a conflicting config format. UMB does not validate Jira custom-field IDs, Jira environment variables, or Jira credentials at startup because Jira is separately configured by the user in their runtime.
 
 ## 7. Data contracts
 
-### AcceptanceCriterion
-`{ id, jiraIssueKey, sourceField, originalText, normalizedText, testability, reason? }`
+### AcceptanceCriterion (agent report concept; not a proposed UMB API)
+`{ id, jiraIssueKey, sourceField?, originalText, normalizedText, testability, reason? }` ACs are read for the explicitly supplied `jiraIssueKey` through the user's configured Jira MCP. UMB record binding is conditional on existing interfaces; unsupported binding is a documented contract gap, not a new assumed field/API.
 
-### TestCase
+### TestCase (agent/local-report concept; not a proposed UMB API)
 `{ id, acIds[], kind: positive|negative, preconditions[], steps[], assertions[], status, evidenceIds[], failureDetails? }`
 
-### Evidence
+### Evidence (agent/local-report concept; not a proposed UMB API)
 `{ id, runId, testCaseId, localPath, sha256, mimeType, redacted, capturedAt, jiraAttachmentId?, jiraUrl?, uploadStatus }`
 
 ### TestRun
-`{ id, issueKey, projectId, environment, startedAt, finishedAt?, status, acs[], cases[], evidence[], memoryChanges[], jiraCommentId?, reportingStatus }`
+Conceptual agent/local-report data: `{ id, issueKey, projectId, environment, startedAt, finishedAt?, status, acs[], cases[], evidence[], memoryReadContext?, jiraCommentId?, reportingStatus }`. This is not a claim that UMB currently supports every field or owns the report lifecycle. Bind the supplied key/AC identity only where current UMB interfaces permit; otherwise document the gap. Existing operational run/assertion/evidence persistence is distinct from disabled persistent learning writes.
 
-Use durable run state transitions (`planned -> running -> completed|partial|blocked -> reporting -> reported|report_failed`) so a crash can be recovered without duplicating Jira side effects.
+These are conceptual agent/local-report state transitions (`planned -> running -> completed|partial|blocked -> reporting -> reported|report_failed`), not a proposed UMB-owned durable execution or recovery store. Existing UMB operational run/assertion/evidence persistence remains available, but does not imply Jira reporting lifecycle ownership. No new UMB execution/recovery store is authorized unless an existing interface demonstrably supports the required behavior or a concrete Phase 5 gap is evidenced and passes explicit review.
 
 ## 8. Jira report example
 
@@ -315,19 +298,19 @@ Expected: validation message and no submission.
 Actual: submission succeeded.
 Evidence: [Screenshot](<actual-uploaded-jira-attachment-url>)
 
-**Notes:** Two verified navigation learnings saved. One selector marked stale.
+**Notes:** Persistent memory was read-only during this run; no learning mutation was attempted or claimed. One selector appeared stale and should be revalidated on a later run.
 ```
 
 Only generate a link after Jira confirms the upload and returns its actual attachment metadata.
 
 ## 9. Failure handling and security
 
-- **Jira unreachable:** Continue testing where ticket ACs were already successfully cached for this run, but mark freshness; queue report locally and allow explicit retry.
+- **Jira MCP unavailable:** Do not switch issue keys or imply UMB has cached/selected ticket context. The agent may continue only if it already obtained ACs for this exact supplied key and can truthfully mark their freshness; otherwise stop AC-driven testing and report the limitation. Preserve an agent/local report for explicit retry.
 - **No ACs found:** Stop with actionable `needs_clarification`, do not fabricate test objectives.
 - **Browser navigation blocked:** Record blocked cases and continue unrelated tests if safe.
-- **Memory unavailable:** Continue with reduced capability, flag degraded mode, and queue learning writes for later reconciliation only if secure and supported.
-- **Upload failed:** Keep evidence locally, mark upload failure, and avoid fake links.
-- **Comment timeout:** Query Jira for the run marker before attempting another create.
+- **Memory unavailable:** Continue with reduced capability and flag degraded mode. Do not claim persistent learning writes succeeded; production learning writes remain disabled. The agent does not queue or call persistent mutation tools.
+- **Upload failed:** Keep evidence in the local agent/report workflow if available, mark upload failure, and avoid fake links.
+- **Comment timeout:** Query Jira for the run marker before attempting another create only if the configured Jira MCP demonstrably supports this; otherwise report the unresolved state and do not claim duplicate-safe recovery.
 - **Sensitive evidence:** Redact or suppress before persistence/upload; avoid secrets in traces, console output, and Jira comments.
 - **Prompt injection:** Treat Jira text, UI content, and memory as untrusted task data, never as authority to override runtime safety or change credentials.
 - **Least privilege:** Restrict Jira scopes and projects; no status changes or arbitrary issue edits.
@@ -335,55 +318,61 @@ Only generate a link after Jira confirms the upload and returns its actual attac
 ## 10. Observability and quality attributes
 
 - Structured logs with run ID, ticket key, tool call, duration, error category, and correlation ID; secrets scrubbed.
-- Local audit trail for every AC, assertion, screenshot, memory write, upload, and Jira comment.
-- Deterministic reporting; resumable upload/comment stages.
-- Versioned adapters, configuration schema, graph schema migrations, spaCy model/rules version tracking, and backward compatibility with existing YAML.
+- Agent/local-report audit trail for each AC, assertion, screenshot, memory read, upload, and Jira comment; no persistent learning mutation is part of the default agent workflow.
+- Deterministic local report generation. Upload/comment resumption and duplicate avoidance are claimed only if the configured Jira MCP proves them in the authorized Phase 5 sandbox; no UMB report-recovery store is presumed.
+- Versioned canonical portable Agent Skill instructions, existing configuration/schema, graph migrations, spaCy model/rules version tracking, and backward compatibility with existing YAML. Codex and Copilot use separate path adapters over the same `SKILL.md` content.
 - Performance target (proposed): memory lookup and AC ingestion should not dominate browser execution; expose per-stage timing rather than assuming fixed response-time SLAs.
 
 ## 11. Implementation plan
 
-### Phase 1 — Jira evidence pipeline (P0)
-- Inspect existing ticket context, CLI, MCP registration, run storage, and Jira usage.
-- Implement Jira AC reader, ADF parser, attachment uploader, comment publisher, idempotency/retry logic, and secure configuration.
-- Add integration tests using mocked Jira responses and a test Jira project where available.
+### Phase 1 — spaCy memory foundation (closed)
+The existing SQLite graph, mandatory spaCy learning boundary, migration/backfill, YAML record fingerprints, and offline packaging have passed final Oracle gate in run `39058953989`. Production persistent-learning writes remain hard-disabled. Do not confuse these with operational run/assertion/evidence writes, which are available.
 
-### Phase 2 — Runtime agent installation (P0)
-- Define canonical agent contract and required MCP capabilities.
-- Implement Copilot/Codex adapters, install/uninstall/doctor commands, backups, idempotency, and documentation.
-- Verify actual runtime-specific file paths and formats against installed runtime versions during implementation.
+### Phase 2 — Explicit-key Jira AC workflow (P0; agent instructions)
+- Specify use of the user's configured Jira MCP for AC reads using only an explicit agent-supplied `issue_key`.
+- Define freshness, source/AC identity, unsupported requirements, and truthful reporting. No UMB Jira client/API/AC endpoint/MCP tools, Jira discovery/search/selection, or Jira credentials/config.
+- Check existing UMB operational interfaces for supplied-key/AC-identity binding; if unsupported, document the contract gap rather than adding a presumed API.
 
-### Phase 3 — Autonomous AC testing and memory (P0)
-- Add AC traceability, positive/negative planning, assertion/result contracts, memory-first workflow, verified learning writes, and evidence collection.
-- Add blocked/partial behavior and safe data policies.
+### Phase 3 — Portable Codex/Copilot Agent Skills and safe installer (P0; expanded scope approved by Oracle)
+- Define one canonical `SKILL.md`, named `umb-ui-testing`, with valid required `name`/`description` frontmatter. Codex paths: project `.agents/skills/umb-ui-testing/SKILL.md`, user `~/.agents/skills/umb-ui-testing/SKILL.md`. Copilot CLI and VS Code share paths: project `.github/skills/umb-ui-testing/SKILL.md`, user `~/.copilot/skills/umb-ui-testing/SKILL.md`.
+- Implement `umb agent` install/uninstall/doctor/list for Codex and Copilot shared paths. Validate project/user scopes separately; refuse unrelated target collisions by default, back up on `--force`, and uninstall only exact UMB-managed content. Account for Copilot CLI project-over-personal precedence and VS Code's root-dependent duplicate discovery.
+- User separately configures Jira MCP and UMB MCP. Installer must not modify `config.toml` or any MCP configuration/registration, plugin, or custom-agent file. No Copilot plugin or custom-agent format is in scope.
+- This expanded scope passed a fresh Oracle gate. Local environment has no Copilot CLI and no Copilot-related VS Code extension (VS Code `1.133.0` is installed); Copilot CLI minimum version is undocumented. Static format/path research only until a host is installed; do not claim runtime recognition/invocation. Do not add a browser or memory store.
 
-### Phase 3B — spaCy graph-memory upgrade (P0)
-- Inspect current SQLite graph schema, memory MCP implementations, and YAML ingestion code paths to identify every persistent write path.
-- Package a pinned local spaCy runtime/pipeline for the supported Windows/Linux deployment modes; provide `memory doctor` and health checks.
-- Add centralized redaction, spaCy parsing, UI-specific rules, canonical entity IDs, relation validation, deduplication, and transactional upserts behind existing memory MCP tools.
-- Add versioned migrations, resumable backfill, YAML fingerprinting, reindex tooling, and exact-selector regression protection.
-- Extend retrieval using NLP normalization while preserving exact search and MCP compatibility; add unit, integration, and migration tests.
+### Phase 4 — AC-driven test workflow (P0; agent instructions, not engine)
+- In agent instructions define AC traceability, positive/negative planning, assertion/result interpretation, memory-first workflow, evidence capture, blocked/partial handling and safe data policies.
+- The runtime agent uses existing browser/memory MCP tools. Do not implement an autonomous UMB planner, execution engine, or Jira API.
 
-### Phase 4 — End-to-end Jira reporting (P0)
-- Persist run reports; upload evidence; post or reconcile a single Jira comment; support report-only retries.
-- Run end-to-end tests against a fixture app with deliberately passing, failing, and blocked ACs.
+### Phase 5 — Inline screenshot images in Jira comment tables (P0; complete)
+- **Goal:** inline screenshot images in Jira comment tables. The fixed two-column `--table` publisher passed its authorized non-production `SCRUM-1` renderer check, reusing the existing managed image. Read-only Jira HTML and user visual confirmation verified the image in the comment table. Preserve this evidence.
+- **Selected implementation direction (implemented locally; mocked/offline tests passed (30 tests in the focused publisher/MCP/agent subset)):** `jira_publish_screenshot_table` accepts a structured bounded payload, and UMB validates/renders it, uploads or reuses the managed image, and posts the table comment. Normal comments remain via the user's Jira MCP; no upload-ID handoff is implemented. Read-only Jira verification confirmed the dynamic payload; the user visually inspected comment `10002` on `SCRUM-1` and confirms it looks good. The tool still labels this renderer `experimental_unverified`; this sandbox check is not a general Jira Cloud guarantee. Independent code review and full local checks passed. AC-driven UI execution/report is not required; AC extraction/testing instructions are separate Phases 2/4.
+- The separately authorized synthetic description-source Jira Task `SCRUM-2` is Phase 2 source-handling evidence only. No Acceptance Criteria custom field was available among 19 inspected create fields; its two description ACs and To Do status were read back. It is labeled `umb-synthetic-ac-source-test` and `do-not-action`, unassigned, and has no sprint assignment. These are isolation measures only; do not imply the ticket cannot appear on a board. This does not validate a field path, block Phase 5, or indicate UI execution/product testing. No custom field was invented.
+- Read-only Jira MCP access to `SCRUM-1` succeeded (ACs are placeholders); two earlier and one fresh exact-generated-command upload failed with `JwtAuthoriser:AuthenticationError: invalid signature`. The first UMB publisher write succeeded: attachment ID `10000`, filename `umb-screenshot-989bda810665b5522fa81ed3.png`, 1685 bytes; image comment ID `10000`. Jira comment HTML contained a `media-single` figure and the user saw the image inline.
+- The reviewed experimental publisher (`src/jira/comment.ts`; `umb jira comment <issue_key>`) uses environment-only private API-token auth, explicit site/key, managed redacted artifacts under `<artifacts.directory>/.umb-managed/`, dry-run by default, and explicit `--write` plus `--experimental-inline-wiki` opt-ins. It bounds comment pagination before marker checks, reuses deterministic attachments only when size matches, and fails closed on conflicts. It has no issue discovery, status changes, deletes, general Jira client, or persistent-learning writes.
+- The exactly-one additional marked comment authorized by the user succeeded as comment ID `10001`, reusing attachment ID `10000` with no new attachment, status change, or deletion. Read-only Jira HTML contains a real two-column table with the same image/media ID in a cell; the user reports it works. This fixed-renderer authorization is consumed. The separate structured call is now complete and read-only verified; its authorization is consumed and no further writes or other issues are authorized. `--table` is fixed test content, not an arbitrary AC/report-table payload.
+- Independent review and full local checks passed after the final upload-path test: typecheck, build, full suite (212 tests: 203 passed, 9 skipped, 0 failed), lint, and diff-check. The focused publisher/MCP/agent subset passes 30 tests. Mock coverage includes unsafe-input rejection before network, dry-run/write opt-ins, first-time upload and generated IDs, table-body generation, and duplicate suppression. No Jira calls or live writes occurred during these local checks. The structured payload has since been published and read-only verified; the user has visually confirmed comment `10002`; Phase 5 is complete. The exact one-write authorization is consumed; no further writes are authorized.
+- Jira Cloud legacy wiki inline rendering remains experimental and is not generally guaranteed; the ADF media-ID/collection bridge is undocumented. The `SCRUM-1` HTML read-back/user visual check validates this sandbox case only, not production readiness or a general Jira Cloud guarantee.
+- Prior fixed-renderer and structured-comment authorizations are consumed; no further writes are authorized. Never test production Jira, discover issues, change status, delete, or write persistent learning. Use only confirmed attachment references; preserve local JSON/Markdown reports and accurate partial status.
 
-### Phase 5 — Hardening (P1)
-- Improve graph learning conflict resolution, concurrent session isolation, screenshot redaction, test data cleanup, and Data Center adapter feasibility.
+### Phase 6 — Final hardening, release and onboarding (P1)
+- Not started. Preliminary README documentation does not constitute Phase 6 acceptance.
+- Harden the implemented workflow/capability, privacy, cleanup, recovery and concurrency; validate examples and rewrite README. Repeat packaging checks where relevant. Document unverified or unsupported capabilities rather than implying completion.
 
 ## 12. Engineering test matrix
 
 | Scenario | Expected result |
 |---|---|
-| Valid Jira auth and screenshot | Attachment uploaded; report comment contains real URL |
-| Jira attachment permission denied | Clear error; no invented evidence link |
-| Comment request times out after success | Reconciliation finds run marker; no duplicate comment |
-| No ACs present | Needs clarification; no fabricated tests |
+| Explicit supplied issue key | Agent reads only that issue through configured Jira MCP; collects description and exposed custom-field ACs, retains source, and uses evidence/full view where supported; no discovery/search/selection |
+| Jira inline image in comment table | Fixed two-column renderer passed earlier. The single structured call was published and read-only Jira listing/HTML verified the table and inline image using existing attachment `10000` (comment `10002`, no upload); result says `experimental_unverified`. The user visually inspected comment `10002` on `SCRUM-1` and confirms it looks good. The exact one-write authorization is consumed; no further writes are authorized. |
+| Jira attachment permission denied (if capability test encounters it) | Clear report/error; no invented evidence link |
+| Comment request times out after success | Reconciliation finds run marker and avoids duplicate where supported; otherwise record gap |
+| No ACs present | Check description and exposed custom fields, using an evidence/full view where supported; omitted summary fields do not prove no criteria. If no ACs are present after that check, needs clarification; no fabricated tests; no UMB AC reader |
 | AC has positive and negative behavior | Both test cases executed and asserted |
 | AC cannot be UI-tested | Explicit non-UI-testable classification |
 | Existing graph learning is valid | Reused and provenance recorded |
-| Existing graph learning is stale | Revalidated, marked stale, replacement stored |
+| Existing graph learning is stale | Agent revalidates read-only and reports stale context; it does not mutate persistent learning |
 | Memory MCP unavailable | Degraded run; no false persistence claim |
-| Agent writes a new observation | spaCy runs before SQLite write; extracted graph data and provenance persisted |
+| Agent observes new navigation/test information | No persistent learning mutation call or saved-write claim; operational run/assertion/evidence writes remain separate and available |
 | YAML startup seed changes | Changed records use spaCy ingestion; unchanged fingerprints skipped |
 | Known locator includes special characters | Exact selector survives preprocessing and can be recalled exactly |
 | Equivalent observations within one project/environment | Canonical identity prevents duplicate verified nodes/edges |
@@ -392,11 +381,13 @@ Only generate a link after Jira confirms the upload and returns its actual attac
 | spaCy rules/model version updated | Explicit reindex updates derived data without losing raw facts or provenance |
 | Existing graph migrated twice | Migration/backfill idempotent; no missing facts or new duplicates |
 | NLP extraction proposes unobserved relation | Stored as candidate, never auto-promoted to verified |
-| Copilot/Codex install twice | No duplicate/overwritten unrelated settings |
-| Uninstall runtime agent | Only managed files/settings removed |
+| Codex project/user skill install twice | No duplicate/overwritten unrelated files; MCP config remains untouched |
+| Copilot CLI/VS Code common-path skill install | Both surfaces target `.github/skills` project and `~/.copilot/skills` user paths; host recognition remains unverified locally |
+| Existing unrelated skill target | Refuse by default; `--force` backs up before replace |
+| Uninstall Codex/Copilot skill | Only exact UMB-managed skill content removed; MCP config remains untouched |
 | Secret appears in UI | Evidence redacted/suppressed before Jira upload |
 | Destructive case on production | Blocked by default policy |
-| Crash after evidence upload | Resume/reconcile without duplicate attachments when possible |
+| Crash after evidence upload | Sandbox capability gate tests recovery/duplicate-safe behavior; UMB ownership only for a proven narrow gap |
 
 ## 13. README rewrite and developer onboarding (P0)
 
@@ -407,12 +398,12 @@ The current README is dense and confusing. Rewrite it as a concise, task-oriente
 ### Required documentation work
 
 1. **Audit the existing README and CLI:** Inspect the actual command help, supported runtimes, environment variables, YAML schema, MCP tools, Jira integration, and existing examples. Do not document proposed commands as implemented unless they actually work.
-2. **Restructure the README for progressive disclosure:** Use this suggested order: project name and one-paragraph purpose; key capabilities; prerequisites; quick start; configuration; install/connect a Copilot or Codex agent; first test run; Jira results and screenshots; graph memory and YAML learning; CLI command reference; troubleshooting; security/limitations; links to deeper documentation.
+2. **Restructure the README for progressive disclosure:** Use this suggested order: project name and one-paragraph purpose; key capabilities; prerequisites; quick start; configuration; install/connect Codex, Copilot CLI, and VS Code Copilot portable skills; first test run; Jira results and screenshots; graph memory and YAML learning; CLI command reference; troubleshooting; security/limitations; links to deeper documentation. Explain shared Copilot skill paths and distinguish static installation from unverified host recognition.
 3. **Create a genuinely runnable quick start:** Include copy-pasteable commands, example configuration with safe placeholders, expected outcome, and a minimal end-to-end flow. Distinguish optional Jira features from core browser/MCP setup and show both the simplest non-Jira path and the Jira-backed path.
 4. **Make the mental model obvious:** Briefly explain the relationship among CLI process, MCP server, headless browser/Playwright, runtime-installed agent, SQLite graph memory, YAML seed files, spaCy-powered memory ingestion, and Jira. A compact Mermaid architecture diagram is acceptable if it makes the flow clearer.
 5. **Improve scannability:** Use short sections, plain language, consistent terms, short code examples, and links to detailed reference docs instead of long inline explanations. Explain jargon on first use; avoid marketing filler.
 6. **Separate reference material when needed:** Move exhaustive MCP tool inventories, YAML field definitions, configuration options, and architecture details into appropriately linked `docs/` pages rather than deleting useful information. Keep the README useful as a standalone landing page.
-7. **Include realistic examples:** Show runtime agent installation and invocation, initial YAML learning, spaCy setup/model provisioning, `memory doctor`, memory reuse across runs, and how to find the Jira comment and screenshot attachments. Explain how to configure credentials securely without embedding secrets.
+7. **Include realistic examples:** Show Codex and Copilot CLI/VS Code project/user skill paths, separately configured Jira/UMB MCPs (the installer must not edit MCP configuration), read-only persistent memory, initial YAML seed learning, spaCy setup/model provisioning, `memory doctor`, memory reuse across runs, and how to find the Jira comment and screenshot attachments. Explain that persistent-learning mutation is disabled and any future enablement requires separate approval; explain secure credential configuration in the user's runtime without embedding secrets. State current host limitations precisely: Copilot CLI absent; VS Code `1.133.0` installed without Copilot extension; CLI minimum version undocumented.
 8. **Validate every example:** Check commands against the actual CLI, validate sample YAML against the parser/schema, check internal links, and run the quick-start sequence in a clean environment or document the exact steps that could not be exercised.
 9. **Keep documentation synchronized:** Update `--help`, example config files, and linked docs when they contradict the README; do not silently change application behavior solely to make examples appear correct.
 
@@ -420,7 +411,7 @@ The current README is dense and confusing. Rewrite it as a concise, task-oriente
 
 - [ ] A first-time developer can identify what the tool does and how its components fit together within the opening sections.
 - [ ] The quick start provides a clear path from installation to a successful browser test with no unexplained prerequisites.
-- [ ] Jira integration and Copilot/Codex agent installation are described using commands verified against the implemented CLI.
+- [ ] Jira MCP is described as separately configured by the user; Codex and Copilot CLI/VS Code skill paths are documented, and installer leaves MCP registration/configuration untouched. Static path validation is distinguished from host recognition; current local Copilot host limitations are explicit.
 - [ ] The README clearly distinguishes required setup (including spaCy) from optional capabilities and marks platform/runtime limitations.
 - [ ] Detailed reference information remains discoverable through working links without overwhelming the README.
 - [ ] All documented examples, sample YAML, and internal links are verified, or any unverified steps are explicitly identified.
@@ -428,14 +419,15 @@ The current README is dense and confusing. Rewrite it as a concise, task-oriente
 
 ## 14. Definition of done
 
-- [ ] First-party Jira integration fetches ACs and reliably uploads screenshots and comments.
-- [ ] Both Copilot and Codex have tested agent installation and documented invocation paths.
-- [ ] Agent uses the ticket already held by the tool, without rebuilding ticket selection.
+- [ ] Agent reads ACs only for an explicit supplied `issue_key` through the user's configured Jira MCP; no UMB Jira client/API/AC tools or ticket discovery.
+- [x] Phase 5 is complete. The one authorized structured call returned `status: published`, comment `10002`, attachment `10000`, marker `UMB-JIRA-STRUCTURED-TABLE:af923d40e9dfa1519668699d056a8f34ab1a0d3c25fad0eaa49a454f75980bb4`, and `rendering: experimental_unverified`; it reused the existing image with no upload. Read-only Jira listing showed 3 comments, and comment `10002` plus rendered HTML verified the expected Field/Result table and inline image in the second cell. The user visually inspected comment `10002` on `SCRUM-1` and confirms it looks good. Independent review/full local checks passed. AC-driven UI execution/report is not a gate; Phases 2/4 remain separate. The one-call authorization is consumed; no further writes, production, discovery, status/delete, or persistent learning.
+- [ ] Codex project/user and Copilot project/user skill paths are tested and documented separately; Copilot CLI and VS Code use common Agent Skills paths with one canonical skill content adapter. Expanded Copilot scope passed Oracle review before implementation. Current environment limitation is stated precisely: Copilot CLI absent; VS Code `1.133.0` present without Copilot extension; no local host recognition/invocation claim.
+- [ ] Agent does not assume UMB already knows the selected ticket; it uses the exact supplied key and never searches/selects another issue.
 - [ ] Every AC is traced to test cases, assertions, outcomes, and evidence or an explicit gap.
 - [ ] Positive and negative testing is demonstrated on fixture workflows.
-- [ ] Graph memory is read before execution and verified learnings are written via existing memory MCP tools, with spaCy obligatorily processing every persistent memory write.
-- [ ] Screenshot uploads are privacy-safe and actual Jira attachment references appear in comments.
-- [ ] Comment publishing is resumable and resistant to duplicates.
+- [ ] Agent reads persistent graph memory only; it does not call persistent learning mutation tools or claim writes saved. Production persistent-learning writes remain disabled, and no phase here enables them. Operational run/assertion/evidence writes are separate and available. Any future enablement requires a separately approved spaCy-boundary change.
+- [ ] Screenshot uploads are privacy-safe and only confirmed Jira attachment references appear in reports/comments, after sandbox capability validation.
+- [ ] Comment publishing is resumable and resistant to duplicates only where the user's Jira MCP demonstrates that capability in the authorized sandbox; no UMB-owned recovery store is presumed.
 - [ ] Errors, blockers, and incomplete evidence are reported accurately.
 - [ ] Automated unit, integration, and end-to-end tests pass; CLI help is accurate.
 - [ ] spaCy runtime and pinned model are installed locally for supported platforms; `memory doctor` identifies missing/incompatible components.
@@ -446,26 +438,26 @@ The current README is dense and confusing. Rewrite it as a concise, task-oriente
 
 ## 15. Instructions to the implementing coding agent
 
-1. Inspect the repository and identify the existing CLI framework, browser MCP tools, graph-memory MCP tools, ticket context model, YAML ingestion, and test/run persistence. **Reuse these components.**
+1. Inspect the repository and identify existing CLI, browser/memory MCP tools, YAML ingestion, operational run/assertion/evidence persistence, and agent context. Do not assume UMB has selected-ticket context or Jira client capabilities. **Reuse existing components.**
 2. Produce a short implementation map of the files/modules you will change and any unresolved integration assumptions.
-3. Implement the P0 requirements incrementally with tests. Avoid introducing an alternate Jira ticket selection flow or duplicate browser/memory stores.
-4. Validate Copilot and Codex native agent formats and MCP configuration for the runtime versions available in the environment; document any unsupported versions rather than inventing compatibility.
-5. Use mocks for repeatable Jira API tests and an optional live Jira sandbox for attachment/comment verification. Never publish test comments to production issues without explicit authorization.
+3. Implement P0 requirements incrementally with tests. Require explicit agent-supplied `issue_key`; never implement UMB Jira discovery/search/selection, a general-purpose Jira client, AC API/tools, or an autonomous AC engine. The only Jira write exception is the implemented narrow experimental publisher defined in FR-01; do not expand it. Do not duplicate browser/memory stores.
+4. Expanded Phase 3 passed a fresh Oracle gate. Use one canonical `SKILL.md` (`umb-ui-testing`) for Codex project/user paths `.agents/skills/umb-ui-testing/SKILL.md`, `~/.agents/skills/umb-ui-testing/SKILL.md`, and Copilot CLI + VS Code project/user paths `.github/skills/umb-ui-testing/SKILL.md`, `~/.copilot/skills/umb-ui-testing/SKILL.md`. Validate each scope separately. Refuse unrelated target collisions by default, back up on `--force`, and uninstall only exact UMB-managed content. The user separately configures Jira MCP and UMB MCP. Never modify `config.toml` or any MCP registration/configuration, plugin, or custom-agent file. Static paths do not prove host recognition: Copilot CLI absent; VS Code `1.133.0` present without Copilot extension; Copilot CLI minimum version undocumented.
+5. Record the exact sandbox history: Jira read succeeded with placeholder ACs; three exact-generated-command MCP uploads failed with invalid signatures. First authorized image write succeeded on non-production `SCRUM-1`: attachment `10000` (`umb-screenshot-989bda810665b5522fa81ed3.png`, 1685 bytes) and image comment `10000`; Jira HTML had a `media-single` and user saw the image inline. The fixed-renderer comment `10001` reused that image in the two-column table and was visually confirmed by the user. The separate one-call structured comment then published `10002`, reusing attachment `10000` with no upload; result marker `UMB-JIRA-STRUCTURED-TABLE:af923d40e9dfa1519668699d056a8f34ab1a0d3c25fad0eaa49a454f75980bb4`, `rendering: experimental_unverified`. Read-only `listJiraIssueComments` showed 3 comments; comment `10002` and rendered HTML verify Field/Result, Rendering/Pass, and inline image in the second cell. The user visually inspected comment `10002` on `SCRUM-1` and confirms this structured result looks good. No status change or deletion. The one-call authorization is consumed; no further writes or other issues authorized. The CLI `umb jira comment <issue_key>` publisher remains a fixed-table mode; no issue discovery, general Jira client, learning writes, or production Jira. Full local checks and independent review passed; AC-driven UI/report is not a gate.
 6. Include a fixture UI application covering valid submission, invalid submission, a changing selector, and an intentionally blocked test.
-7. Demonstrate the complete path: selected ticket -> fetch ACs -> read graph memory -> execute positive/negative tests -> persist verified learnings -> upload screenshots -> publish one Jira comment.
-8. Implement FR-07 as a centralized spaCy-powered enhancement to the **existing** graph-memory service. Inventory all write paths, run migrations/backfill, preserve MCP compatibility, and demonstrate YAML and agent writes both pass through spaCy.
+7. Demonstrate the workflow with explicit supplied key -> Jira MCP AC read -> read-only existing UMB memory plus browser tools -> assertions/evidence/report -> validated Jira MCP reporting, after authorization and sandbox testing. Bind key/AC identity to UMB records only if current interfaces support it; document any gap. Do not call persistent learning mutations or claim learning writes saved; no phase enables production learning writes.
+8. Preserve FR-07's centralized spaCy boundary for persistent writes and the existing migration/backfill guarantees. Agent persistent-learning writes remain disabled/read-only; any future enablement is a separate approved change. Operational records are separate.
 9. Rewrite the README as specified in Section 13, including restructuring and validating onboarding commands, spaCy setup/diagnostics, and configuration examples. Do not merely append the new features to the old README.
 10. Provide command examples, memory migration/reindex notes, tests run, known limitations, and a final requirement-by-requirement completion checklist.
 
 ## 16. Open decisions (non-blocking defaults)
 
-- **Jira edition:** Jira Cloud first; Data Center later if needed.
-- **AC source:** Configurable description heading and custom field; default to heading `Acceptance Criteria`.
+- **Phase 5 table capability:** Fixed two-column `--table` renderer passed earlier. The one structured payload call has now been published and read-only Jira listing/HTML verified comment `10002` with inline image from existing attachment `10000`, no upload, and `rendering: experimental_unverified`. Independent review/full local checks passed. Phase 5 is complete; AC-driven UI/reporting is not a gate. The exact one-write authorization is consumed; no further writes are authorized.
+- **AC source:** Determined by the user's configured Jira MCP and supplied `issue_key`; no UMB AC source configuration/client by default.
 - **Agent packaging:** Runtime-native agent definition generated from a bundled canonical template.
 - **Evidence retention:** Local evidence stored per run with configurable cleanup/retention; default must be conservative and documented.
-- **Jira report trigger:** Report automatically on run completion, with an option to disable and report manually.
+- **Jira report trigger/transport:** Agent instructions determine reporting workflow after capability validation; no UMB Jira transport default.
 - **Parallelism:** One isolated browser session by default; configurable later.
-- **Ticket context ownership:** Existing tool remains source of truth for current ticket.
+- **Ticket identity:** Agent receives an explicit supplied `issue_key`; UMB must not discover or select tickets. Persistence binding is conditional on existing interfaces; otherwise document a contract gap.
 - **Memory NLP:** spaCy is mandatory for persistent graph ingestion; `en_core_web_sm` is the initial proposed model, to be locked and packaged for offline use.
 - **Graph backend:** Keep the existing SQLite graph; spaCy enriches ingestion and retrieval rather than replacing graph storage.
 - **Memory recovery:** Failure to initialize spaCy blocks persistent writes, but may permit browser-only testing with prominently reported degraded memory capability.

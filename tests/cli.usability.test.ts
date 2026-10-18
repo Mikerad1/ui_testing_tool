@@ -7,7 +7,7 @@ import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 
 const repo=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
-function cli(cwd:string,...args:string[]){return spawnSync(process.execPath,[path.join(repo,'dist/src/cli/index.js'),...args],{cwd,encoding:'utf8'});}
+function cli(cwd:string,...args:string[]){return spawnSync(process.execPath,[path.join(repo,'dist/src/cli/index.js'),...args],{cwd,encoding:'utf8',env:process.env});}
 const config=(knowledge='./knowledge')=>`version: 1\nproject: {id: demo, name: Demo, base_url: http://127.0.0.1:3000}\nserver: {host: 127.0.0.1, port: 7317, auth: {mode: none}}\nknowledge: {path: ${knowledge}}\n`;
 
 test('spawned init serializes YAML safely, validates ids/URLs, and refuses overwrite',async()=>{
@@ -47,4 +47,37 @@ function assertDiagnostic(value:unknown){assert.ok(value&&typeof value==='object
 
 test('spawned CLI help advertises workflow examples and JSON diagnostics',()=>{
  const result=cli(repo,'--help');assert.equal(result.status,0);assert.match(result.stdout,/umb init/);assert.match(result.stdout,/knowledge validate --json/);assert.match(result.stdout,/doctor --json/);
+});
+
+test('spawned Codex agent commands use isolated project and user scopes without touching real home/config',async()=>{
+ const root=await mkdtemp(path.join(os.tmpdir(),'umb-agent-cli-'));
+  const home=path.join(root,'home'),codexHome=path.join(root,'codex-home'),project=path.join(root,'project');
+  await mkdir(home);await mkdir(codexHome);await mkdir(project);
+ try{
+  const config=path.join(codexHome,'config.toml');await writeFile(config,'[mcp_servers.fixture]\ncommand = "unchanged"\n');const configBefore=await readFile(config);
+  const protectedPaths=[path.join(home,'.copilot','mcp.json'),path.join(home,'.copilot','plugin.json'),path.join(project,'.github','agents','custom.agent.md'),path.join(project,'.github','copilot-instructions.md')];
+  for(const file of protectedPaths){await mkdir(path.dirname(file),{recursive:true});await writeFile(file,`sentinel:${path.basename(file)}\n`);}
+  const protectedBefore=await Promise.all(protectedPaths.map(file=>readFile(file)));
+  const run=(...args:string[])=>spawnSync(process.execPath,[path.join(repo,'dist/src/cli/index.js'),...args],{cwd:project,encoding:'utf8',env:{...process.env,HOME:home,USERPROFILE:home,CODEX_HOME:codexHome}});
+  let result=run('agent','list');assert.equal(result.status,0,result.stderr);assert.match(result.stdout,/project: absent/);assert.match(result.stdout,/user: absent/);
+  result=run('agent','install','--runtime','codex','--scope','project','--dry-run');assert.equal(result.status,0,result.stderr);assert.match(result.stdout,/Would install codex skill/);await assert.rejects(access(path.join(project,'.agents')));
+  result=run('agent','doctor','--runtime','codex','--scope','project','--json');assert.equal(result.status,1);let doctor=JSON.parse(result.stdout);assert.equal(doctor.ok,false);assert.equal(doctor.checks.find((c:any)=>c.id==='codex.skill.project')?.status,'fail');
+  result=run('agent','install','--runtime','codex','--scope','project');assert.equal(result.status,0,result.stderr);assert.match(result.stdout,/Installed codex skill/);
+  result=run('agent','list');assert.equal(result.status,0,result.stderr);assert.match(result.stdout,/project: installed/);assert.match(result.stdout,/user: absent/);
+  result=run('agent','doctor','--runtime','codex','--scope','project','--json');doctor=JSON.parse(result.stdout);const codexSkillCheck=doctor.checks.find((c:any)=>c.id==='codex.skill.project');const codexCliCheck=doctor.checks.find((c:any)=>c.id==='codex.cli');assert.equal(codexSkillCheck?.status,'ok');assert.ok(['ok','fail'].includes(codexCliCheck?.status));assert.equal(doctor.ok,codexCliCheck?.status==='ok');assert.equal(result.status,doctor.ok?0:1,result.stderr);
+  result=run('agent','install','--runtime','codex','--scope','user');assert.equal(result.status,0,result.stderr);assert.match(result.stdout,/Installed codex skill/);
+  result=run('agent','list');assert.equal(result.status,0,result.stderr);assert.match(result.stdout,/project: installed/);assert.match(result.stdout,/user: installed/);assert.ok(await access(path.join(home,'.agents','skills','umb-ui-testing','SKILL.md')).then(()=>true));
+  result=run('agent','uninstall','--runtime','codex','--scope','project','--dry-run');assert.equal(result.status,0,result.stderr);assert.match(result.stdout,/Would uninstall/);assert.ok(await access(path.join(project,'.agents','skills','umb-ui-testing','SKILL.md')).then(()=>true));
+  result=run('agent','uninstall','--runtime','codex','--scope','project');assert.equal(result.status,0,result.stderr);
+  result=run('agent','list');assert.equal(result.status,0,result.stderr);assert.match(result.stdout,/project: absent/);assert.match(result.stdout,/user: installed/);
+  result=run('agent','install','--runtime','copilot','--scope','project','--dry-run');assert.equal(result.status,0,result.stderr);assert.match(result.stdout,/Would install copilot skill/);await assert.rejects(access(path.join(project,'.github','skills')));
+  result=run('agent','install','--runtime','copilot','--scope','project');assert.equal(result.status,0,result.stderr);assert.match(result.stdout,/Installed copilot skill/);
+  result=run('agent','install','--runtime','copilot','--scope','user');assert.equal(result.status,0,result.stderr);assert.match(result.stdout,/Installed copilot skill/);
+  result=run('agent','list');assert.equal(result.status,0,result.stderr);assert.match(result.stdout,/copilot project: installed/);assert.match(result.stdout,/copilot user: installed/);assert.match(result.stdout,/codex project: absent/);assert.match(result.stdout,/codex user: installed/);
+  result=run('agent','doctor','--runtime','copilot','--scope','project','--json');assert.equal(result.status,0,result.stderr);doctor=JSON.parse(result.stdout);assert.equal(doctor.ok,true);assert.equal(doctor.checks.find((c:any)=>c.id==='copilot.skill.project')?.status,'ok');assert.equal(doctor.checks.find((c:any)=>c.id==='copilot.host-recognition')?.status,'not-tested');assert.match(doctor.checks.find((c:any)=>c.id==='copilot.host-recognition')?.message,/not tested/);
+  result=run('agent','uninstall','--runtime','copilot','--scope','project','--dry-run');assert.equal(result.status,0,result.stderr);assert.ok(await access(path.join(project,'.github','skills','umb-ui-testing','SKILL.md')).then(()=>true));
+  result=run('agent','uninstall','--runtime','copilot','--scope','user');assert.equal(result.status,0,result.stderr);assert.ok(await access(path.join(project,'.github','skills','umb-ui-testing','SKILL.md')).then(()=>true));
+  result=run('agent','uninstall','--runtime','copilot','--scope','project');assert.equal(result.status,0,result.stderr);
+  assert.deepEqual(await readFile(config),configBefore);for(let i=0;i<protectedPaths.length;i++)assert.deepEqual(await readFile(protectedPaths[i]!),protectedBefore[i]);
+ }finally{await rm(root,{recursive:true,force:true});}
 });

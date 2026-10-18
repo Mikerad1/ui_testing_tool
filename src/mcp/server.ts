@@ -15,6 +15,7 @@ import type { BrowserController } from '../browser/controller.js';
 import { runWorkflow } from '../workflow/runner.js';
 import { reconcile } from '../knowledge/reconcile.js';
 import { startKnowledgeWatcher, type KnowledgeWatchEvent, type KnowledgeWatchHandle } from '../knowledge/watcher.js';
+import { publishJiraScreenshotComment } from '../jira/comment.js';
 
 export function originAllowed(origin: string | undefined, tokenMode: boolean, port: number): boolean {
   if (!origin) return true;
@@ -37,7 +38,7 @@ async function readJsonBody(req: IncomingMessage): Promise<unknown> {
 }
 function reply(res: ServerResponse, status: number, message: string) { if (!res.headersSent) { res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' }); res.end(message); } }
 
-export type ServeOptions={stdio?:boolean;idleTimeoutMs?:number;applicationReady?:boolean;approver?:(prompt:string)=>Promise<boolean>;knowledgeRoot?:string;projectRoot?:string;learningWriter?:LearningWriter;watchKnowledge?:boolean;watcherFactory?:(root:string,listener:KnowledgeWatchEvent)=>KnowledgeWatchHandle;watchDebounceMs?:number};
+export type ServeOptions={stdio?:boolean;idleTimeoutMs?:number;applicationReady?:boolean;approver?:(prompt:string)=>Promise<boolean>;knowledgeRoot?:string;projectRoot?:string;learningWriter?:LearningWriter;watchKnowledge?:boolean;watcherFactory?:(root:string,listener:KnowledgeWatchEvent)=>KnowledgeWatchHandle;watchDebounceMs?:number;jiraFetch?:typeof fetch};
 export async function serve(config: Config, store: Store, browser: BrowserController, options: ServeOptions = {}) {
   const token = !options.stdio && config.server.auth.mode === 'token' ? process.env[config.server.auth.token_env] : undefined;
   if (!options.stdio && config.server.auth.mode === 'token' && !token) throw Error(`Set ${config.server.auth.token_env} before starting server`);
@@ -98,8 +99,9 @@ export async function serve(config: Config, store: Store, browser: BrowserContro
         }
         return { structuredContent: result, content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
       };
-    const tool = (name: string, description: string, schema: any, fn: (args: any) => unknown | Promise<unknown>) => mcp.tool(name, description, schema, invokeTool(fn));
-    const strictTool = (name: string, description: string, schema: z.ZodTypeAny, fn: (args: any) => unknown | Promise<unknown>) => mcp.registerTool(name, { description, inputSchema: schema }, invokeTool(fn));
+     const tool = (name: string, description: string, schema: any, fn: (args: any) => unknown | Promise<unknown>) => mcp.tool(name, description, schema, invokeTool(fn));
+     const strictTool = (name: string, description: string, schema: z.ZodTypeAny, fn: (args: any) => unknown | Promise<unknown>) => mcp.registerTool(name, { description, inputSchema: schema }, invokeTool(fn));
+     strictTool('jira_publish_screenshot_table','Publish a screenshot table to one exact issue_key and HTTPS Jira Cloud site origin. Provide headers (2–6 strings) and rows (1–25 arrays of plain-text cells); every row must match header width. image_cell uses zero-based data-row and column indices, and image_path is relative to configured artifacts.directory and must resolve within .umb-managed. Cells are NFC-normalized, max 500 characters, and allow only Unicode letters/numbers/marks, spaces, and . , : ; ASCII apostrophe and quotation mark, and parentheses; markup punctuation, URLs, controls, and line breaks are rejected. Never use production Jira. Writes require exact task-specific user authorization naming the exact non-production issue, site, and operation. Dry-run is default; network writes require BOTH write=true and experimental_inline_wiki=true. Inline table rendering is experimental and must be verified.',z.object({issue_key:z.string().min(1).max(25),site:z.string().min(1).max(300),image_path:z.string().min(1).max(1024),headers:z.array(z.string().max(500)).min(2).max(6),rows:z.array(z.array(z.string().max(500)).max(6)).min(1).max(25),image_cell:z.object({row:z.number().int().min(0).max(24),column:z.number().int().min(0).max(5)}).strict(),write:z.boolean().default(false),experimental_inline_wiki:z.boolean().default(false)}).strict(),async a=>publishJiraScreenshotComment(config,options.projectRoot??process.cwd(),{issueKey:a.issue_key,site:a.site,image:a.image_path,tableData:{headers:a.headers,rows:a.rows,imageCell:{row:a.image_cell.row,column:a.image_cell.column}},write:a.write,experimentalInlineWiki:a.experimental_inline_wiki,structuredResult:true},options.jiraFetch));
      const browserTool = (name: string, description: string, schema: any, fn: (args: any) => unknown | Promise<unknown>) =>
        tool(name, description, schema, args => runBrowser(() => { assertApplicationReady(); return Promise.resolve(fn(args)); }));
      const target = z.object({ by: z.enum(['ref', 'role', 'label', 'placeholder', 'test_id', 'text', 'css']), value: z.string().max(1000).optional(), role: z.string().max(100).optional(), name: z.string().max(500).optional() }).strict();
