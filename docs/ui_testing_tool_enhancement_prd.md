@@ -355,8 +355,8 @@ The existing SQLite graph, mandatory spaCy learning boundary, migration/backfill
 - Prior fixed-renderer and structured-comment authorizations are consumed; no further writes are authorized. Never test production Jira, discover issues, change status, delete, or write persistent learning. Use only confirmed attachment references; preserve local JSON/Markdown reports and accurate partial status.
 
 ### Phase 6 — Final hardening, release and onboarding (P1)
-- Not started. Preliminary README documentation does not constitute Phase 6 acceptance.
-- Harden the implemented workflow/capability, privacy, cleanup, recovery and concurrency; validate examples and rewrite README. Repeat packaging checks where relevant. Document unverified or unsupported capabilities rather than implying completion.
+- Bounded acceptance completed after the final Oracle gate. A targeted locally packaged v0.2.7 Linux x64 bundle smoke passed; its archive hash, evidence, expected fresh-database warning, host-specific `LD_LIBRARY_PATH` workaround, suite skips, and limits are recorded in `.slim/deepwork/phase6-final-hardening/phase6-validation.md`.
+- The acceptance covers the audited privacy/cleanup and recovery/concurrency evidence, onboarding documentation, and targeted Linux launcher/PATH/browser-install flow. It does not establish Windows or all-Linux compatibility or system-dependency installation. Broader unchecked PRD definition-of-done and README criteria remain open; do not infer them complete from this bounded Phase 6 gate.
 
 ## 12. Engineering test matrix
 
