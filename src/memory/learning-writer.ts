@@ -21,6 +21,8 @@ export type PreparedDocument = { value: unknown; normalized: string; fingerprint
 export type ValidatedYamlDocument={value:unknown;text:string;fingerprint:YamlRecordFingerprint};
 type ProposedNode = { observation_id:string; type: string; stable_key: string; display_name: string; attributes?: Record<string, unknown> };
 type ProposedEdge = { observation_id:string; from_id: string; to_id: string; relation: string; attributes?: Record<string, unknown> };
+/** Safe deterministic validation failure for an individual legacy record. */
+export class BackfillRejectedError extends Error { constructor(){super(NLP_GENERIC_ERROR);this.name='BackfillRejectedError';} }
 const NLP_ANALYZER_VERSION='umb-candidate-analyzer-v1';
 const CANDIDATE_GRAPH_TYPE:Record<typeof NLP_ENTITY_LABELS[number],string>={PAGE:'screen',ACTION:'action',FIELD:'ui_element',RULE:'validation_rule',LOCATOR:'locator',TEST:'test',AC:'acceptance_criterion'};
 const CANDIDATE_SIGNATURES:Record<typeof NLP_RELATION_TYPES[number],ReadonlyArray<readonly [string,string]>>={HAS_ACTION:[['screen','action']],NAVIGATES_TO:[['action','screen'],['screen','screen']],HAS_VALIDATION:[['ui_element','validation_rule']],BELONGS_TO:[['locator','screen']],COVERS:[['test','acceptance_criterion']]};
@@ -65,10 +67,11 @@ export class LearningWriter {
     private readonly nlp: NlpProcessor | undefined,
     private readonly redactor: MemoryRedactor | undefined,
     private readonly writesEnabled = true,
+    private readonly analysisOnly = false,
   ) {}
 
   async ensureReady(): Promise<void> {
-    if (!this.writesEnabled) throw new Error(NLP_GENERIC_ERROR);
+    if (!this.writesEnabled && !this.analysisOnly) throw new Error(NLP_GENERIC_ERROR);
     if (this.closed) throw new Error(NLP_GENERIC_ERROR);
     if (this.ready) return;
     if (!this.nlp || !this.redactor) throw new Error(NLP_GENERIC_ERROR);
@@ -140,6 +143,7 @@ export class LearningWriter {
   }
 
   async propose(input: ProposedNode) {
+    this.assertWritable();
     const observationId=this.observationId(input.observation_id);assertMcpGraphNodeType(input.type);
     const prepared = await this.prepareAnalyzed(input);
     const safe = asRecord(prepared.value);
@@ -157,6 +161,7 @@ export class LearningWriter {
   }
 
   async addEdge(input: ProposedEdge) {
+    this.assertWritable();
     const observationId=this.observationId(input.observation_id);
     try{assertMcpRelationType(input.relation);this.store.validateMcpEdgeSignature(input.from_id,input.to_id,input.relation);}catch{throw new Error('Learning write failed safely');}
     const prepared = await this.prepareAnalyzed(input);
@@ -175,16 +180,19 @@ export class LearningWriter {
   }
 
   async verify(id: string, runId: string, approval:VerificationApproval): Promise<boolean> {
+    this.assertWritable();
     await this.ensureReady();
     try { return this.store.verify(id, runId,approval); } catch { throw new Error('Learning write failed safely'); }
   }
 
   async supersede(oldId: string, newId: string): Promise<boolean> {
+    this.assertWritable();
     await this.ensureReady();
     try { return this.store.supersede(oldId, newId); } catch { throw new Error('Learning write failed safely'); }
   }
 
   async commitReconciliation(plan: YamlReconciliationPlan): Promise<number> {
+    this.assertWritable();
     await this.ensureReady();
     if (plan.entities.some(entity => !hasNlpMetadata(entity.attrs)) || plan.edges.some(edge => !hasNlpMetadata(edge.attrs))) {
       throw new Error(NLP_GENERIC_ERROR);
@@ -193,6 +201,7 @@ export class LearningWriter {
   }
 
   async reprocessBackfillNode(jobId:string,record:BackfillNodeRecord):Promise<boolean>{
+    this.assertWritable();
     const prepared=await this.prepareAnalyzed({type:record.type,stable_key:record.stable_key,display_name:record.display_name,attributes:withoutNlpMetadata(record.attributes)}),safe=asRecord(prepared.value),attributes=asRecord(safe.attributes);
     const redactedHash=hashBackfillNode({type:safe.type as string,stable_key:safe.stable_key as string,display_name:safe.display_name as string,attributes});
     const observation=this.backfillObservation('backfill_node',`node:${record.id}`,redactedHash,prepared);
@@ -200,6 +209,7 @@ export class LearningWriter {
   }
 
   async reprocessBackfillEdge(jobId:string,record:BackfillEdgeRecord):Promise<boolean>{
+    this.assertWritable();
     const prepared=await this.prepareAnalyzed({from_id:record.from_id,to_id:record.to_id,relation:record.relation,attributes:withoutNlpMetadata(record.attributes)}),safe=asRecord(prepared.value),attributes=asRecord(safe.attributes);
     const redactedHash=hashBackfillEdge({from_id:safe.from_id as string,to_id:safe.to_id as string,relation:safe.relation as string,attributes});
     const observation=this.backfillObservation('backfill_edge',`edge:${record.id}`,redactedHash,prepared);
@@ -214,6 +224,17 @@ export class LearningWriter {
   async previewBackfillEdge(record:BackfillEdgeRecord):Promise<string>{
     const prepared=await this.prepareForAnalysis({from_id:record.from_id,to_id:record.to_id,relation:record.relation,attributes:withoutNlpMetadata(record.attributes)}),safe=asRecord(prepared.value);
     return hashBackfillEdge({from_id:safe.from_id as string,to_id:safe.to_id as string,relation:safe.relation as string,attributes:asRecord(safe.attributes)});
+  }
+
+  /** Analysis-only reprocessing facade; it returns no write-capable objects. */
+  async analyzePreviewNode(record:BackfillNodeRecord):Promise<string>{
+    const prepared=await this.prepareAnalyzed({type:record.type,stable_key:record.stable_key,display_name:record.display_name,attributes:withoutNlpMetadata(record.attributes)}),safe=asRecord(prepared.value),attributes=asRecord(safe.attributes);
+    return hashBackfillNode({type:safe.type as string,stable_key:safe.stable_key as string,display_name:safe.display_name as string,attributes});
+  }
+
+  async analyzePreviewEdge(record:BackfillEdgeRecord):Promise<string>{
+    const prepared=await this.prepareAnalyzed({from_id:record.from_id,to_id:record.to_id,relation:record.relation,attributes:withoutNlpMetadata(record.attributes)}),safe=asRecord(prepared.value),attributes=asRecord(safe.attributes);
+    return hashBackfillEdge({from_id:safe.from_id as string,to_id:safe.to_id as string,relation:safe.relation as string,attributes});
   }
 
   async close(): Promise<void> {
@@ -232,9 +253,11 @@ export class LearningWriter {
       if (typeof text !== 'string' || Buffer.byteLength(text, 'utf8') > NLP_MAX_TEXT_BYTES) throw new Error(NLP_GENERIC_ERROR);
       return{value:safe,text};
     } catch {
-      throw new Error(NLP_GENERIC_ERROR);
+      throw new BackfillRejectedError();
     }
   }
+
+  private assertWritable():void{if(!this.writesEnabled)throw new Error(NLP_GENERIC_ERROR);}
 
   private async analyze(text:string):Promise<AnalyzeResponse>{
     try{

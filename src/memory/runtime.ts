@@ -52,20 +52,37 @@ export function resolveNlpRuntime(config: Config, moduleUrl = import.meta.url, v
   } catch { return undefined; }
 }
 
-export function createLearningWriter(
+function createWriter(
   store: Store,
   config: Config,
-  options: { env?: NodeJS.ProcessEnv; nlp?: NlpProcessor; patternsFile?: string } = {},
+  options: { env?: NodeJS.ProcessEnv; nlp?: NlpProcessor; patternsFile?: string; analysisOnly?: boolean } = {},
 ): LearningWriter {
   let redactor: MemoryRedactor | undefined;
   try { redactor = createMemoryRedactor(config.memory, options.env ?? process.env); } catch { redactor = undefined; }
 
-  let nlp = PERSISTENT_LEARNING_WRITES_ENABLED ? options.nlp : undefined;
-  if (PERSISTENT_LEARNING_WRITES_ENABLED && !nlp) {
+  let nlp = (PERSISTENT_LEARNING_WRITES_ENABLED || options.analysisOnly) ? options.nlp : undefined;
+  if ((PERSISTENT_LEARNING_WRITES_ENABLED || options.analysisOnly) && !nlp) {
     const runtime = resolveNlpRuntime(config, import.meta.url, options.patternsFile);
     if (runtime) try { nlp = new NlpClient(runtime); } catch { nlp = undefined; }
   }
-  return new LearningWriter(store, nlp, redactor, PERSISTENT_LEARNING_WRITES_ENABLED);
+  return new LearningWriter(store, nlp, redactor, PERSISTENT_LEARNING_WRITES_ENABLED, Boolean(options.analysisOnly));
+}
+
+export function createLearningWriter(store:Store,config:Config,options:{env?:NodeJS.ProcessEnv;nlp?:NlpProcessor;patternsFile?:string}={}):LearningWriter{
+  return createWriter(store,config,options);
+}
+
+/** No-Store analysis surface used only by read-only maintenance previews. */
+export async function createMemoryPreviewAnalyzer(config:Config,projectRoot:string,options:{env?:NodeJS.ProcessEnv;nlp?:NlpProcessor}={}){
+  const patternsFile=config.memory.patterns_file?await resolveConfiguredPatternsFile(projectRoot,config.memory.patterns_file):undefined;
+  const writer=createWriter(undefined as unknown as Store,config,{...options,patternsFile,analysisOnly:true});
+  return Object.freeze({
+    analyzeNode:(record:Parameters<LearningWriter['analyzePreviewNode']>[0])=>writer.analyzePreviewNode(record),
+    analyzeEdge:(record:Parameters<LearningWriter['analyzePreviewEdge']>[0])=>writer.analyzePreviewEdge(record),
+    ensureReady:()=>writer.ensureReady(),
+    pipelineFingerprint:()=>writer.pipelineFingerprint(),
+    close:()=>writer.close(),
+  });
 }
 
 /** Build a writer only after resolving configured rules safely against the config directory. */

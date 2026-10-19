@@ -7,6 +7,8 @@ import os from 'node:os';
 import { Store } from '../src/memory/store.js';
 import { storeLearningCommit } from '../src/memory/store-internal.js';
 import { withNlpMetadata } from '../src/memory/learning-types.js';
+import { LearningWriter } from '../src/memory/learning-writer.js';
+import { createMemoryRedactor } from '../src/memory/redactor.js';
 
 const sourceRoot = fileURLToPath(new URL('../src/', import.meta.url));
 
@@ -28,7 +30,7 @@ test('production learning graph writes stay behind Store and LearningWriter', as
   const metadataMinterImport = /import\s*\{[^}]*\bwithNlpMetadata\b[^}]*\}\s*from/;
   const metadataMinterCall = /\bwithNlpMetadata\s*\(/;
   const metadataMintingFiles = new Set(['memory/learning-writer.ts', 'knowledge/reconcile.ts']);
-  const storeMutationFiles = new Set(['memory/store.ts', 'memory/schema-v11.ts', 'memory/yaml-commit.ts']);
+  const storeMutationFiles = new Set(['memory/store.ts', 'memory/schema-v11.ts', 'memory/schema-v15.ts', 'memory/yaml-commit.ts']);
 
   for (const filename of files) {
     const relative = path.relative(sourceRoot, filename).split(path.sep).join('/');
@@ -80,6 +82,25 @@ test('Store internal commits require branded NLP attributes before any reconcili
       nodes: readRows('nodes'), edges: readRows('edges'), yamlSources: readRows('yaml_sources'), yamlOwnership: readRows('yaml_ownership'),
     }, before, 'all entries are preflighted before any reconciliation transaction writes');
   } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('analysis-only LearningWriter cannot invoke any persistent mutation with a real Store',async()=>{
+  const directory=await mkdtemp(path.join(os.tmpdir(),'learning-analysis-only-')),store=new Store(path.join(directory,'memory.sqlite'),'analysis-only');
+  try{
+    const writer=new LearningWriter(store,undefined,createMemoryRedactor({sensitive_paths:[],sensitive_values_env:[]},{}),false,true);
+    const tables=['nodes','edges','yaml_sources','memory_backfill_jobs','memory_backfill_items','memory_candidate_observations','memory_lifecycle_events'];
+    const state=()=>Object.fromEntries(tables.map(table=>[table,store.db.prepare(`SELECT * FROM ${table} ORDER BY 1`).all()]));
+    const before=state();
+    await assert.rejects(()=>writer.propose({observation_id:'preview',type:'screen',stable_key:'screen',display_name:'Screen'}),/NLP/);
+    await assert.rejects(()=>writer.addEdge({observation_id:'preview-edge',from_id:'a',to_id:'b',relation:'HAS_ACTION'}),/NLP/);
+    await assert.rejects(()=>writer.verify('missing','run',{approved:true,source:'local_approver'}),/NLP/);
+    await assert.rejects(()=>writer.supersede('old','new'),/NLP/);
+    await assert.rejects(()=>writer.commitReconciliation({sources:[],entities:[],edges:[]} as any),/NLP/);
+    await assert.rejects(()=>writer.reprocessBackfillNode('job',{id:'node',type:'note',stable_key:'node',display_name:'Node',attributes:{},payloadHash:'a'.repeat(64),redactedHash:''}),/NLP/);
+    await assert.rejects(()=>writer.reprocessBackfillEdge('job',{id:'edge',from_id:'a',to_id:'b',relation:'MENTIONS',attributes:{},payloadHash:'a'.repeat(64),redactedHash:''}),/NLP/);
+    assert.deepEqual(state(),before);
+    await writer.close();
+  }finally{store.close();await rm(directory,{recursive:true,force:true});}
 });
 
 test('public Store database rejects DML and hides internal commit methods', async () => {

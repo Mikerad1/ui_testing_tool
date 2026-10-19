@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import {mkdtemp,mkdir,rm,writeFile} from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import Database from 'better-sqlite3';
 import {Store} from '../src/memory/store.js';
+import {appendLifecycleEvent} from '../src/memory/schema-v15.js';
 import {reconcile} from '../src/knowledge/reconcile.js';
 import {testWriter} from './helpers/learning.js';
 import {runFixtureSql} from './helpers/learning.js';
@@ -40,6 +42,19 @@ test('supersede accepts only trusted live agent records and rejects YAML or inva
     const already=await create('already');runFixtureSql(filename,"UPDATE nodes SET verification_status='verified',tombstone=1,superseded_by=? WHERE id=?",replacement.id,already.id);assert.throws(()=>store!.supersede(already.id,replacement.id),/Old node/);
     await writeFile(path.join(knowledge,'yaml.yaml'),'schema_version: 1\nkind: screen\nid: authored\nname: Authored\nroute: /authored\n');await reconcile(knowledge,store,testWriter(store));const authored=(store.getByTypeKey('screen','authored') as any).id;
     assert.throws(()=>store!.supersede(authored,replacement.id),/Old node/);assert.throws(()=>store!.supersede(old.id,authored),/Replacement/);
+    runFixtureSql(filename,"CREATE TRIGGER fail_lifecycle_event BEFORE INSERT ON memory_lifecycle_events BEGIN SELECT RAISE(ABORT,'forced lifecycle event failure'); END");
+    assert.throws(()=>store!.supersede(old.id,replacement.id),/forced lifecycle event failure/);
+    assert.deepEqual(store.db.prepare('SELECT verification_status,tombstone,superseded_by FROM nodes WHERE id=?').get(old.id),{verification_status:'verified',tombstone:0,superseded_by:null},'failed event append rolls back supersede state');
+    assert.equal((store.db.prepare("SELECT count(*) count FROM memory_audit WHERE subject_node_id=? AND action='supersede'").get(old.id) as any).count,0);
+    runFixtureSql(filename,'DROP TRIGGER fail_lifecycle_event');
     assert.equal(store.supersede(old.id,replacement.id),true);assert.equal(store.get(old.id),null);assert.equal((store.get(replacement.id) as any).id,replacement.id);
+    const oldState=store.db.prepare('SELECT verification_status,tombstone,superseded_by FROM nodes WHERE id=?').get(old.id) as any;
+    assert.deepEqual(oldState,{verification_status:'stale',tombstone:1,superseded_by:replacement.id},'superseded facts are no longer current verified facts');
+    const event=store.db.prepare('SELECT * FROM memory_lifecycle_events WHERE entity_id=?').get(old.id) as any;
+    assert.equal(event.entity_kind,'node');assert.equal(event.action,'superseded');assert.equal(event.from_state,'verified');assert.equal(event.to_state,'stale');assert.equal(event.reason_code,'superseded_by_replacement');assert.equal(event.related_entity_id,replacement.id);
+    assert.throws(()=>runFixtureSql(filename,'UPDATE memory_lifecycle_events SET reason_code=? WHERE id=?','legacy_unknown',event.id),/immutable/);
+    assert.throws(()=>runFixtureSql(filename,'DELETE FROM memory_lifecycle_events WHERE id=?',event.id),/immutable/);
+    assert.equal((store.db.prepare('SELECT count(*) count FROM memory_lifecycle_events WHERE entity_id=?').get(old.id) as any).count,1);
+    const native=new Database(filename);try{assert.throws(()=>appendLifecycleEvent(native,{projectId:store.projectId,environment:store.memoryEnvironment,entityKind:'node',entityId:old.id,action:'stale',fromState:'verified',toState:'stale',reasonCode:'legacy_unknown',context:{oversized:'x'.repeat(5000)}}),/exceeds 4096/);}finally{native.close();}
   }finally{store?.close();await rm(dir,{recursive:true,force:true});}
 });

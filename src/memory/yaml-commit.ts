@@ -3,6 +3,7 @@ import type Database from 'better-sqlite3';
 import {hasNlpMetadata, type YamlReconciliationPlan} from './learning-types.js';
 import {LEGACY_MEMORY_ENVIRONMENT} from './environment.js';
 import type {CandidateObservationInput} from './store.js';
+import {appendLifecycleEvent} from './schema-v15.js';
 
 const hashValue=(value:string)=>createHash('sha1').update(value).digest('hex');
 const canonical=(value:any):string=>Array.isArray(value)?`[${value.map(canonical).join(',')}]`:value&&typeof value==='object'?`{${Object.keys(value).sort().map(key=>`${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`:JSON.stringify(value);
@@ -41,8 +42,10 @@ export function commitYamlReconciliation(database:Database.Database,projectId:st
       database.prepare('INSERT INTO nodes(id,project_id,environment,type,stable_key,canonical_key,display_name,attributes_json,origin,verification_status,confidence,content_hash,tombstone,conflict_status,conflicting_node_id,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET display_name=excluded.display_name,attributes_json=excluded.attributes_json,content_hash=excluded.content_hash,tombstone=0,updated_at=excluded.updated_at').run(id,projectId,environment,entity.type,stable,entity.key,entity.name,JSON.stringify(entity.attrs),'yaml','proposed',0.7,entity.hash,0,occupied?'conflict':'none',occupied?.id??null,now);
       activeNodes.add(id);
       if(occupied){
-        database.prepare("UPDATE nodes SET conflict_status='conflict',conflicting_node_id=? WHERE project_id=? AND environment=? AND id=?").run(id,projectId,environment,occupied.id);
-        database.prepare("UPDATE nodes SET verification_status='stale' WHERE project_id=? AND environment=? AND id=? AND origin<>'yaml'").run(projectId,environment,occupied.id);
+       database.prepare("UPDATE nodes SET conflict_status='conflict',conflicting_node_id=? WHERE project_id=? AND environment=? AND id=?").run(id,projectId,environment,occupied.id);
+         const prior=database.prepare("SELECT verification_status FROM nodes WHERE project_id=? AND environment=? AND id=? AND origin<>'yaml'").get(projectId,environment,occupied.id) as {verification_status:string}|undefined;
+         const stale=database.prepare("UPDATE nodes SET verification_status='stale' WHERE project_id=? AND environment=? AND id=? AND origin<>'yaml'").run(projectId,environment,occupied.id).changes;
+         if(stale&&prior?.verification_status!=='stale')appendLifecycleEvent(database,{projectId,environment,entityKind:'node',entityId:occupied.id,action:'stale',fromState:prior?.verification_status??'unknown',toState:'stale',reasonCode:'yaml_conflict',relatedEntityKind:'node',relatedEntityId:id,context:{conflict:'yaml_identity'}});
       }
       saveOwner(entity.source,entity.type,entity.key,id,entity.hash,occupied?'conflict':'none',occupied?.id??null);
     }
@@ -53,8 +56,10 @@ export function commitYamlReconciliation(database:Database.Database,projectId:st
       database.prepare('INSERT INTO edges(id,project_id,environment,from_node_id,to_node_id,relation_type,attributes_json,origin,verification_status,tombstone,created_at,updated_at,conflict_status,conflicting_edge_id,stable_key) VALUES(?,?,?,?,?,?,?,?,?,0,?,?,?,?,?) ON CONFLICT(project_id,environment,origin,stable_key) DO UPDATE SET tombstone=0,updated_at=excluded.updated_at,conflict_status=excluded.conflict_status,conflicting_edge_id=excluded.conflicting_edge_id').run(id,projectId,environment,from,to,edge.relation,attrs,'yaml','proposed',now,now,conflicts.length?'conflict':'none',conflicts[0]?.id??null,stableKey);
       activeEdges.add(id);
       for(const agent of conflicts){
-        database.prepare("UPDATE edges SET conflict_status='conflict',conflicting_edge_id=? WHERE project_id=? AND environment=? AND id=?").run(id,projectId,environment,agent.id);
-        database.prepare("UPDATE edges SET verification_status='stale' WHERE project_id=? AND environment=? AND id=?").run(projectId,environment,agent.id);
+         database.prepare("UPDATE edges SET conflict_status='conflict',conflicting_edge_id=? WHERE project_id=? AND environment=? AND id=?").run(id,projectId,environment,agent.id);
+         const prior=database.prepare("SELECT verification_status FROM edges WHERE project_id=? AND environment=? AND id=?").get(projectId,environment,agent.id) as {verification_status:string}|undefined;
+         const stale=database.prepare("UPDATE edges SET verification_status='stale' WHERE project_id=? AND environment=? AND id=?").run(projectId,environment,agent.id).changes;
+         if(stale&&prior?.verification_status!=='stale')appendLifecycleEvent(database,{projectId,environment,entityKind:'edge',entityId:agent.id,action:'stale',fromState:prior?.verification_status??'unknown',toState:'stale',reasonCode:'yaml_conflict',relatedEntityKind:'edge',relatedEntityId:id,context:{conflict:'yaml_edge_semantics'}});
       }
       saveOwner(edge.source,'edge',edge.key,id,'',conflicts.length?'conflict':'none',conflicts[0]?.id??null);
     }

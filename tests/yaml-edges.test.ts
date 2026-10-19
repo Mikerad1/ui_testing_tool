@@ -32,6 +32,9 @@ test('YAML edge versions preserve declaration ownership and semantic conflicts',
     await reconcile(root, store, testWriter(store));
     const agentRow=store.db.prepare('SELECT * FROM edges WHERE id=?').get(agent.id) as any;
     assert.equal(agentRow.origin,'agent');assert.equal(agentRow.verification_status,'stale');assert.equal(agentRow.conflict_status,'conflict');
+    const lifecycle=()=>store!.db.prepare("SELECT * FROM memory_lifecycle_events WHERE entity_kind='edge' AND entity_id=?").all(agent.id) as any[];
+    assert.equal(lifecycle().length,1);assert.equal(lifecycle()[0].reason_code,'yaml_conflict');assert.equal(lifecycle()[0].related_entity_id,auth.id);
+    await reconcile(root,store,testWriter(store));assert.equal(lifecycle().length,1,'unchanged re-reconciliation does not duplicate stale transition events');
     const authAfter=active().find(e=>e.stable_key.includes(':rule:auth:'))!;
     assert.equal(authAfter.conflict_status,'conflict');assert.equal(authAfter.conflicting_edge_id,agent.id);
     assert.ok((store.listConflicts() as any[]).some(x=>x.id===agent.id||x.conflicting_edge_id===agent.id));

@@ -107,9 +107,9 @@ test('populated v1 database upgrades without losing graph or YAML source data', 
     assert.equal((store.get('v1-screen') as any).content_hash, 'screen-hash');
     assert.equal((store.listEdges() as any[]).find(e => e.id === 'v1-edge').relation_type, 'HAS_SCREEN');
     assert.equal((store.db.prepare('SELECT hash FROM yaml_sources WHERE path=?').get('screens/home.yaml') as any).hash, 'source-hash');
-    assert.equal((store.db.prepare('SELECT max(version) version FROM schema_migrations').get() as any).version, 14);
+    assert.equal((store.db.prepare('SELECT max(version) version FROM schema_migrations').get() as any).version, 15);
     assert.deepEqual(store.db.pragma('foreign_key_check'), []);
-    const backupName=(await readdir(dir)).find(name=>name.startsWith('memory.sqlite.pre-v14-')&&name.endsWith('.sqlite'));
+    const backupName=(await readdir(dir)).find(name=>name.startsWith('memory.sqlite.pre-v15-')&&name.endsWith('.sqlite'));
     assert(backupName,'legacy migration creates a pre-upgrade backup');
     const backup=new Database(path.join(dir,backupName),{readonly:true,fileMustExist:true});
     try{
@@ -134,7 +134,7 @@ test('populated v3 database upgrades preserving runs, evidence, ownership and ed
     assert.equal((store.listEdges() as any[]).find(e => e.id === 'v3-edge').relation_type, 'HAS_SCREEN');
     assert.equal((store.readEvidence('v3-screen', 'v3-run') as any[])[0].id, 'v3-evidence');
     assert.equal((store.db.prepare('SELECT hash FROM yaml_ownership WHERE entity_id=?').get('v3-screen') as any).hash, 'v3-source-hash');
-    assert.equal((store.db.prepare('SELECT max(version) version FROM schema_migrations').get() as any).version, 14);
+    assert.equal((store.db.prepare('SELECT max(version) version FROM schema_migrations').get() as any).version, 15);
     assert.deepEqual(store.db.pragma('foreign_key_check'), []);
   } finally {
     store?.close();
@@ -203,7 +203,7 @@ test('v12 backfill and fingerprint tables migrate atomically behind a validated 
   const dir=await mkdtemp(path.join(os.tmpdir(),'umb-v12-migrate-')),filename=path.join(dir,'memory.sqlite');let store:Store|undefined;
   try{
     store=await Store.open(filename,'v12-project');store.close();store=undefined;
-     const database=new Database(filename);database.exec("DROP TABLE memory_search_tokens; DROP TABLE memory_search_values; DROP TABLE memory_search_df; DROP TABLE memory_search_state; DROP TABLE memory_candidate_observations; DROP TABLE yaml_record_fingerprints; DROP TABLE memory_backfill_items; DROP TABLE memory_backfill_jobs; DELETE FROM schema_migrations WHERE version IN (12,13,14); CREATE TRIGGER fail_v12 BEFORE INSERT ON schema_migrations WHEN NEW.version=12 BEGIN SELECT RAISE(ABORT,'forced v12 migration failure'); END");database.close();
+      const database=new Database(filename);database.exec("DROP TABLE memory_lifecycle_events; DROP TABLE memory_search_tokens; DROP TABLE memory_search_values; DROP TABLE memory_search_df; DROP TABLE memory_search_state; DROP TABLE memory_candidate_observations; DROP TABLE yaml_record_fingerprints; DROP TABLE memory_backfill_items; DROP TABLE memory_backfill_jobs; DELETE FROM schema_migrations WHERE version IN (12,13,14,15); CREATE TRIGGER fail_v12 BEFORE INSERT ON schema_migrations WHEN NEW.version=12 BEGIN SELECT RAISE(ABORT,'forced v12 migration failure'); END");database.close();
     await assert.rejects(Store.open(filename,'v12-project'),/forced v12 migration failure/);
     const failed=new Database(filename);try{
       assert.equal((failed.prepare('SELECT max(version) version FROM schema_migrations').get() as any).version,11);
@@ -212,7 +212,33 @@ test('v12 backfill and fingerprint tables migrate atomically behind a validated 
     }finally{failed.close();}
     const retry=new Database(filename);retry.exec('DROP TRIGGER fail_v12');retry.close();
     store=await Store.open(filename,'v12-project');
-    assert.equal((store.db.prepare('SELECT max(version) version FROM schema_migrations').get() as any).version,14);
+    assert.equal((store.db.prepare('SELECT max(version) version FROM schema_migrations').get() as any).version,15);
+    assert.deepEqual(store.db.pragma('foreign_key_check'),[]);
+  }finally{store?.close();await rm(dir,{recursive:true,force:true});}
+});
+
+test('v15 lifecycle history backfills stale and legacy supersede state; failed migration retries atomically',async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),'umb-v15-migrate-')),filename=path.join(dir,'memory.sqlite');let store:Store|undefined;
+  try{
+    store=await Store.open(filename,'v15-project');const node=store.applicationSubject()!;store.close();store=undefined;
+    const setup=new Database(filename);
+    setup.exec('DROP TABLE memory_lifecycle_events; DELETE FROM schema_migrations WHERE version=15');
+    setup.prepare("UPDATE nodes SET verification_status='stale' WHERE project_id=? AND id=?").run('v15-project',node.id);
+    setup.prepare('INSERT INTO memory_audit VALUES(?,?,?,?,?,?)').run('legacy-supersede-audit','v15-project',node.id,'supersede','{"newId":"legacy-replacement"}','legacy-time');
+    setup.exec("CREATE TRIGGER fail_v15 BEFORE INSERT ON schema_migrations WHEN NEW.version=15 BEGIN SELECT RAISE(ABORT,'forced v15 migration failure'); END");setup.close();
+    await assert.rejects(Store.open(filename,'v15-project'),/forced v15 migration failure/);
+    const failed=new Database(filename);try{
+      assert.equal((failed.prepare('SELECT max(version) version FROM schema_migrations').get() as any).version,14);
+      assert.equal(failed.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_lifecycle_events'").get(),undefined);
+      assert.equal((failed.prepare("SELECT count(*) count FROM memory_audit WHERE action='supersede'").get() as any).count,1);
+    }finally{failed.close();}
+    const retry=new Database(filename);retry.exec('DROP TRIGGER fail_v15');retry.close();
+    store=await Store.open(filename,'v15-project');
+    const legacy=store.db.prepare("SELECT * FROM memory_lifecycle_events WHERE id='legacy-supersede-legacy-supersede-audit'").get() as any;
+    assert.equal((store.getInternal(node.id) as any).verification_status,'stale');
+    assert.equal(legacy.action,'superseded');assert.equal(legacy.from_state,'verified');assert.equal(legacy.to_state,'stale');assert.equal(legacy.reason_code,'legacy_unknown');assert.equal(legacy.related_entity_id,'legacy-replacement');assert.equal(legacy.created_at,'legacy-time');
+    assert.equal((store.db.prepare('SELECT count(*) count FROM memory_lifecycle_events WHERE entity_kind=? AND entity_id=?').get('node',node.id) as any).count,1,'legacy stale state and supersede audit produce one consistent transition');
+    assert.equal((store.db.prepare("SELECT count(*) count FROM memory_audit WHERE id='legacy-supersede-audit'").get() as any).count,1);
     assert.deepEqual(store.db.pragma('foreign_key_check'),[]);
   }finally{store?.close();await rm(dir,{recursive:true,force:true});}
 });

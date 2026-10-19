@@ -4,8 +4,9 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { loadConfig, safePath } from '../config/config.js';
 import { Store } from '../memory/store.js';
-import { createProjectLearningWriter, createLearningWriter, memoryBackfillEnabled } from '../memory/runtime.js';
-import { backfillMemory } from '../memory/backfill.js';
+import { createProjectLearningWriter, createLearningWriter, createMemoryPreviewAnalyzer, memoryBackfillEnabled } from '../memory/runtime.js';
+import { backfillMemory, MemoryBackfillError } from '../memory/backfill.js';
+import { previewMemoryReindex } from '../memory/reindex-preview.js';
 import { reconcile, validateKnowledge } from '../knowledge/reconcile.js';
 import { BrowserController } from '../browser/controller.js';
 import { serve } from '../mcp/server.js';
@@ -63,15 +64,28 @@ const memory=cli.command('memory').description('Manage scoped persistent memory 
 memory.command('doctor').description('Read-only diagnostics for memory runtime and database readiness').option('--config <path>','Config file','umb.config.yaml').option('--json','Output machine-readable JSON').action(async o=>{
   try {const result=await runMemoryDoctor(o.config);console.log(o.json?JSON.stringify(result):result.checks.map(check=>`${check.status.toUpperCase()} ${check.name}: ${check.message}${check.remediation?`\n  Remediation: ${check.remediation}`:''}`).join('\n'));if(!result.ok)process.exitCode=1;}
   catch {const result={ok:false,checks:[{id:'memory-doctor.unexpected-error',name:'unexpected-error',status:'fail',message:'Memory diagnostics could not complete.',remediation:'Check the config path and permissions, then retry.'}]};console.log(o.json?JSON.stringify(result):'FAIL Memory diagnostics could not complete. Check the config path and permissions, then retry.');process.exitCode=1;}
-});
-memory.command('backfill').description('Resume redacted NLP processing of stored memory records').option('--config <path>','Config file','umb.config.yaml').action(async o=>{
+ });
+ memory.command('reindex').description('Read-only bounded preview of stored memory reprocessing').requiredOption('--dry-run','Required: analyze records without changing persistent state').option('--config <path>','Config file','umb.config.yaml').option('--limit <number>','Maximum records to scan (1-1000)','100').action(async o=>{
+   let analyzer:Awaited<ReturnType<typeof createMemoryPreviewAnalyzer>>|undefined;
+   try{
+     const limit=Number(o.limit);if(!/^\d+$/.test(String(o.limit))||!Number.isInteger(limit)||limit<1||limit>1000)throw Error('Limit must be an integer from 1 to 1000.');
+     const{config,root}=await loadConfig(o.config),db=await safePath(root,config.memory.database,false);
+     analyzer=await createMemoryPreviewAnalyzer(config,root);
+     const summary=await previewMemoryReindex(db,config.project.id,config.memory.environment??'legacy',limit,analyzer);analyzer=undefined;
+     console.log(JSON.stringify(summary));
+   }catch{console.error('Memory reindex preview failed safely. Check the existing database, WAL sidecars, and NLP readiness, then retry.');process.exitCode=1;}
+   finally{await analyzer?.close();}
+ });
+ memory.command('backfill').description('Resume redacted NLP processing of stored records; reports per-invocation counts, uses batches of at most 50, and has no total-record or time cap').option('--config <path>','Config file','umb.config.yaml').action(async o=>{
   let store:Store|undefined,learningWriter:ReturnType<typeof createLearningWriter>|undefined,lock:Awaited<ReturnType<typeof acquireProjectLock>>|undefined;
   try{
     const{config,root}=await loadConfig(o.config);
     if(!memoryBackfillEnabled())throw Error('Memory backfill is disabled because bulk rewriting existing records has not been authorized.');
     const db=await safePath(root,config.memory.database);lock=await acquireProjectLock(root,config.project.id,config.memory.database);await mkdir(path.dirname(db),{recursive:true});store=await Store.open(db,config.project.id,config.memory.environment??'legacy');learningWriter=await createProjectLearningWriter(store,config,root);
-    const summary=await backfillMemory(store,learningWriter);console.log(JSON.stringify(summary));
-  }catch(error){console.error(`Memory backfill failed safely: ${(error as Error).message}`);process.exitCode=1;}
+     const summary=await backfillMemory(store,learningWriter);
+     console.log(JSON.stringify({status:summary.status,total:summary.total,processed:summary.processed,pending:summary.pending,obsolete:summary.obsolete,...summary.invocation}));
+     if(summary.status!=='completed')process.exitCode=1;
+   }catch(error){if(error instanceof MemoryBackfillError){const s=error.summary;console.error(`Memory backfill failed safely: ${JSON.stringify({status:s.status,failure_scope:error.failureScope,total:s.total,processed:s.processed,pending:s.pending,obsolete:s.obsolete,...s.invocation})}`);}else if((error as Error).message==='Memory backfill is disabled because bulk rewriting existing records has not been authorized.')console.error('Memory backfill is disabled because bulk rewriting existing records has not been authorized.');else console.error('Memory backfill failed safely; readiness or setup did not complete.');process.exitCode=1;}
   finally{await learningWriter?.close();store?.close();await lock?.release().catch(()=>{});}
 });
 knowledge.command('proposals').option('--config <path>','Config file','umb.config.yaml').action(async o=>{

@@ -14,7 +14,7 @@ test('v14 rebuild streams and indexes every project/environment scope and rolls 
   try{
     first=new Store(filename,'index-project-a');second=new Store(filename,'index-project-b','staging');
     const firstId=first.applicationSubject()!.id,secondId=second.applicationSubject()!.id;first.close();first=undefined;second.close();second=undefined;
-    const legacy=new Database(filename);legacy.exec('DROP TABLE memory_search_tokens; DROP TABLE memory_search_values; DROP TABLE memory_search_df; DROP TABLE memory_search_state; DELETE FROM schema_migrations WHERE version=14');legacy.close();
+    const legacy=new Database(filename);legacy.exec('DROP TABLE memory_lifecycle_events; DROP TABLE memory_search_tokens; DROP TABLE memory_search_values; DROP TABLE memory_search_df; DROP TABLE memory_search_state; DELETE FROM schema_migrations WHERE version IN (14,15)');legacy.close();
     reopened=await Store.open(filename,'index-project-a');
     assert.equal((reopened.db.prepare('SELECT count(*) count FROM memory_search_state').get() as any).count,2);
     assert.equal((reopened.db.prepare('SELECT DISTINCT normalizer_version FROM memory_search_state').get() as any).normalizer_version,SEARCH_NORMALIZER_VERSION);assert.equal((reopened.db.prepare('SELECT DISTINCT ranker_version FROM memory_search_state').get() as any).ranker_version,SEARCH_RANKER_VERSION);
@@ -22,7 +22,7 @@ test('v14 rebuild streams and indexes every project/environment scope and rolls 
     assert.equal((reopened.db.prepare('SELECT count(*) count FROM memory_search_values WHERE node_id=? AND trust_view=0').get(secondId) as any).count>0,true);
     reopened.close();reopened=undefined;
 
-    const broken=new Database(filename);broken.exec('DROP TABLE memory_search_tokens; DROP TABLE memory_search_values; DROP TABLE memory_search_df; DROP TABLE memory_search_state; DELETE FROM schema_migrations WHERE version=14');
+    const broken=new Database(filename);broken.exec('DROP TABLE memory_lifecycle_events; DROP TABLE memory_search_tokens; DROP TABLE memory_search_values; DROP TABLE memory_search_df; DROP TABLE memory_search_state; DELETE FROM schema_migrations WHERE version IN (14,15)');
     broken.prepare(`INSERT INTO nodes(id,project_id,environment,type,stable_key,canonical_key,display_name,attributes_json,origin,verification_status,confidence) VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run('legacy-too-wide','index-project-b','staging','screen','legacy-too-wide','legacy-too-wide','x'.repeat(16*1024+1),'{}','agent','proposed',0.5);broken.close();
      await assert.rejects(Store.open(filename,'index-project-a'),/legacy-too-wide.*16384 UTF-8 bytes/);
      const inspect=new Database(filename);try{assert.equal((inspect.prepare('SELECT max(version) version FROM schema_migrations').get() as any).version,13);assert.equal(inspect.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_search_values'").get(),undefined);assert.equal((inspect.prepare('SELECT count(*) count FROM nodes WHERE id=?').get('legacy-too-wide') as any).count,1);}finally{inspect.close();}
