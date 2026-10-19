@@ -47,8 +47,11 @@ try {
   assert.deepEqual({
     protocol: health.health.protocol, python: health.health.python, spacy: health.health.spacy,
     model: health.health.model, model_version: health.health.model_version, ready: health.health.ready,
-  }, { protocol: 2, python: '3.13.16', spacy: '3.8.9', model: 'en_core_web_sm', model_version: '3.8.0', ready: true });
-  const proposal = await writer.propose({ type: 'screen', stable_key: 'release-real-nlp', display_name: `Screen ${secret}` });
+  }, { protocol: 3, python: '3.13.16', spacy: '3.8.9', model: 'en_core_web_sm', model_version: '3.8.0', ready: true });
+  const subject = store.applicationSubject();
+  const assertion = store.recordAssertion({ session_id: 'release-archive-smoke', subject_node_id: subject.id, passed: true, observed_count: 1 });
+  const evidenceRef = { evidence_id: assertion.evidence.id, run_id: assertion.id, subject_node_id: subject.id };
+  const proposal = await writer.propose({ observation_id: 'release-real-nlp', type: 'screen', stable_key: 'release-real-nlp', display_name: `Screen ${secret}`, evidence_refs: [evidenceRef] });
   assert.equal(sentTexts.length, 1);
   assert.equal(sentTexts[0].includes(secret), false, 'redaction sentinel reached sidecar input');
   const row = store.db.prepare('SELECT display_name, attributes_json FROM nodes WHERE id=?').get(proposal.id);
@@ -64,7 +67,7 @@ try {
   try {
     const before = store.db.prepare('SELECT count(*) AS count FROM nodes WHERE stable_key=?').get('missing-model-never-writes').count;
     await assert.rejects(missingClient.health(), /NLP sidecar request failed/, 'corrupted onedir should fail health without model data');
-    await assert.rejects(missingWriter.propose({ type: 'screen', stable_key: 'missing-model-never-writes', display_name: 'Must not persist' }), /NLP sidecar request failed/);
+    await assert.rejects(missingWriter.propose({ observation_id: 'missing-model-never-writes', type: 'screen', stable_key: 'missing-model-never-writes', display_name: 'Must not persist', evidence_refs: [evidenceRef] }), /NLP sidecar request failed/);
     const after = store.db.prepare('SELECT count(*) AS count FROM nodes WHERE stable_key=?').get('missing-model-never-writes').count;
     assert.equal(after, before, 'missing model readiness must not commit a proposal');
   } finally { await missingWriter.close(); }

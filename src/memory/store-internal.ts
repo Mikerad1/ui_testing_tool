@@ -4,6 +4,7 @@ import type { GraphMutationFinalizer } from './graph-mutation.js';
 
 export type BackfillNodeWrite={jobId:string;id:string;payloadHash:string;redactedHash:string;type:string;stable_key:string;display_name:string;attributes:Record<string,unknown>;observation:CandidateObservationInput};
 export type BackfillEdgeWrite={jobId:string;id:string;payloadHash:string;redactedHash:string;from_id:string;to_id:string;relation:string;attributes:Record<string,unknown>;observation:CandidateObservationInput};
+export type EvidenceReference={evidence_id:string;run_id:string;subject_node_id:string};
 
 export type ProposedNodeWrite = {
   type: string;
@@ -18,8 +19,8 @@ export type PreparedEdgeWrite = {
   relation: string;
   attributes: Record<string, unknown>;
 };
-export type McpNodeWrite={observation:CandidateObservationInput;type:string;stable_key:string;display_name:string;attributes:Record<string,unknown>};
-export type McpEdgeWrite={observation:CandidateObservationInput;from_id:string;to_id:string;relation:string;attributes:Record<string,unknown>};
+export type McpNodeWrite={observation:CandidateObservationInput;evidence_refs:EvidenceReference[];type:string;stable_key:string;display_name:string;attributes:Record<string,unknown>};
+export type McpEdgeWrite={observation:CandidateObservationInput;evidence_refs:EvidenceReference[];from_id:string;to_id:string;relation:string;attributes:Record<string,unknown>};
 
 export const MCP_GRAPH_NODE_TYPES=new Set(['application','role','screen','workflow','navigation_rules','ui_element','action','validation_rule','locator','test','acceptance_criterion']);
 export const MCP_RELATION_ENDPOINTS:Readonly<Record<string,readonly (readonly [string,string])[]>>=Object.freeze({

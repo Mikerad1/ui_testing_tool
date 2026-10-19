@@ -5,13 +5,14 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import {normalizeLocator} from '../knowledge/locator-proposals.js';
 import {hasNlpMetadata, NLP_METADATA_KEY, type YamlReconciliationPlan, type YamlRecordFingerprint} from './learning-types.js';
-import {assertMcpGraphNodeType, assertMcpRelationSignature, attachPendingGraphMutationFinalizers, finalizeGraphMutation, registerPrimaryGraphMutationFinalizer, registerStoreWriteOperations, type BackfillEdgeWrite, type BackfillNodeWrite, type McpEdgeWrite, type McpNodeWrite} from './store-internal.js';
+import {assertMcpGraphNodeType, assertMcpRelationSignature, attachPendingGraphMutationFinalizers, finalizeGraphMutation, registerPrimaryGraphMutationFinalizer, registerStoreWriteOperations, type BackfillEdgeWrite, type BackfillNodeWrite, type EvidenceReference, type McpEdgeWrite, type McpNodeWrite} from './store-internal.js';
 import {clearGraphMutationCapture, installGraphMutationCapture, readGraphMutationWriteSet} from './graph-mutation.js';
 import {createSearchIndexFinalizer,migrateSearchIndexV14,rebuildSearchIndexIfVersionChanged} from './search-index.js';
 import {assertMemoryEnvironment, LEGACY_MEMORY_ENVIRONMENT} from './environment.js';
 import {migrateEnvironmentSchema} from './schema-v11.js';
 import {migrateCandidateObservations} from './schema-v13.js';
 import {appendLifecycleEvent,migrateLifecycleEventsV15} from './schema-v15.js';
+import {migrateEvidenceAssociationsV16} from './schema-v16.js';
 import {normalizeSearchText, SEARCH_NORMALIZER_VERSION, SEARCH_RANKER_VERSION} from './search-index.js';
 import {commitYamlReconciliation} from './yaml-commit.js';
 import {backupSqlite} from './sqlite-backup.js';
@@ -89,7 +90,7 @@ function semanticAttributesJson(value:string|Record<string,unknown>):string{
   }
 }
 
-export const CURRENT_SCHEMA_VERSION=15;
+export const CURRENT_SCHEMA_VERSION=16;
 
 export type CandidateObservationSourceKind='mcp_node'|'mcp_edge'|'yaml_document'|'backfill_node'|'backfill_edge';
 export type CandidateObservationStatus='proposed'|'conflict'|'stale'|'superseded'|'rejected';
@@ -349,7 +350,8 @@ export class Store {
     })();
     if(!has(13))migrateCandidateObservations(this.#database);
     if(!has(14))this.#database.transaction(()=>migrateSearchIndexV14(this.#database))();
-    if(!has(15))migrateLifecycleEventsV15(this.#database);
+     if(!has(15))migrateLifecycleEventsV15(this.#database);
+     if(!has(16))migrateEvidenceAssociationsV16(this.#database);
   }
   close(){this.#database.close();}
   #yamlNodeOwnedSql(alias:string):string{return `EXISTS(SELECT 1 FROM yaml_ownership y JOIN yaml_sources ys ON ys.project_id=y.project_id AND ys.environment=y.environment AND ys.path=y.source_path WHERE y.project_id=${alias}.project_id AND y.environment=${alias}.environment AND y.entity_id=${alias}.id AND y.entity_type=${alias}.type AND y.entity_key=${alias}.canonical_key AND y.tombstone=0 AND y.conflict_status='none' AND y.hash=${alias}.content_hash AND ys.active=1 AND ys.hash=y.hash)`;}
@@ -511,7 +513,7 @@ export class Store {
     // MCP returns both structuredContent and a serialized text content block.
     // Keep this payload well below half the hard 48 KiB wire budget.
     const budget=20*1024;
-    for(let i=emitted-1;size()>budget&&i>=0;i--){const item=items[i]!;for(const field of ['redacted_source','relations','entities','links'] as const){if(size()<=budget)break;if(field in item){delete item[field];const omitted=(item.omitted_fields as string[]|undefined)??[];item.omitted_fields=[...omitted,field];item.truncated=true;truncated=true;}}}
+     for(let i=emitted-1;size()>budget&&i>=0;i--){const item=items[i]!;for(const field of ['redacted_source','relations','entities','links','evidence_refs'] as const){if(size()<=budget)break;if(field in item){delete item[field];const omitted=(item.omitted_fields as string[]|undefined)??[];item.omitted_fields=[...omitted,field];item.truncated=true;truncated=true;}}}
     while(emitted>0&&size()>budget){emitted--;omitted_count++;truncated=true;}
     return response();
   }
@@ -537,8 +539,12 @@ export class Store {
        else{sourceCurrent='current';currentStatus='current';}
      }
     else currentStatus='not_linked';
-    const {redacted_source_text,...safe}=observation;
-    return{...safe,stored_status:observation.status,current_status:currentStatus,source_current:sourceCurrent,...(includeRedacted?{redacted_source:{label:'redacted_untrusted',text:redacted_source_text??null}}:{})};
+     const {redacted_source_text,...safe}=observation;
+     const mcpSource=observation.source_kind==='mcp_node'||observation.source_kind==='mcp_edge';
+     const evidenceRefs=mcpSource?this.listCandidateEvidenceReferences(String(row.id)):[];
+     return{...safe,stored_status:observation.status,current_status:currentStatus,source_current:sourceCurrent,
+       evidence_link_status:mcpSource?(evidenceRefs.length?'provenance_only':'missing'):'not_required',evidence_refs:evidenceRefs,
+       ...(includeRedacted?{redacted_source:{label:'redacted_untrusted',text:redacted_source_text??null}}:{})};
   }
   #decodeCandidateObservation(row:Record<string,unknown>):CandidateObservation{
     const {entities_json,relations_json,links_json,...fields}=row;
@@ -552,13 +558,78 @@ export class Store {
     if(!row)return undefined;
     try{const links=JSON.parse(row.links_json);return Array.isArray(links)&&typeof links[0]?.id==='string'?links[0].id:undefined;}catch{return undefined;}
   }
+  #canonicalEvidenceRefs(value:unknown):EvidenceReference[]{
+    if(!Array.isArray(value)||value.length<1||value.length>5)throw new Error('Evidence references must contain 1 to 5 items');
+    const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    const seen=new Set<string>();
+    const refs=value.map(item=>{
+      if(!item||typeof item!=='object'||Array.isArray(item))throw new Error('Invalid evidence reference');
+      const ref=item as Record<string,unknown>;
+      if(Object.keys(ref).sort().join(',')!=='evidence_id,run_id,subject_node_id')throw new Error('Invalid evidence reference fields');
+      const evidence_id=boundedString(ref.evidence_id,'evidence id',36),run_id=boundedString(ref.run_id,'run id',36),subject_node_id=boundedString(ref.subject_node_id,'subject node id',64);
+      if(!uuid.test(evidence_id)||!uuid.test(run_id)||!/^[A-Za-z0-9._:-]{1,64}$/.test(subject_node_id))throw new Error('Invalid evidence reference identifier');
+      const canonical={evidence_id:evidence_id.toLowerCase(),run_id:run_id.toLowerCase(),subject_node_id};
+      if(seen.has(canonical.evidence_id))throw new Error('Evidence references must be unique');
+      seen.add(canonical.evidence_id);
+      return canonical;
+    });
+    const compare=(a:string,b:string)=>a<b?-1:a>b?1:0;
+    return refs.sort((a,b)=>compare(a.evidence_id,b.evidence_id)||compare(a.run_id,b.run_id)||compare(a.subject_node_id,b.subject_node_id));
+  }
+  #validateEvidenceRefs(refs:EvidenceReference[],endpoints?:readonly string[]):void{
+    if(endpoints&&(!refs.some(ref=>endpoints.includes(ref.subject_node_id))||refs.some(ref=>!endpoints.includes(ref.subject_node_id))))throw new Error('Edge evidence subjects must be proposal endpoints');
+    const check=this.#database.prepare(`SELECT 1 FROM evidence e JOIN runs r ON r.project_id=e.project_id AND r.id=e.run_id
+      JOIN nodes n ON n.project_id=e.project_id AND n.environment=? AND n.id=e.subject_node_id
+      WHERE e.project_id=? AND e.id=? AND e.run_id=? AND e.subject_node_id=? AND e.kind='assertion' AND e.outcome='passed'
+        AND r.memory_environment=? AND r.status='passed' AND n.tombstone=0 AND n.superseded_by IS NULL
+        AND n.verification_status NOT IN ('stale','superseded') AND n.conflict_status='none'`);
+    for(const ref of refs)if(!check.get(this.memoryEnvironment,this.projectId,ref.evidence_id,ref.run_id,ref.subject_node_id,this.memoryEnvironment))throw new Error('Evidence reference is not a passed assertion for a live subject in this project and environment');
+  }
+  #priorEvidenceRefs(input:CandidateObservationInput):{observationIds:Set<string>;refs:EvidenceReference[]}|undefined{
+    const rows=this.#database.prepare('SELECT id FROM memory_candidate_observations WHERE project_id=? AND environment=? AND source_kind=? AND source_key=? ORDER BY id').all(this.projectId,this.memoryEnvironment,input.source_kind,input.source_key) as Array<{id:string}>;
+    if(!rows.length)return undefined;
+    const refsByObservation=rows.map(row=>this.#database.prepare('SELECT evidence_id,run_id,subject_node_id FROM memory_candidate_evidence_refs WHERE project_id=? AND environment=? AND observation_id=? ORDER BY evidence_id').all(this.projectId,this.memoryEnvironment,row.id) as EvidenceReference[]);
+    if(refsByObservation.some(refs=>!refs.length))throw new Error('Legacy candidate observations cannot be linked retroactively; use a fresh observation_id');
+    const canonical=canonicalJson(refsByObservation[0]);
+    if(refsByObservation.some(refs=>canonicalJson(refs)!==canonical))throw new Error('Candidate observation has inconsistent evidence references across pipeline versions');
+    return{observationIds:new Set(rows.map(row=>row.id)),refs:refsByObservation[0]!};
+  }
+  #storeEvidenceRefs(observationId:string,refs:EvidenceReference[]):void{
+    const insert=this.#database.prepare('INSERT INTO memory_candidate_evidence_refs(project_id,environment,observation_id,evidence_id,run_id,subject_node_id,created_at) VALUES(?,?,?,?,?,?,?)');
+    for(const ref of refs)insert.run(this.projectId,this.memoryEnvironment,observationId,ref.evidence_id,ref.run_id,ref.subject_node_id,new Date().toISOString());
+  }
+  #exactMcpReplay(input:CandidateObservationInput,refs:EvidenceReference[],kind:'node'|'edge'){
+    const row=this.#database.prepare('SELECT id,links_json FROM memory_candidate_observations WHERE project_id=? AND environment=? AND source_kind=? AND source_key=? AND source_revision_hash=? AND pipeline_fingerprint=?').get(this.projectId,this.memoryEnvironment,input.source_kind,input.source_key,input.source_revision_hash,input.pipeline_fingerprint) as {id:string;links_json:string}|undefined;
+    if(!row)return undefined;
+    const stored=this.#database.prepare('SELECT evidence_id,run_id,subject_node_id FROM memory_candidate_evidence_refs WHERE project_id=? AND environment=? AND observation_id=? ORDER BY evidence_id').all(this.projectId,this.memoryEnvironment,row.id) as EvidenceReference[];
+    if(!stored.length)throw new Error('Legacy candidate observations cannot be linked retroactively; use a fresh observation_id');
+    if(canonicalJson(stored)!==canonicalJson(refs))throw new Error('Candidate observation already exists with different evidence references');
+    try{
+      const links=JSON.parse(row.links_json);
+      if(!Array.isArray(links))return undefined;
+      const link=links.find((entry:any)=>entry?.kind===kind&&typeof entry.id==='string');
+      if(!link)return undefined;
+      return this.#database.prepare(`SELECT * FROM ${kind==='node'?'nodes':'edges'} WHERE project_id=? AND environment=? AND id=?`).get(this.projectId,this.memoryEnvironment,link.id);
+    }catch{return undefined;}
+  }
+  listCandidateEvidenceReferences(observationId:string):Array<EvidenceReference&{valid:boolean;status:'current'|'invalid'}>{
+    if(!/^[a-f0-9]{64}$/.test(observationId))throw new Error('Invalid candidate observation id');
+    const rows=this.#database.prepare('SELECT evidence_id,run_id,subject_node_id FROM memory_candidate_evidence_refs WHERE project_id=? AND environment=? AND observation_id=? ORDER BY evidence_id LIMIT 5').all(this.projectId,this.memoryEnvironment,observationId) as EvidenceReference[];
+    const check=this.#database.prepare(`SELECT 1 FROM evidence e JOIN runs r ON r.project_id=e.project_id AND r.id=e.run_id JOIN nodes n ON n.project_id=e.project_id AND n.environment=? AND n.id=e.subject_node_id WHERE e.project_id=? AND e.id=? AND e.run_id=? AND e.subject_node_id=? AND e.kind='assertion' AND e.outcome='passed' AND r.memory_environment=? AND r.status='passed' AND n.tombstone=0 AND n.superseded_by IS NULL AND n.verification_status NOT IN ('stale','superseded') AND n.conflict_status='none'`);
+    return rows.map(ref=>{const valid=Boolean(check.get(this.memoryEnvironment,this.projectId,ref.evidence_id,ref.run_id,ref.subject_node_id,this.memoryEnvironment));return{...ref,valid,status:valid?'current' as const:'invalid' as const};});
+  }
   #commitMcpNode(input:McpNodeWrite){
     assertMcpGraphNodeType(input.type);
     if(!hasNlpMetadata(input.attributes))throw Error('NLP ingestion is required');
     if(!input.stable_key||input.stable_key.length>200||!input.display_name||input.display_name.length>500)throw Error('Knowledge field too long');
+    const refs=this.#canonicalEvidenceRefs(input.evidence_refs);
     return this.#withGraphMutation(()=>this.#database.transaction(()=>{
-      const observationId=this.#candidateGraphIdentity(input.observation),deterministicNodeId=createHash('sha256').update(`mcp-node:${observationId}`).digest('hex');
-      this.#assertMcpSourceRevision(input.observation);
+       const observationId=this.#candidateGraphIdentity(input.observation),deterministicNodeId=createHash('sha256').update(`mcp-node:${observationId}`).digest('hex');
+       this.#assertMcpSourceRevision(input.observation);
+       const replay=this.#exactMcpReplay(input.observation,refs,'node');if(replay)return replay;
+       this.#validateEvidenceRefs(refs);
+      const priorEvidence=this.#priorEvidenceRefs(input.observation);
+      if(priorEvidence&&canonicalJson(priorEvidence.refs)!==canonicalJson(refs))throw new Error('Candidate observation already exists with different evidence references');
       const priorLink=this.#priorMcpGraphLink(input.observation);
       const existingByIdentity=this.#database.prepare('SELECT * FROM nodes WHERE project_id=? AND environment=? AND id=?').get(this.projectId,this.memoryEnvironment,priorLink??deterministicNodeId) as any;
       const candidates=this.#database.prepare('SELECT * FROM nodes WHERE project_id=? AND environment=? AND type=? AND canonical_key=? AND tombstone=0 ORDER BY id').all(this.projectId,this.memoryEnvironment,input.type,input.stable_key) as Array<{id:string;display_name:string;attributes_json:string;conflict_status:string}>;
@@ -568,20 +639,26 @@ export class Store {
       const priorObservation=this.#database.prepare('SELECT status FROM memory_candidate_observations WHERE project_id=? AND environment=? AND source_kind=? AND source_key=? AND source_revision_hash=? AND pipeline_fingerprint=?').get(this.projectId,this.memoryEnvironment,input.observation.source_kind,input.observation.source_key,input.observation.source_revision_hash,input.observation.pipeline_fingerprint) as {status:string}|undefined;
       const status=(priorObservation?.status??(matching?.conflict_status==='conflict'||(!matching&&occupied)?'conflict':'proposed')) as CandidateObservationStatus;
       const obs={...input.observation,status,links:[{kind:'node',id:nodeId}]};
-       this.#appendCandidateObservation(obs);
-      if(existingByIdentity||matching)return existingByIdentity??this.get(nodeId);
+         const storedObservation=this.#appendCandidateObservation(obs);
+       if(existingByIdentity||matching){if(!priorEvidence?.observationIds.has(storedObservation.id))this.#storeEvidenceRefs(storedObservation.id,refs);return existingByIdentity??this.get(nodeId);}
       const stored=occupied||existingByIdentity?`agent:${observationId}:${input.stable_key}`:input.stable_key;
-      if(occupied)this.#database.prepare("UPDATE nodes SET conflict_status='conflict',conflicting_node_id=? WHERE project_id=? AND environment=? AND id=?").run(nodeId,this.projectId,this.memoryEnvironment,occupied.id);
-      this.#database.prepare('INSERT INTO nodes(id,project_id,environment,type,stable_key,canonical_key,display_name,attributes_json,origin,verification_status,confidence,conflict_status,conflicting_node_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)').run(nodeId,this.projectId,this.memoryEnvironment,input.type,stored,input.stable_key,input.display_name,JSON.stringify(input.attributes),'agent','proposed',0.5,occupied?'conflict':'none',occupied?.id??null);
-      return this.get(nodeId);
+       if(occupied)this.#database.prepare("UPDATE nodes SET conflict_status='conflict',conflicting_node_id=? WHERE project_id=? AND environment=? AND id=?").run(nodeId,this.projectId,this.memoryEnvironment,occupied.id);
+       this.#database.prepare('INSERT INTO nodes(id,project_id,environment,type,stable_key,canonical_key,display_name,attributes_json,origin,verification_status,confidence,conflict_status,conflicting_node_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)').run(nodeId,this.projectId,this.memoryEnvironment,input.type,stored,input.stable_key,input.display_name,JSON.stringify(input.attributes),'agent','proposed',0.5,occupied?'conflict':'none',occupied?.id??null);
+       if(!priorEvidence?.observationIds.has(storedObservation.id))this.#storeEvidenceRefs(storedObservation.id,refs);
+       return this.get(nodeId);
     })());
   }
   #commitMcpEdge(input:McpEdgeWrite){
     if(!hasNlpMetadata(input.attributes))throw Error('NLP ingestion is required');
+    const refs=this.#canonicalEvidenceRefs(input.evidence_refs);
     return this.#withGraphMutation(()=>this.#database.transaction(()=>{
-      const observationId=this.#candidateGraphIdentity(input.observation),deterministicId=createHash('sha256').update(`mcp-edge:${observationId}`).digest('hex'),stableKey=`mcp:${observationId}:${input.from_id}:${input.relation}:${input.to_id}`;
-      this.#assertMcpSourceRevision(input.observation);
-      this.validateMcpEdgeSignature(input.from_id,input.to_id,input.relation);
+       const observationId=this.#candidateGraphIdentity(input.observation),deterministicId=createHash('sha256').update(`mcp-edge:${observationId}`).digest('hex'),stableKey=`mcp:${observationId}:${input.from_id}:${input.relation}:${input.to_id}`;
+       this.#assertMcpSourceRevision(input.observation);
+       const replay=this.#exactMcpReplay(input.observation,refs,'edge');if(replay)return replay;
+       this.validateMcpEdgeSignature(input.from_id,input.to_id,input.relation);
+       this.#validateEvidenceRefs(refs,[input.from_id,input.to_id]);
+      const priorEvidence=this.#priorEvidenceRefs(input.observation);
+      if(priorEvidence&&canonicalJson(priorEvidence.refs)!==canonicalJson(refs))throw new Error('Candidate observation already exists with different evidence references');
       const semanticAttrs=semanticAttributesJson(input.attributes),otherEdges=this.#database.prepare('SELECT id,attributes_json,conflict_status FROM edges WHERE project_id=? AND environment=? AND from_node_id=? AND to_node_id=? AND relation_type=? AND tombstone=0 ORDER BY id').all(this.projectId,this.memoryEnvironment,input.from_id,input.to_id,input.relation) as Array<{id:string;attributes_json:string;conflict_status:string}>;
       const matching=otherEdges.find(edge=>semanticAttributesJson(edge.attributes_json)===semanticAttrs);
       const conflictEdges=otherEdges.filter(edge=>!matching&&semanticAttributesJson(edge.attributes_json)!==semanticAttrs);
@@ -589,12 +666,13 @@ export class Store {
       const existing=this.#database.prepare('SELECT * FROM edges WHERE project_id=? AND environment=? AND id=?').get(this.projectId,this.memoryEnvironment,id);
       const priorObservation=this.#database.prepare('SELECT status FROM memory_candidate_observations WHERE project_id=? AND environment=? AND source_kind=? AND source_key=? AND source_revision_hash=? AND pipeline_fingerprint=?').get(this.projectId,this.memoryEnvironment,input.observation.source_kind,input.observation.source_key,input.observation.source_revision_hash,input.observation.pipeline_fingerprint) as {status:string}|undefined;
       const obs={...input.observation,status:(priorObservation?.status??(matching?.conflict_status==='conflict'||conflictEdges.length?'conflict':'proposed')) as CandidateObservationStatus,links:[{kind:'edge',id}]};
-       this.#appendCandidateObservation(obs);
-      if(existing||matching)return existing??matching;
+       const storedObservation=this.#appendCandidateObservation(obs);
+       if(existing||matching){if(!priorEvidence?.observationIds.has(storedObservation.id))this.#storeEvidenceRefs(storedObservation.id,refs);return existing??matching;}
       for(const edge of conflictEdges)this.#database.prepare("UPDATE edges SET conflict_status='conflict',conflicting_edge_id=? WHERE project_id=? AND environment=? AND id=?").run(id,this.projectId,this.memoryEnvironment,edge.id);
-      this.#database.prepare('INSERT INTO edges(id,project_id,environment,from_node_id,to_node_id,relation_type,attributes_json,origin,verification_status,stable_key) VALUES(?,?,?,?,?,?,?,?,?,?)').run(id,this.projectId,this.memoryEnvironment,input.from_id,input.to_id,input.relation,JSON.stringify(input.attributes),'agent','proposed',stableKey);
-      if(conflictEdges.length)this.#database.prepare("UPDATE edges SET conflict_status='conflict',conflicting_edge_id=? WHERE project_id=? AND environment=? AND id=?").run(conflictEdges[0]!.id,this.projectId,this.memoryEnvironment,id);
-      return this.#database.prepare('SELECT * FROM edges WHERE id=?').get(id);
+       this.#database.prepare('INSERT INTO edges(id,project_id,environment,from_node_id,to_node_id,relation_type,attributes_json,origin,verification_status,stable_key) VALUES(?,?,?,?,?,?,?,?,?,?)').run(id,this.projectId,this.memoryEnvironment,input.from_id,input.to_id,input.relation,JSON.stringify(input.attributes),'agent','proposed',stableKey);
+       if(conflictEdges.length)this.#database.prepare("UPDATE edges SET conflict_status='conflict',conflicting_edge_id=? WHERE project_id=? AND environment=? AND id=?").run(conflictEdges[0]!.id,this.projectId,this.memoryEnvironment,id);
+       if(!priorEvidence?.observationIds.has(storedObservation.id))this.#storeEvidenceRefs(storedObservation.id,refs);
+       return this.#database.prepare('SELECT * FROM edges WHERE id=?').get(id);
     })());
   }
   #assertMcpSourceRevision(input:CandidateObservationInput):void{

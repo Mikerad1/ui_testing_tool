@@ -30,7 +30,7 @@ test('production learning graph writes stay behind Store and LearningWriter', as
   const metadataMinterImport = /import\s*\{[^}]*\bwithNlpMetadata\b[^}]*\}\s*from/;
   const metadataMinterCall = /\bwithNlpMetadata\s*\(/;
   const metadataMintingFiles = new Set(['memory/learning-writer.ts', 'knowledge/reconcile.ts']);
-  const storeMutationFiles = new Set(['memory/store.ts', 'memory/schema-v11.ts', 'memory/schema-v15.ts', 'memory/yaml-commit.ts']);
+  const storeMutationFiles = new Set(['memory/store.ts', 'memory/schema-v11.ts', 'memory/schema-v15.ts', 'memory/schema-v16.ts', 'memory/yaml-commit.ts']);
 
   for (const filename of files) {
     const relative = path.relative(sourceRoot, filename).split(path.sep).join('/');

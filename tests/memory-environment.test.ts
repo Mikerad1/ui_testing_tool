@@ -68,6 +68,7 @@ test('memory graph, YAML ownership, runs, and evidence are isolated by immutable
       /Learning write failed safely/,
     );
 
+    const stagingEvidenceBefore=(staging.stats() as any).evidence,productionEvidenceBefore=(production.stats() as any).evidence;
     const runId = staging.createRun('scope-test', 'workflow', {environment: 'production'});
     staging.addEvidence({run_id: runId, subject_node_id: stagingScreen.id, kind: 'workflow', outcome: 'passed'});
     staging.finishRun(runId, 'passed');
@@ -75,8 +76,8 @@ test('memory graph, YAML ownership, runs, and evidence are isolated by immutable
     assert.equal(JSON.parse((staging.db.prepare('SELECT environment_json FROM runs WHERE id=?').get(runId) as any).environment_json).environment, 'production', 'untrusted run metadata does not select graph scope');
     assert.equal(production.getRunReport(runId), null);
     assert.deepEqual(production.readEvidence(stagingScreen.id), []);
-    assert.equal((staging.stats() as any).evidence, 1);
-    assert.equal((production.stats() as any).evidence, 0);
+    assert.equal((staging.stats() as any).evidence, stagingEvidenceBefore+1);
+    assert.equal((production.stats() as any).evidence, productionEvidenceBefore);
     assert.throws(() => production.addEvidence({run_id: runId, subject_node_id: productionScreen.id, kind: 'outcome', outcome: 'passed'}), /Store environment/);
   } finally {
     legacy.close();

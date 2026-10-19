@@ -31,16 +31,23 @@ test('stdio CLI serves MCP tools over official transport and releases resources 
   await client.connect(transport);
       const listed=await client.listTools();assert.ok(listed.tools.some(tool=>tool.name==='browser_status'));assert.ok(listed.tools.some(tool=>tool.name==='browser_refresh'));assert.ok(listed.tools.some(tool=>tool.name==='browser_set_viewport'));
       const proposeSchema=listed.tools.find(tool=>tool.name==='memory_propose')!.inputSchema as any,edgeSchema=listed.tools.find(tool=>tool.name==='memory_add_edge')!.inputSchema as any;
-      assert(proposeSchema.required.includes('observation_id'));assert(edgeSchema.required.includes('observation_id'));
+       assert(proposeSchema.required.includes('observation_id'));assert(proposeSchema.required.includes('evidence_refs'));assert(edgeSchema.required.includes('observation_id'));assert(edgeSchema.required.includes('evidence_refs'));
      const result=await client.callTool({name:'browser_status',arguments:{}});assert.equal((result as any).structuredContent.data.application_ready,false);
     const unavailable=await client.callTool({name:'browser_snapshot',arguments:{}});assert.equal((unavailable as any).structuredContent.error.code,'application_not_ready');assert.match((unavailable as any).structuredContent.error.message,/not ready.*browser_refresh/i);
     const failedRefresh=await client.callTool({name:'browser_refresh',arguments:{}});assert.equal(failedRefresh.isError,true);assert.match((failedRefresh as any).structuredContent.error.message,/start the application.*browser_refresh/i);
     assert.equal((await client.callTool({name:'browser_status',arguments:{}}) as any).structuredContent.data.application_ready,false);
       assert.equal((await client.callTool({name:'memory_stats',arguments:{}}) as any).structuredContent.ok,true);
       const search=await client.callTool({name:'memory_search',arguments:{query:'stdio-test'}}) as any;assert.equal(Array.isArray(search.structuredContent.data),true);assert.equal(search.structuredContent.data[0].stable_key,'stdio-test');assert.equal(search.structuredContent.pagination.status,'complete');assert.equal('pagination' in search.structuredContent.data,false);
-      const beforeLearningWrite=(await client.callTool({name:'memory_stats',arguments:{}}) as any).structuredContent.data.nodes;
-      const blockedLearningWrite=await client.callTool({name:'memory_propose',arguments:{observation_id:'no-nlp',type:'screen',stable_key:'no-nlp',display_name:'NO_NLP_SECRET_SENTINEL'}}) as any;
-      assert.equal(blockedLearningWrite.isError,true);assert.equal(blockedLearningWrite.structuredContent.ok,false);assert(!JSON.stringify(blockedLearningWrite).includes('NO_NLP_SECRET_SENTINEL'));
+        const beforeLearningWrite=(await client.callTool({name:'memory_stats',arguments:{}}) as any).structuredContent.data.nodes;
+        const evidenceStore=new Store(path.join(root,'.umb/memory.sqlite'),'stdio-test');
+        let evidenceRef:any;
+        try{const subject=evidenceStore.applicationSubject()!;const assertion=evidenceStore.recordAssertion({session_id:'stdio-contract',subject_node_id:subject.id,passed:true,observed_count:1});evidenceRef={evidence_id:(assertion.evidence as any).id,run_id:assertion.id,subject_node_id:subject.id};}finally{evidenceStore.close();}
+        const missingEvidence=await client.callTool({name:'memory_propose',arguments:{observation_id:'missing-evidence',type:'screen',stable_key:'missing-evidence',display_name:'Missing evidence'}}) as any;assert.equal(missingEvidence.isError,true);assert.equal(missingEvidence.structuredContent.error.code,'invalid_input');
+        const blockedLearningWrite=await client.callTool({name:'memory_propose',arguments:{observation_id:'no-nlp',type:'screen',stable_key:'no-nlp',display_name:'NO_NLP_SECRET_SENTINEL',evidence_refs:[evidenceRef]}}) as any;
+        assert.equal(blockedLearningWrite.isError,true);assert.equal(blockedLearningWrite.structuredContent.ok,false);assert(!JSON.stringify(blockedLearningWrite).includes('NO_NLP_SECRET_SENTINEL'));
+        const duplicate=await client.callTool({name:'memory_propose',arguments:{observation_id:'duplicate-ref',type:'screen',stable_key:'duplicate-ref',display_name:'Duplicate',evidence_refs:[evidenceRef,evidenceRef]}}) as any;assert.equal(duplicate.isError,true);
+        const duplicateCase=await client.callTool({name:'memory_propose',arguments:{observation_id:'duplicate-case-ref',type:'screen',stable_key:'duplicate-case-ref',display_name:'Duplicate case',evidence_refs:[evidenceRef,{...evidenceRef,evidence_id:evidenceRef.evidence_id.toUpperCase()}]}}) as any;assert.equal(duplicateCase.isError,true);
+        const oversized=await client.callTool({name:'memory_propose',arguments:{observation_id:'oversized-refs',type:'screen',stable_key:'oversized-refs',display_name:'Oversized',evidence_refs:Array(6).fill(evidenceRef)}}) as any;assert.equal(oversized.isError,true);
      assert.equal((await client.callTool({name:'memory_stats',arguments:{}}) as any).structuredContent.data.nodes,beforeLearningWrite);
     const appReady=new Promise<void>(resolve=>app.listen(port,'127.0.0.1',resolve));await appReady;
     const refreshed=await client.callTool({name:'browser_refresh',arguments:{}});assert.equal((refreshed as any).structuredContent.data.application_ready,true);
@@ -74,10 +81,11 @@ test('stdio shutdown drains an active learning write before sidecar and Store te
  const root=await mkdtemp(path.join(os.tmpdir(),'umb-stdio-drain-'));
  const log=path.join(root,'sidecar.log'),fixture=path.join(repo,'tests/fixtures/stdio-learning-server.ts');
  const transport=new CapturingStdioTransport({command:process.execPath,args:['--import','tsx/esm',fixture,root,log],cwd:repo,env:process.env,stderr:'pipe'});
- const client=new Client({name:'stdio-drain-test',version:'1'});
- try{
-  await client.connect(transport);
-   const write=client.callTool({name:'memory_propose',arguments:{observation_id:'drain-observation',type:'screen',stable_key:'drain-note',display_name:'Drain note'}});
+  const client=new Client({name:'stdio-drain-test',version:'1'});
+  try{
+   await client.connect(transport);
+    const evidenceStore=new Store(path.join(root,'memory.sqlite'),'stdio-drain');let evidenceRef:any;try{const subject=evidenceStore.applicationSubject()!;const assertion=evidenceStore.recordAssertion({session_id:'stdio-drain-test',subject_node_id:subject.id,passed:true,observed_count:1});evidenceRef={evidence_id:(assertion.evidence as any).id,run_id:assertion.id,subject_node_id:subject.id};}finally{evidenceStore.close();}
+    const write=client.callTool({name:'memory_propose',arguments:{observation_id:'drain-observation',type:'screen',stable_key:'drain-note',display_name:'Drain note',evidence_refs:[evidenceRef]}});
    const deadline=Date.now()+10000;
    while(Date.now()<deadline){try{if((await readFile(log,'utf8')).includes('analyze-start'))break;}catch{}await new Promise(resolve=>setTimeout(resolve,10));}
   assert((await readFile(log,'utf8')).includes('analyze-start'),'sidecar analysis began before shutdown');

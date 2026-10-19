@@ -54,6 +54,32 @@ def fake_loader(_name):
 
 
 class SidecarTests(unittest.TestCase):
+    def test_packaged_defaults_cover_approved_labels_and_relation_signatures(self):
+        cases = [
+            ("login page links to checkout page.", {"PAGE"}, "relation.page_navigates_page", "links to"),
+            ("submit button opens login page.", {"ACTION", "PAGE"}, "relation.action_navigates_page", "opens"),
+            ("email address must be required field.", {"FIELD", "RULE"}, "relation.field_has_validation", "must be"),
+            ("#SaveBtn belongs to checkout page.", {"LOCATOR", "PAGE"}, "relation.locator_belongs_page", "belongs to"),
+            ("TC-Login-01 covers AC-17.", {"TEST", "AC"}, "relation.test_covers_ac", "covers"),
+        ]
+        for i, (text, expected_labels, rule_id, cue) in enumerate(cases):
+            with self.subTest(rule=rule_id):
+                result = Sidecar(loader=fake_loader).handle(
+                    {"version": 3, "id": f"ontology-{i}", "op": "analyze", "text": text})
+                self.assertTrue(result["ok"])
+                self.assertEqual({entity["label"] for entity in result["entities"]}, expected_labels)
+                relation, = result["relations"]
+                self.assertEqual(relation["rule_id"], rule_id)
+                self.assertEqual(relation["evidence"]["text"], cue)
+                self.assertEqual(text[relation["evidence"]["start"]:relation["evidence"]["end"]], cue)
+
+    def test_packaged_identifier_literals_remain_case_sensitive(self):
+        text = "#SaveBtn #savebtn TC-Login-01 tc-login-01 AC-17 ac-17"
+        result = Sidecar(loader=fake_loader).handle(
+            {"version": 3, "id": "case", "op": "analyze", "text": text})
+        self.assertEqual([(e["label"], e["text"]) for e in result["entities"]], [
+            ("LOCATOR", "#SaveBtn"), ("TEST", "TC-Login-01"), ("AC", "AC-17")])
+
     def test_demo_project_patterns_extract_entities_and_relations(self):
         patterns = Path(__file__).parents[1] / "examples" / "demo-project" / "memory-patterns-v1.json"
         text = "The account page offers save changes. The email address must be a valid email."
@@ -65,13 +91,18 @@ class SidecarTests(unittest.TestCase):
             ("PAGE", "account page"), ("ACTION", "save changes"),
             ("FIELD", "email address"), ("RULE", "valid email"),
         ])
-        self.assertEqual([(relation["type"], relation["from_index"], relation["to_index"])
-                          for relation in result["relations"]], [
-            ("HAS_ACTION", 0, 1), ("HAS_VALIDATION", 2, 3),
-        ])
-        self.assertEqual([relation["evidence"] for relation in result["relations"]], [
-            {"start": text.index("offers"), "end": text.index("offers") + len("offers"), "text": "offers"},
-            {"start": text.index("must be"), "end": text.index("must be") + len("must be"), "text": "must be"},
+        actual_relations = [
+            (relation["type"], relation["from_index"], relation["to_index"], relation["rule_id"],
+             relation["evidence"]["start"], relation["evidence"]["end"], relation["evidence"]["text"])
+            for relation in result["relations"]
+        ]
+        self.assertCountEqual(actual_relations, [
+            ("HAS_ACTION", 0, 1, "demo.relation.page_has_action", text.index("offers"),
+             text.index("offers") + len("offers"), "offers"),
+            # The packaged FIELD→RULE rule precedes and wins over the demo's
+            # identical signature/cue rule; only one candidate is emitted.
+            ("HAS_VALIDATION", 2, 3, "relation.field_has_validation", text.index("must be"),
+             text.index("must be") + len("must be"), "must be"),
         ])
 
     @staticmethod
@@ -163,10 +194,11 @@ class SidecarTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "ids.json"
             path.write_text(json.dumps({"schema_version": 1,
-                "entity_rules": [{"id": "locator.save", "label": "LOCATOR", "phrase": "#SaveBtn"}],
+                "entity_rules": [{"id": "locator.save", "label": "LOCATOR", "phrase": "#CustomSaveBtn"}],
                 "relation_rules": []}), encoding="utf-8")
-            result = Sidecar(loader=fake_loader, patterns_file=path).handle({"version": 3, "id": "a", "op": "analyze", "text": "Use #SaveBtn, not #savebtn."})
-            self.assertEqual([e["text"] for e in result["entities"]], ["#SaveBtn"])
+            result = Sidecar(loader=fake_loader, patterns_file=path).handle({"version": 3, "id": "a", "op": "analyze", "text": "Use #CustomSaveBtn, not #customsavebtn."})
+        self.assertEqual([(e["rule_id"], e["text"]) for e in result["entities"]],
+                         [("locator.save", "#CustomSaveBtn")])
 
     def test_analyze_returns_normalized_bounded_spans(self):
         worker = Sidecar(loader=fake_loader)

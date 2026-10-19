@@ -43,7 +43,7 @@ test('no-Jira browser quick-start tools record a passing assertion under a tempo
     const data=(assertion as any).structuredContent.data;
     assert.equal(data.status,'PASS');assert(data.run_id);assert(data.evidence_refs?.length);
     const evidence=store.readEvidence(subject.id,data.run_id) as Array<{id:string;artifact_ref:string|null}>;
-    assert.equal(evidence.length,1);assert.equal(evidence[0]?.id,data.evidence_refs[0].id);
+    assert.equal(evidence.length,1);assert.equal(evidence[0]?.id,data.evidence_refs[0].evidence_id);
   }finally{
     await client?.close();await transport?.close();if(stop)await stop();await browser?.close();store?.close();
     await close(app);if(envName)delete process.env[envName];await rm(temp,{recursive:true,force:true});

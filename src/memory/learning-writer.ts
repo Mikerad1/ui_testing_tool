@@ -19,8 +19,9 @@ export type NlpProcessor = {
 export type YamlPreparationContext={sourcePath:string;documentKind:string;documentId:string;rawHash:string;projectionVersion:string};
 export type PreparedDocument = { value: unknown; normalized: string; fingerprint?:YamlRecordFingerprint; analysis?:AnalyzeResponse; observation?:CandidateObservationInput };
 export type ValidatedYamlDocument={value:unknown;text:string;fingerprint:YamlRecordFingerprint};
-type ProposedNode = { observation_id:string; type: string; stable_key: string; display_name: string; attributes?: Record<string, unknown> };
-type ProposedEdge = { observation_id:string; from_id: string; to_id: string; relation: string; attributes?: Record<string, unknown> };
+export type EvidenceReference = { evidence_id:string; run_id:string; subject_node_id:string };
+type ProposedNode = { observation_id:string; type: string; stable_key: string; display_name: string; attributes?: Record<string, unknown>; evidence_refs: EvidenceReference[] };
+type ProposedEdge = { observation_id:string; from_id: string; to_id: string; relation: string; attributes?: Record<string, unknown>; evidence_refs: EvidenceReference[] };
 /** Safe deterministic validation failure for an individual legacy record. */
 export class BackfillRejectedError extends Error { constructor(){super(NLP_GENERIC_ERROR);this.name='BackfillRejectedError';} }
 const NLP_ANALYZER_VERSION='umb-candidate-analyzer-v1';
@@ -145,7 +146,8 @@ export class LearningWriter {
   async propose(input: ProposedNode) {
     this.assertWritable();
     const observationId=this.observationId(input.observation_id);assertMcpGraphNodeType(input.type);
-    const prepared = await this.prepareAnalyzed(input);
+    const { evidence_refs, ...analysisInput } = input;
+    const prepared = await this.prepareAnalyzed(analysisInput);
     const safe = asRecord(prepared.value);
     const attributes = safe.attributes === undefined ? {} : asRecord(safe.attributes);
     try {
@@ -154,6 +156,7 @@ export class LearningWriter {
         stable_key: safe.stable_key as string,
         display_name: safe.display_name as string,
         attributes: withNlpMetadata(attributes, prepared.normalized),
+        evidence_refs,
       });
     } catch {
       throw new Error('Learning write failed safely');
@@ -163,8 +166,9 @@ export class LearningWriter {
   async addEdge(input: ProposedEdge) {
     this.assertWritable();
     const observationId=this.observationId(input.observation_id);
-    try{assertMcpRelationType(input.relation);this.store.validateMcpEdgeSignature(input.from_id,input.to_id,input.relation);}catch{throw new Error('Learning write failed safely');}
-    const prepared = await this.prepareAnalyzed(input);
+    try{assertMcpRelationType(input.relation);}catch{throw new Error('Learning write failed safely');}
+    const { evidence_refs, ...analysisInput } = input;
+    const prepared = await this.prepareAnalyzed(analysisInput);
     const safe = asRecord(prepared.value);
     const attributes = safe.attributes === undefined ? {} : asRecord(safe.attributes);
     try {
@@ -173,6 +177,7 @@ export class LearningWriter {
         to_id: safe.to_id as string,
         relation: safe.relation as string,
         attributes: withNlpMetadata(attributes, prepared.normalized),
+        evidence_refs,
       });
     } catch {
       throw new Error('Learning write failed safely');

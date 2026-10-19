@@ -32,7 +32,7 @@ test('v13 candidate ledger is scoped, append-only by identity, and exact retries
   let store:Store|undefined,other:Store|undefined,otherProject:Store|undefined;
   try{
     store=await Store.open(filename,'ledger-project','local');
-    assert.equal((store.db.prepare('SELECT max(version) version FROM schema_migrations').get() as {version:number}).version,15);
+     assert.equal((store.db.prepare('SELECT max(version) version FROM schema_migrations').get() as {version:number}).version,16);
     assert.equal('appendCandidateObservation' in store,false,'raw candidate writes are not exposed on Store');
     const original=observation(),inserted=appendObservation(store,filename,original),replayed=appendObservation(store,filename,{...original,created_at:'2026-01-01T00:00:00.000Z'});
     assert.equal(inserted.id,replayed.id);
@@ -69,6 +69,7 @@ test('candidate review pages are scoped, stable, filtered, bounded, and derive o
       const make=(source_key:string,overrides:Record<string,unknown>={})=>appendObservation(store!,filename,observation({source_kind:'yaml_document',source_key,created_at:'2026-01-01T00:00:00.000Z',links:[],...overrides}));
       const a=make('a',{entities:[{id:'mention',text:'Review node',start:0,end:11}],links:[{kind:'node',id:node.id}]});
       const b=make('b');const c=make('c',{status:'conflict'});const d=appendObservation(store,filename,observation({source_kind:'backfill_node',source_key:`node:${node.id}`,links:[]}));
+      appendObservation(store,filename,observation({source_kind:'mcp_node',source_key:'legacy-mcp',links:[]}));
      const yamlRevision='f'.repeat(64),yamlRaw='1'.repeat(64),yamlPath='known.yaml';
      const fixtureDb=new Database(filename);try{
        fixtureDb.prepare('INSERT INTO yaml_sources(project_id,environment,path,hash,imported_at,active) VALUES(?,?,?,?,?,1)').run(store.projectId,store.memoryEnvironment,yamlPath,yamlRaw,'2026-01-01');
@@ -83,14 +84,15 @@ test('candidate review pages are scoped, stable, filtered, bounded, and derive o
     assert.equal(store.listCandidateObservationPage({source_key:'b'}).items.length,1);
     assert.deepEqual(store.listCandidateObservationPage({source_kind:'yaml_document',stored_status:'conflict'}).items.map(item=>item.id),[c.id]);
      assert.equal(store.listCandidateObservationPage({source_kind:'yaml_document',limit:1000}).items.length,4);
-    const defaultRecord=store.listCandidateObservationPage({source_key:'a'}).items[0] as any;assert.equal('redacted_source_text' in defaultRecord,false);assert.equal(defaultRecord.stored_status,'proposed');assert.equal(defaultRecord.current_status,'proposed');assert.equal(defaultRecord.source_current,'current');
+     const defaultRecord=store.listCandidateObservationPage({source_key:'a'}).items[0] as any;assert.equal('redacted_source_text' in defaultRecord,false);assert.equal(defaultRecord.stored_status,'proposed');assert.equal(defaultRecord.current_status,'proposed');assert.equal(defaultRecord.source_current,'current');assert.equal(defaultRecord.evidence_link_status,'not_required');assert.deepEqual(defaultRecord.evidence_refs,[]);
     assert.equal(defaultRecord.entities[0].text,'Review node');assert.deepEqual(defaultRecord.links,[{kind:'node',id:node.id}]);
     const withText=store.listCandidateObservationPage({source_key:'a',include_redacted_source:true}).items[0] as any;assert.equal(withText.redacted_source.label,'redacted_untrusted');assert.equal(withText.redacted_source.text,'redacted text');
       const noLink=store.listCandidateObservationPage({source_key:'b'}).items[0] as any;assert.equal(noLink.current_status,'unknown');assert.equal(noLink.source_current,'unknown','candidate mentions do not create graph links');
      let knownReview=store.listCandidateObservationPage({source_key:'workflow:known-document'}).items[0] as any;assert.equal(knownReview.current_status,'current');assert.equal(knownReview.source_current,'current');
      runFixtureSql(filename,'UPDATE yaml_record_fingerprints SET redacted_hash=? WHERE project_id=? AND environment=? AND document_kind=? AND document_id=?','2'.repeat(64),store.projectId,store.memoryEnvironment,'workflow','known-document');
      knownReview=store.listCandidateObservationPage({source_key:'workflow:known-document'}).items[0] as any;assert.equal(knownReview.current_status,'stale');assert.equal(knownReview.source_current,'stale');
-    const initialBackfill=store.listCandidateObservationPage({source_kind:'backfill_node'}).items[0] as any;assert.equal(initialBackfill.current_status,'proposed');
+     const legacyMcp=store.listCandidateObservationPage({source_key:'legacy-mcp'}).items[0] as any;assert.equal(legacyMcp.evidence_link_status,'missing');assert.deepEqual(legacyMcp.evidence_refs,[]);
+     const initialBackfill=store.listCandidateObservationPage({source_kind:'backfill_node'}).items[0] as any;assert.equal(initialBackfill.current_status,'proposed');assert.equal(initialBackfill.evidence_link_status,'not_required');assert.deepEqual(initialBackfill.evidence_refs,[]);
       const backfillEdge=appendObservation(store,filename,observation({source_kind:'backfill_edge',source_key:`edge:${edge.id}`,links:[]}));
     assert.equal((store.listCandidateObservationPage({source_key:`edge:${edge.id}`}).items[0] as any).current_status,'proposed');
     runFixtureSql(filename,"UPDATE nodes SET verification_status='verified' WHERE project_id=? AND environment=? AND id=?",store.projectId,store.memoryEnvironment,node.id);
@@ -124,7 +126,7 @@ test('v13 migration failure is atomic and can be retried',async()=>{
   try{
     store=await Store.open(filename,'migration-project');store.close();store=undefined;
     const native=new Database(filename);
-    native.exec("DROP TABLE memory_lifecycle_events; DROP TABLE memory_candidate_observations; DROP TABLE memory_search_tokens; DROP TABLE memory_search_values; DROP TABLE memory_search_df; DROP TABLE memory_search_state; DELETE FROM schema_migrations WHERE version IN (13,14,15); CREATE TRIGGER fail_v13 BEFORE INSERT ON schema_migrations WHEN NEW.version=13 BEGIN SELECT RAISE(ABORT,'forced v13 failure'); END");native.close();
+     native.exec("DROP TABLE memory_candidate_evidence_refs; DROP TABLE memory_lifecycle_events; DROP TABLE memory_candidate_observations; DROP TABLE memory_search_tokens; DROP TABLE memory_search_values; DROP TABLE memory_search_df; DROP TABLE memory_search_state; DELETE FROM schema_migrations WHERE version IN (13,14,15,16); CREATE TRIGGER fail_v13 BEFORE INSERT ON schema_migrations WHEN NEW.version=13 BEGIN SELECT RAISE(ABORT,'forced v13 failure'); END");native.close();
     await assert.rejects(Store.open(filename,'migration-project'),/forced v13 failure/);
     const inspect=new Database(filename);try{
       assert.equal((inspect.prepare('SELECT max(version) version FROM schema_migrations').get() as {version:number}).version,12);
@@ -132,6 +134,6 @@ test('v13 migration failure is atomic and can be retried',async()=>{
     }finally{inspect.close();}
     const retry=new Database(filename);retry.exec('DROP TRIGGER fail_v13');retry.close();
     store=await Store.open(filename,'migration-project');
-    assert.equal((store.db.prepare('SELECT max(version) version FROM schema_migrations').get() as {version:number}).version,15);
+     assert.equal((store.db.prepare('SELECT max(version) version FROM schema_migrations').get() as {version:number}).version,16);
   }finally{store?.close();await rm(dir,{recursive:true,force:true});}
 });

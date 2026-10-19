@@ -9,6 +9,7 @@ import { createMemoryRedactor } from '../src/memory/redactor.js';
 import { Store } from '../src/memory/store.js';
 import { persistentLearningWritesEnabled } from '../src/memory/runtime.js';
 import type { Config } from '../src/config/config.js';
+import { withTestEvidence } from './helpers/learning.js';
 
 const sidecarExecutable = process.env.UMB_TEST_SIDECAR_EXECUTABLE;
 
@@ -34,7 +35,7 @@ test('extracted sidecar integration: explicit test-only writer redacts and persi
       shutdown: () => client!.shutdown(),
     };
     // Exercise the real packaged sidecar through LearningWriter without opening the production gate.
-    writer = new LearningWriter(store, realNlp, redactor, true);
+    writer = withTestEvidence(new LearningWriter(store, realNlp, redactor, true), store);
     const health = await client.health();
     assert.equal(health.health.ready, true);
     assert.equal(health.health.python, '3.13.16');
@@ -76,10 +77,10 @@ test('extracted sidecar integration: explicit test-only writer redacts and persi
     assert.equal(persistentLearningWritesEnabled(), false, 'test-local opt-in does not mutate the production gate');
 
     // A failed readiness response must not allow LearningWriter to create a proposal row.
-    const failing = new LearningWriter(store, {
+    const failing = withTestEvidence(new LearningWriter(store, {
       health: async () => ({ version: 3, id: 'failed', ok: true, op: 'health', health: { protocol: 3, python: '3', spacy: '3', model: 'en_core_web_sm', model_version: '3.8.0', rules: '1', patterns_schema_version: 1, patterns_digest: 'b'.repeat(64), pattern_count: 1, patterns_ready: true, ready: false } }),
       analyze: async () => { throw new Error('not reached'); },
-    }, redactor, true);
+    }, redactor, true), store);
     const before = (store.db.prepare('SELECT count(*) AS count FROM nodes WHERE stable_key=?').get('must-not-persist') as { count: number }).count;
     await assert.rejects(failing.propose({observation_id:'auto-proposal-1', type: 'screen', stable_key: 'must-not-persist', display_name: 'No proposal' }));
     const after = (store.db.prepare('SELECT count(*) AS count FROM nodes WHERE stable_key=?').get('must-not-persist') as { count: number }).count;
@@ -89,14 +90,14 @@ test('extracted sidecar integration: explicit test-only writer redacts and persi
     const missingModelExecutable = process.env.UMB_TEST_MISSING_MODEL_EXECUTABLE;
     if (missingModelExecutable) {
       const missingClient = new NlpClient({ executable: path.resolve(missingModelExecutable), args: [] });
-      const missingWriter = new LearningWriter(store, missingClient, redactor, true);
+      const missingWriter = withTestEvidence(new LearningWriter(store, missingClient, redactor, true), store);
       const missingBefore = (store.db.prepare('SELECT count(*) AS count FROM nodes WHERE stable_key=?').get('missing-model-must-not-persist') as { count: number }).count;
       await assert.rejects(missingWriter.propose({observation_id:'auto-proposal-2', type: 'screen', stable_key: 'missing-model-must-not-persist', display_name: 'No model' }));
       const missingAfter = (store.db.prepare('SELECT count(*) AS count FROM nodes WHERE stable_key=?').get('missing-model-must-not-persist') as { count: number }).count;
       assert.equal(missingAfter, missingBefore);
       await missingWriter.close();
     }
-    assert.equal(persistentLearningWritesEnabled(), true);
+    assert.equal(persistentLearningWritesEnabled(), false, 'the production runtime remains gated off');
   } finally {
     await writer?.close();
     if (!writer) await client?.shutdown();

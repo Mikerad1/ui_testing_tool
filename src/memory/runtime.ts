@@ -8,7 +8,7 @@ import { createMemoryRedactor, type MemoryRedactor } from './redactor.js';
 import { LearningWriter, type NlpProcessor } from './learning-writer.js';
 import type { Store } from './store.js';
 
-// Keep persistent learning disabled until the FR-07 integration and review gates pass.
+// Keep persistent learning disabled until every FR-07 acceptance gate passes; do not enable it as part of this work.
 const PERSISTENT_LEARNING_WRITES_ENABLED = false;
 const MEMORY_BACKFILL_ENABLED = false;
 export const persistentLearningWritesEnabled=()=>PERSISTENT_LEARNING_WRITES_ENABLED;

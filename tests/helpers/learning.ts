@@ -6,8 +6,49 @@ import { LearningWriter, type NlpProcessor } from '../../src/memory/learning-wri
 import { withNlpMetadata } from '../../src/memory/learning-types.js';
 
 const writers = new WeakMap<Store, LearningWriter>();
+const evidenceRefs = new WeakMap<Store, Map<string, { evidence_id: string; run_id: string; subject_node_id: string }>>();
+export type TestLearningWriter = Omit<LearningWriter, 'propose' | 'addEdge'> & {
+  propose(input: any): ReturnType<LearningWriter['propose']>;
+  addEdge(input: any): ReturnType<LearningWriter['addEdge']>;
+};
 
-export function testLearningWriter(store: Store, state: { ready?: boolean; failAnalyze?: boolean; failAtAnalysis?: number; inputs?: string[]; sensitivePaths?: string[]; sensitiveValuesEnv?: string[]; env?: NodeJS.ProcessEnv;python?:string;spacy?:string;model?:string;modelVersion?:string;rules?:string;protocol?:number;patternsDigest?:string;emptyPatterns?:boolean;candidateMentions?:boolean;normalized?:string;onAnalyze?:(text:string,count:number)=>void|Promise<void> } = {}): LearningWriter {
+function fixtureEvidenceRef(store: Store, subjectNodeId: string) {
+  let refs = evidenceRefs.get(store);
+  if (!refs) { refs = new Map(); evidenceRefs.set(store, refs); }
+  const cached = refs.get(subjectNodeId);
+  if (cached) return cached;
+  const assertion = store.recordAssertion({ session_id: 'test-learning-evidence', subject_node_id: subjectNodeId, passed: true, observed_count: 1, actions: [] });
+  const evidence = assertion.evidence as { id: string };
+  const ref = { evidence_id: evidence.id, run_id: assertion.id, subject_node_id: subjectNodeId };
+  refs.set(subjectNodeId, ref);
+  return ref;
+}
+
+function eligibleEvidenceSubjects(store: Store, nodeIds: string[]): string[] {
+  return [...new Set(nodeIds)].filter(id => {
+    const node = store.get(id) as any;
+    return !!node && !node.tombstone && !node.superseded_by && node.conflict_status === 'none'
+      && !['stale', 'superseded'].includes(node.verification_status);
+  });
+}
+
+/** Add real, stable assertion references around a test writer without changing its NLP input. */
+export function withTestEvidence(writer: LearningWriter, store: Store): TestLearningWriter {
+  const propose = writer.propose.bind(writer);
+  const addEdge = writer.addEdge.bind(writer);
+  writer.propose = ((input: any) => propose({ ...input, evidence_refs: input.evidence_refs ?? [fixtureEvidenceRef(store, store.applicationSubject()!.id)] })) as typeof writer.propose;
+  writer.addEdge = ((input: any) => {
+    if (input.evidence_refs) return addEdge(input);
+    const subjects = eligibleEvidenceSubjects(store, [input.from_id, input.to_id]);
+    const evidence_refs = subjects.length
+      ? subjects.map(id => fixtureEvidenceRef(store, id))
+      : [{ evidence_id: randomUUID(), run_id: randomUUID(), subject_node_id: String(input.from_id ?? 'missing') }];
+    return addEdge({ ...input, evidence_refs });
+  }) as typeof writer.addEdge;
+  return writer as TestLearningWriter;
+}
+
+export function testLearningWriter(store: Store, state: { ready?: boolean; failAnalyze?: boolean; failAtAnalysis?: number; inputs?: string[]; sensitivePaths?: string[]; sensitiveValuesEnv?: string[]; env?: NodeJS.ProcessEnv;python?:string;spacy?:string;model?:string;modelVersion?:string;rules?:string;protocol?:number;patternsDigest?:string;emptyPatterns?:boolean;candidateMentions?:boolean;normalized?:string;onAnalyze?:(text:string,count:number)=>void|Promise<void> } = {}): TestLearningWriter {
   let analysisCount = 0;
   const nlp: NlpProcessor = {
     async health() {
@@ -27,10 +68,10 @@ export function testLearningWriter(store: Store, state: { ready?: boolean; failA
     },
     async shutdown() {},
   };
-  return new LearningWriter(store, nlp, createMemoryRedactor({ sensitive_paths: state.sensitivePaths ?? [], sensitive_values_env: state.sensitiveValuesEnv ?? [] }, state.env ?? {}));
+  return withTestEvidence(new LearningWriter(store, nlp, createMemoryRedactor({ sensitive_paths: state.sensitivePaths ?? [], sensitive_values_env: state.sensitiveValuesEnv ?? [] }, state.env ?? {})), store);
 }
 
-export function testWriter(store: Store): LearningWriter {
+export function testWriter(store: Store): TestLearningWriter {
   const existing = writers.get(store);
   if (existing) return existing;
   const writer = testLearningWriter(store);

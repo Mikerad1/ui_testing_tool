@@ -9,8 +9,9 @@ import {LearningWriter,type NlpProcessor} from '../src/memory/learning-writer.js
 import {createMemoryRedactor} from '../src/memory/redactor.js';
 import {storeLearningCommit} from '../src/memory/store-internal.js';
 import {withNlpMetadata} from '../src/memory/learning-types.js';
+import {withTestEvidence} from './helpers/learning.js';
 
-function writer(store:Store,options:{failAnalyze?:boolean;emptyPatterns?:boolean;rules?:string;invalidOutput?:'signature'|'index'|'self'|'label'|'span';malformedHealth?:string;analysisCalls?:{value:number}}={}){
+function writer(store:Store,options:{failAnalyze?:boolean;emptyPatterns?:boolean;rules?:string;invalidOutput?:'signature'|'index'|'self'|'label'|'span';malformedHealth?:string;analysisCalls?:{value:number};inputs?:string[]}={}){
   const processor:NlpProcessor={
     async health(){
       const response:any={version:3,id:'h',ok:true,op:'health',health:{protocol:3,python:'3.12',spacy:'3.8',model:'test',model_version:'1',rules:options.rules??'r1',patterns_schema_version:1,patterns_digest:'b'.repeat(64),pattern_count:options.emptyPatterns?0:2,patterns_ready:!options.emptyPatterns,ready:true}};
@@ -42,6 +43,7 @@ function writer(store:Store,options:{failAnalyze?:boolean;emptyPatterns?:boolean
     },
     async analyze(text){
       if(options.analysisCalls)options.analysisCalls.value++;
+      options.inputs?.push(text);
       if(options.failAnalyze)throw new Error('invalid spaCy response');
       const span=(value:string)=>{const offset=text.indexOf(value);if(offset<0)throw Error('missing fixture mention');const start=Array.from(text.slice(0,offset)).length;return{start,end:start+Array.from(value).length,text:value};};
       const entities=[] as any[],relations=[] as any[];
@@ -49,7 +51,7 @@ function writer(store:Store,options:{failAnalyze?:boolean;emptyPatterns?:boolean
       return{version:3,id:'a',ok:true,op:'analyze',normalized:'fixture normalized',tokens:[],entities,relations};
     },async shutdown(){}
   };
-  return new LearningWriter(store,processor,createMemoryRedactor({sensitive_paths:[],sensitive_values_env:[]},{}));
+  return withTestEvidence(new LearningWriter(store,processor,createMemoryRedactor({sensitive_paths:[],sensitive_values_env:[]},{})),store);
 }
 
 const edgeInput=(observation_id:string,description='🌞 Button opens Checkout')=>({observation_id,from_id:'node-from',to_id:'node-to',relation:'NAVIGATES_TO',attributes:{description}});
@@ -70,6 +72,24 @@ test('MCP node observation retries return stable graph ID; fresh observations pr
     const upgraded=await writer(store,{rules:'r2'}).propose(input) as any;
     assert.equal(upgraded.id,first.id);assert.equal(store.listCandidateObservations({source_kind:'mcp_node'}).length,4);
     await assert.rejects(()=>learning.propose({type:'screen',stable_key:'missing-id',display_name:'No ID'} as any),/Invalid observation_id/);
+  }finally{store?.close();await rm(dir,{recursive:true,force:true});}
+});
+
+test('MCP evidence refs are excluded from NLP and persisted candidate/graph content',async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),'umb-mcp-evidence-redaction-'));let store:Store|undefined;
+  try{
+    store=await Store.open(path.join(dir,'memory.sqlite'),'mcp-evidence-redaction');
+    const subject=store.applicationSubject()!,assertion=store.recordAssertion({session_id:'evidence-ref-test',subject_node_id:subject.id,passed:true,observed_count:1});
+    const ref={evidence_id:(assertion.evidence as any).id,run_id:assertion.id,subject_node_id:subject.id},inputs:string[]=[];
+    const proposal=await writer(store,{inputs}).propose({observation_id:'refs-not-nlp',type:'screen',stable_key:'refs-not-nlp',display_name:'Refs not NLP',evidence_refs:[ref]}) as any;
+    assert.equal(inputs.length,1);
+    for(const value of Object.values(ref))assert.equal(inputs[0]!.includes(value),false,`NLP input leaked ${value}`);
+    const observation=store.listCandidateObservations({source_key:'refs-not-nlp'})[0]!;
+    assert.equal(observation.redacted_source_text!.includes(ref.evidence_id),false);
+    assert.equal(observation.redacted_source_text!.includes(ref.run_id),false);
+    const serializedNode=JSON.stringify(store.get(proposal.id));
+    assert.equal(serializedNode.includes(ref.evidence_id),false);
+    assert.equal(serializedNode.includes(ref.run_id),false);
   }finally{store?.close();await rm(dir,{recursive:true,force:true});}
 });
 
@@ -94,6 +114,26 @@ test('MCP edge observations preserve candidates, code-point spans, exact links a
     const conflicts=(store.listEdges() as any[]).filter(row=>row.relation_type==='NAVIGATES_TO');assert.equal(conflicts.length,2);assert(conflicts.every(row=>row.conflict_status==='conflict'));
     await assert.rejects(()=>learning.addEdge({...input,attributes:{description:'Button closes Checkout'}}),/failed safely/);
     assert.equal(store.listCandidateObservations({source_kind:'mcp_edge'}).length,3);
+  }finally{store?.close();await rm(dir,{recursive:true,force:true});}
+});
+
+test('LearningWriter edge exact replay survives endpoint tombstoning while new or changed commits reject',async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),'umb-mcp-edge-tombstone-'));let store:Store|undefined;
+  try{
+    store=await Store.open(path.join(dir,'memory.sqlite'),'mcp-edge-tombstone');
+    const a=await writer(store).propose({observation_id:'tombstone-from',type:'screen',stable_key:'tombstone-from',display_name:'From'}) as any;
+    const b=await writer(store).propose({observation_id:'tombstone-to',type:'screen',stable_key:'tombstone-to',display_name:'To'}) as any;
+    const assertion=store.recordAssertion({session_id:'edge-tombstone-evidence',subject_node_id:a.id,passed:true,observed_count:1});
+    const ref={evidence_id:(assertion.evidence as any).id,run_id:assertion.id,subject_node_id:a.id};
+    const input={...edgeInput('committed-before-tombstone'),from_id:a.id,to_id:b.id,evidence_refs:[ref]};
+    const learning=writer(store),committed=await learning.addEdge(input) as any;
+    const native=new Database(path.join(dir,'memory.sqlite'));try{native.prepare('UPDATE nodes SET tombstone=1 WHERE project_id=? AND environment=? AND id=?').run(store.projectId,store.memoryEnvironment,a.id);}finally{native.close();}
+    assert.equal((await learning.addEdge(input) as any).id,committed.id,'same persisted identity and refs returns the linked edge without endpoint liveness validation');
+    await assert.rejects(()=>learning.addEdge({...input,evidence_refs:[{...ref,subject_node_id:b.id}]}),/failed safely/,'changed refs are rejected');
+    await assert.rejects(()=>learning.addEdge({...input,observation_id:'new-after-tombstone'}),/failed safely/,'a new observation still rejects tombstoned endpoints');
+    await assert.rejects(()=>writer(store,{rules:'r2'}).addEdge(input),/failed safely/,'a new pipeline revision still rejects tombstoned endpoints');
+    assert.equal(store.listCandidateObservations({source_kind:'mcp_edge'}).length,1,'rejected writes do not append observations');
+    assert.equal(store.listEdges().length,1,'rejected writes do not mutate graph edges');
   }finally{store?.close();await rm(dir,{recursive:true,force:true});}
 });
 
@@ -153,13 +193,15 @@ test('closed graph registry rejects unsupported node types, relations, and endpo
   try{
     store=await Store.open(path.join(dir,'memory.sqlite'),'mcp-registry');const learning=writer(store);
     await assert.rejects(()=>learning.propose({observation_id:'unsupported-node',type:'note',stable_key:'n',display_name:'Note'}));
-    const from=await learning.propose({observation_id:'screen-a',type:'screen',stable_key:'a',display_name:'A'}) as any;
-    const to=await learning.propose({observation_id:'screen-b',type:'screen',stable_key:'b',display_name:'B'}) as any;
-    await assert.rejects(()=>learning.addEdge({observation_id:'unsupported-relation',from_id:from.id,to_id:to.id,relation:'links'}));
+     const from=await learning.propose({observation_id:'screen-a',type:'screen',stable_key:'a',display_name:'A'}) as any;
+     const to=await learning.propose({observation_id:'screen-b',type:'screen',stable_key:'b',display_name:'B'}) as any;
+     const assertion=store.recordAssertion({session_id:'registry-evidence',subject_node_id:from.id,passed:true,observed_count:1});
+     const evidenceRef={evidence_id:(assertion.evidence as any).id,run_id:assertion.id,subject_node_id:from.id};
+     await assert.rejects(()=>learning.addEdge({observation_id:'unsupported-relation',from_id:from.id,to_id:to.id,relation:'links'}));
     await assert.rejects(()=>learning.addEdge({observation_id:'bad-signature',from_id:from.id,to_id:to.id,relation:'HAS_ACTION'}));
     const observation={source_kind:'mcp_node' as const,source_key:'boundary-node',source_revision_hash:'a'.repeat(64),pipeline_fingerprint:'b'.repeat(64),nlp_protocol_version:3,python_version:'3.12',spacy_version:'3.8',model_name:'test',model_version:'1',rules_version:'r1',patterns_schema_version:1,patterns_digest:'b'.repeat(64),redaction_policy_fingerprint:'c'.repeat(64),extraction_ready:false,entities:[],relations:[],links:[],status:'proposed' as const};
     assert.throws(()=>storeLearningCommit.mcpNode(store!,{observation,type:'note',stable_key:'bad',display_name:'Bad',attributes:withNlpMetadata({},'normalized')}),/Unsupported memory graph node type/);
-    assert.throws(()=>storeLearningCommit.mcpEdge(store!,{observation:{...observation,source_kind:'mcp_edge',source_key:'bad-relation'},from_id:from.id,to_id:to.id,relation:'links',attributes:withNlpMetadata({},'normalized')}),/Unsupported memory graph relation/);
+     assert.throws(()=>storeLearningCommit.mcpEdge(store!,{observation:{...observation,source_kind:'mcp_edge',source_key:'bad-relation'},evidence_refs:[evidenceRef],from_id:from.id,to_id:to.id,relation:'links',attributes:withNlpMetadata({},'normalized')}),/Unsupported memory graph relation/);
     assert.equal(store.listCandidateObservations().length,2);
   }finally{store?.close();await rm(dir,{recursive:true,force:true});}
 });

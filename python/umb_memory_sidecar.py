@@ -128,7 +128,15 @@ class Sidecar:
             if not isinstance(version, str) or not version:
                 raise RuntimeError("model version unavailable")
             if hasattr(nlp, "add_pipe") and "entity_ruler" not in getattr(nlp, "pipe_names", []):
-                ruler = nlp.add_pipe("entity_ruler", name="umb_entity_ruler", config={"overwrite_ents": False})
+                # Run exact configured literals before NER. In particular, an
+                # identifier such as #SaveBtn can otherwise be partially claimed
+                # by NER (for example, as PERSON) and discarded as an overlap.
+                # Keeping overwrite_ents=False lets the entity ruler avoid
+                # replacing any entities already supplied by earlier components.
+                pipe_names = getattr(nlp, "pipe_names", [])
+                add_options = {"before": "ner"} if "ner" in pipe_names else {}
+                ruler = nlp.add_pipe("entity_ruler", name="umb_entity_ruler",
+                                     config={"overwrite_ents": False}, **add_options)
                 patterns = []
                 for rule in self.rules["entity_rules"]:
                     key = "TEXT" if rule["_case_sensitive"] else "LOWER"
@@ -225,6 +233,7 @@ class Sidecar:
 
     def _relation_candidates(self, text: str, candidates: list[dict[str, Any]], doc: Any) -> list[dict[str, Any]]:
         out = []
+        emitted_pairs = set()
         for rule in self.rules["relation_rules"]:
             token_seq = [t for t in doc if not getattr(t, "is_space", False)]
             cue_spans = []
@@ -253,8 +262,16 @@ class Sidecar:
                         break
                 if len(pairs) != 1: continue
                 source, target = pairs[0]
+                from_index, to_index = candidates.index(source), candidates.index(target)
+                pair_key = (rule["relation"], from_index, to_index)
+                # Rules are evaluated in configured order (packaged defaults
+                # precede additive custom rules), so the first unambiguous
+                # matching rule deterministically supplies the evidence.
+                if pair_key in emitted_pairs:
+                    continue
+                emitted_pairs.add(pair_key)
                 out.append({"type": rule["relation"], "rule_id": rule["id"],
-                            "from_index": candidates.index(source), "to_index": candidates.index(target),
+                            "from_index": from_index, "to_index": to_index,
                             "evidence": {"start": cue_start, "end": cue_end, "text": text[cue_start:cue_end]}})
                 if len(out) >= MAX_SPANS: return out
         return out
