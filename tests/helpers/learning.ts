@@ -7,18 +7,23 @@ import { withNlpMetadata } from '../../src/memory/learning-types.js';
 
 const writers = new WeakMap<Store, LearningWriter>();
 
-export function testLearningWriter(store: Store, state: { ready?: boolean; failAnalyze?: boolean; failAtAnalysis?: number; inputs?: string[]; sensitivePaths?: string[]; sensitiveValuesEnv?: string[]; env?: NodeJS.ProcessEnv;python?:string;spacy?:string;model?:string;modelVersion?:string;rules?:string;protocol?:number;normalized?:string;onAnalyze?:(text:string,count:number)=>void|Promise<void> } = {}): LearningWriter {
+export function testLearningWriter(store: Store, state: { ready?: boolean; failAnalyze?: boolean; failAtAnalysis?: number; inputs?: string[]; sensitivePaths?: string[]; sensitiveValuesEnv?: string[]; env?: NodeJS.ProcessEnv;python?:string;spacy?:string;model?:string;modelVersion?:string;rules?:string;protocol?:number;patternsDigest?:string;emptyPatterns?:boolean;candidateMentions?:boolean;normalized?:string;onAnalyze?:(text:string,count:number)=>void|Promise<void> } = {}): LearningWriter {
   let analysisCount = 0;
   const nlp: NlpProcessor = {
     async health() {
-      return { version: 2, id: 'test-health', ok: true, op: 'health', health: { protocol: state.protocol??2, python: state.python??'test', spacy: state.spacy??'fake', model: state.model??'fake', model_version: state.modelVersion??'1.0.0', rules: state.rules??'1', ready: state.ready !== false } };
+        return { version: 3, id: 'test-health', ok: true, op: 'health', health: { protocol: state.protocol??3, python: state.python??'test', spacy: state.spacy??'fake', model: state.model??'fake', model_version: state.modelVersion??'1.0.0', rules: state.rules??'1',patterns_schema_version:1,patterns_digest:state.patternsDigest??'b'.repeat(64),pattern_count:state.emptyPatterns?0:1,patterns_ready:!state.emptyPatterns,ready: state.ready !== false } };
     },
     async analyze(text: string) {
       analysisCount += 1;
       state.inputs?.push(text);
       await state.onAnalyze?.(text,analysisCount);
       if (state.failAnalyze || state.failAtAnalysis === analysisCount) throw new Error('private fixture failure');
-      return { version: 2, id: 'test-analyze', ok: true, op: 'analyze', normalized: state.normalized??'fixture-normalized', tokens: [], entities: [] };
+        const start=text.indexOf('Home'),actionStart=text.indexOf('open'),entities=state.candidateMentions&&start>=0&&actionStart>=0?[
+          {label:'PAGE' as const,rule_id:'yaml_page',normalized:'home',text:'Home',start:Array.from(text.slice(0,start)).length,end:Array.from(text.slice(0,start)).length+4},
+          {label:'ACTION' as const,rule_id:'yaml_action',normalized:'open',text:'open',start:Array.from(text.slice(0,actionStart)).length,end:Array.from(text.slice(0,actionStart)).length+4},
+        ]:[];
+        const relations=entities.length===2?[{type:'HAS_ACTION' as const,rule_id:'yaml_has_action',from_index:0,to_index:1,evidence:{start:Array.from(text.slice(0,actionStart)).length,end:Array.from(text.slice(0,actionStart)).length+4,text:'open'}}]:[];
+        return { version: 3, id: 'test-analyze', ok: true, op: 'analyze', normalized: state.normalized??'fixture-normalized', tokens: [], entities,relations };
     },
     async shutdown() {},
   };

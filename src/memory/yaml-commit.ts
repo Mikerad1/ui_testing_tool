@@ -2,11 +2,12 @@ import {createHash} from 'node:crypto';
 import type Database from 'better-sqlite3';
 import {hasNlpMetadata, type YamlReconciliationPlan} from './learning-types.js';
 import {LEGACY_MEMORY_ENVIRONMENT} from './environment.js';
+import type {CandidateObservationInput} from './store.js';
 
 const hashValue=(value:string)=>createHash('sha1').update(value).digest('hex');
 const canonical=(value:any):string=>Array.isArray(value)?`[${value.map(canonical).join(',')}]`:value&&typeof value==='object'?`{${Object.keys(value).sort().map(key=>`${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`:JSON.stringify(value);
 
-export function commitYamlReconciliation(database:Database.Database,projectId:string,environment:string,plan:YamlReconciliationPlan):number {
+export function commitYamlReconciliation(database:Database.Database,projectId:string,environment:string,plan:YamlReconciliationPlan,appendObservation:(input:CandidateObservationInput)=>unknown):number {
   if(plan.entities.some(entity=>!hasNlpMetadata(entity.attrs))||plan.edges.some(edge=>!hasNlpMetadata(edge.attrs)))throw Error('NLP ingestion is required');
   for(const fingerprint of plan.recordFingerprints??[]){
     if(!/^[a-z_]{1,40}$/.test(fingerprint.document_kind)||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$/.test(fingerprint.document_id)||!plan.sources.some(source=>source.path===fingerprint.source_path&&source.hash===fingerprint.raw_hash)||![fingerprint.raw_hash,fingerprint.redacted_hash,fingerprint.preparation_key].every(hash=>/^[a-f0-9]{64}$/.test(hash)))throw Error('Invalid YAML record fingerprint');
@@ -14,6 +15,7 @@ export function commitYamlReconciliation(database:Database.Database,projectId:st
   const identity=(type:string,key:string)=>environment===LEGACY_MEMORY_ENVIRONMENT?`${projectId}:${type}:${key}`:`${projectId}:${environment}:${type}:${key}`;
   return database.transaction(()=>{
     const now=new Date().toISOString(),activeNodes=new Set<string>(),activeEdges=new Set<string>(),sourcePaths=new Set(plan.sources.map(source=>source.path));
+    for(const observation of plan.candidateObservations??[])appendObservation(observation);
     const nodeId=(type:string,key:string)=>{
       const owned=database.prepare('SELECT entity_id FROM yaml_ownership WHERE project_id=? AND environment=? AND entity_type=? AND entity_key=? AND tombstone=0').get(projectId,environment,type,key) as {entity_id:string}|undefined;
       return owned?.entity_id??hashValue(identity(type,key));

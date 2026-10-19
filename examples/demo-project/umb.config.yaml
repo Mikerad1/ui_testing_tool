@@ -15,5 +15,7 @@ browser:
     - http://127.0.0.1:3000
 memory:
   database: ./.umb/memory.sqlite
+  patterns_file: ./memory-patterns-v1.json
+  trust_yaml_seeds: false
 knowledge:
   path: ./umb-knowledge

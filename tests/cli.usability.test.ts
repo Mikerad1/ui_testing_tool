@@ -43,10 +43,21 @@ test('spawned doctor and knowledge validation JSON success/failure stay parseabl
  }finally{await rm(root,{recursive:true,force:true});}
 });
 
+test('memory doctor exposes parseable JSON for invalid configuration',async()=>{
+ const root=await mkdtemp(path.join(os.tmpdir(),'umb-memory-doctor-cli-'));
+ try{
+  const result=cli(root,'memory','doctor','--config','missing.yaml','--json');
+  assert.equal(result.status,1);
+  const output=JSON.parse(result.stdout) as {ok:boolean;checks:Array<{id:string;status:string}>};
+  assert.equal(output.ok,false);assert.equal(output.checks[0]?.id,'memory-doctor.config');assert.equal(output.checks[0]?.status,'fail');
+ }finally{await rm(root,{recursive:true,force:true});}
+});
+
 function assertDiagnostic(value:unknown){assert.ok(value&&typeof value==='object');const d=value as Record<string,unknown>;assert.equal(typeof d.id,'string');assert.ok(['ok','warning','fail'].includes(String(d.status)));assert.equal(typeof d.message,'string');assert.equal(typeof d.remediation,'string');}
 
 test('spawned CLI help advertises workflow examples and JSON diagnostics',()=>{
  const result=cli(repo,'--help');assert.equal(result.status,0);assert.match(result.stdout,/umb init/);assert.match(result.stdout,/knowledge validate --json/);assert.match(result.stdout,/doctor --json/);
+ const memory=cli(repo,'memory','--help');assert.equal(memory.status,0);assert.match(memory.stdout,/doctor/);assert.match(memory.stdout,/backfill/);
 });
 
 test('spawned Codex agent commands use isolated project and user scopes without touching real home/config',async()=>{

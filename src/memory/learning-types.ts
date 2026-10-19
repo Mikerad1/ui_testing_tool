@@ -37,6 +37,7 @@ export type YamlReconciliationPlan = {
   entities: YamlEntityPlan[];
   edges: YamlEdgePlan[];
   recordFingerprints?:YamlRecordFingerprint[];
+  candidateObservations?:CandidateObservationInput[];
 };
 
 export function withNlpMetadata(attributes: Record<string, unknown>, normalized: string): LearningAttributes {
@@ -53,3 +54,4 @@ export function hasNlpMetadata(value: unknown): value is LearningAttributes {
   return record.protocol === 1 && typeof record.normalized === 'string' && record.normalized.length <= 64 * 1024
     && nlpMetadataBrands.has(value);
 }
+import type {CandidateObservationInput} from './store.js';

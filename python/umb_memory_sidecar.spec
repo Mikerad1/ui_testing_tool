@@ -7,7 +7,7 @@ analysis = Analysis(
     ["umb_memory_sidecar.py"],
     pathex=["."],
     binaries=spacy_binaries + model_binaries,
-    datas=spacy_datas + model_datas,
+    datas=spacy_datas + model_datas + [("patterns-v1.json", ".")],
     hiddenimports=sorted(set(spacy_hiddenimports + model_hiddenimports + ["en_core_web_sm"])),
     hookspath=[],
     hooksconfig={},

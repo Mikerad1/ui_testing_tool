@@ -41,14 +41,29 @@ function makeClient(respond: ConstructorParameters<typeof FakeChild>[0], timeout
 
 test('client sends versioned JSONL and accepts health and bounded analysis', async () => {
   const fixture = makeClient((request, child) => {
-    const base = { version: 2, id: request.id, ok: true };
-    assert.equal(request.version, 2);
-    if (request.op === 'health') child.send({ ...base, op: 'health', health: { protocol: 2, python: '3', spacy: '3', model: 'fake', model_version: '3.8.0', rules: '1', ready: true } });
-    else child.send({ ...base, op: request.op, normalized: 'hello', tokens: [{ start: 0, end: 5, text: 'hello', label: 'TOKEN' }], entities: [] });
+    const base = { version: 3, id: request.id, ok: true };
+    assert.equal(request.version, 3);
+    if (request.op === 'health') child.send({ ...base, op: 'health', health: { protocol: 3, python: '3', spacy: '3', model: 'fake', model_version: '3.8.0', rules: '1', patterns_schema_version: 1, patterns_digest: 'abc', pattern_count: 1, patterns_ready: true, ready: true } });
+    else child.send({ ...base, op: request.op, normalized: 'hello', tokens: [{ start: 0, end: 5, text: 'hello', label: 'TOKEN' }], entities: [], relations: [] });
   });
   assert.equal((await fixture.client.health()).health.model, 'fake');
   assert.equal((await fixture.client.analyze('hello')).normalized, 'hello');
   assert.equal(fixture.child().requests.length, 2);
+  await fixture.client.shutdown();
+});
+
+test('diagnostic health probe accepts not-ready metadata without enabling analysis', async () => {
+  const fixture = makeClient((request, child) => {
+    const base = { version: 3, id: request.id, ok: true };
+    if (request.op === 'health') child.send({ ...base, op: 'health', health: {
+      protocol: 3, python: '3', spacy: 'unavailable', model: 'en_core_web_sm',
+      model_version: 'unavailable', rules: '1', patterns_schema_version: 1, patterns_digest: 'abc', pattern_count: 1, patterns_ready: true, ready: false,
+    } });
+    else child.send({ ...base, op: 'shutdown' });
+  });
+  const response = await fixture.client.probeHealth();
+  assert.equal(response.health.ready, false);
+  await assert.rejects(fixture.client.analyze('text'), /NLP sidecar request failed/);
   await fixture.client.shutdown();
 });
 
@@ -75,6 +90,17 @@ test('malformed and version-mismatched responses reject generically', async () =
   await fixture.client.shutdown();
 });
 
+test('health rejects boolean schema versions but accepts structured unhealthy readiness', async () => {
+  const fixture = makeClient((request, child) => {
+    child.send({ version: 3, id: request.id, ok: true, op: 'health', health: {
+      protocol: 3, python: '3', spacy: '3', model: 'fake', model_version: 'unavailable', rules: '1',
+      patterns_schema_version: true, patterns_digest: 'safe', pattern_count: 0, patterns_ready: false, ready: false,
+    } });
+  });
+  await assert.rejects(fixture.client.probeHealth(), /NLP sidecar request failed/);
+  await fixture.client.shutdown();
+});
+
 test('unavailable child process errors reject generically', async () => {
   const fixture = makeClient((_request, child) => child.emit('error', new Error('ENOENT PRIVATE_EXECUTABLE')));
   await assert.rejects(fixture.client.health(), error => error instanceof Error && error.message === NLP_GENERIC_ERROR);
@@ -84,16 +110,36 @@ test('unavailable child process errors reject generically', async () => {
 test('analysis requires ready health and validates spans against Unicode source offsets', async () => {
   const fixture = makeClient((request, child) => {
     if (request.op === 'health') {
-      child.send({ version: 2, id: request.id, ok: true, op: 'health', health: { protocol: 2, python: '3', spacy: '3', model: 'fake', model_version: '3.8.0', rules: '1', ready: true } });
+      child.send({ version: 3, id: request.id, ok: true, op: 'health', health: { protocol: 3, python: '3', spacy: '3', model: 'fake', model_version: '3.8.0', rules: '1', patterns_schema_version: 1, patterns_digest: 'abc', pattern_count: 1, patterns_ready: true, ready: true } });
     } else if (request.op === 'analyze') {
-      child.send({ version: 2, id: request.id, ok: true, op: 'analyze', normalized: 'x',
-        tokens: [{ start: 0, end: 1, text: 'short', label: 'TOKEN' }], entities: [] });
-    } else child.send({ version: 2, id: request.id, ok: true, op: 'shutdown' });
+      child.send({ version: 3, id: request.id, ok: true, op: 'analyze', normalized: 'x',
+        tokens: [{ start: 0, end: 1, text: 'short', label: 'TOKEN' }], entities: [], relations: [] });
+    } else child.send({ version: 3, id: request.id, ok: true, op: 'shutdown' });
   });
   await assert.rejects(fixture.client.analyze('😀 ran'), /NLP sidecar request failed/);
   await fixture.client.health();
   const result = await fixture.client.analyze('😀 ran');
   assert.equal(result.normalized, 'x');
+  await fixture.client.shutdown();
+});
+
+test('protocol v3 rejects relation endpoint signatures that do not match the ontology', async () => {
+  const fixture = makeClient((request, child) => {
+    const base = { version: 3, id: request.id, ok: true };
+    if (request.op === 'health') child.send({ ...base, op: 'health', health: {
+      protocol: 3, python: '3', spacy: '3', model: 'fake', model_version: '3.8.0', rules: '1',
+      patterns_schema_version: 1, patterns_digest: 'abc', pattern_count: 1, patterns_ready: true, ready: true,
+    } });
+    else if (request.op === 'analyze') child.send({ ...base, op: 'analyze', normalized: 'x', tokens: [],
+      entities: [
+        { label: 'PAGE', rule_id: 'p', text: 'Home', normalized: 'home', start: 0, end: 4 },
+        { label: 'RULE', rule_id: 'r', text: 'opens', normalized: 'open', start: 5, end: 10 },
+      ], relations: [{ type: 'HAS_ACTION', rule_id: 'rel', from_index: 0, to_index: 1, evidence: { start: 0, end: 4, text: 'Home' } }],
+    });
+    else child.send({ ...base, op: 'shutdown' });
+  });
+  await fixture.client.health();
+  await assert.rejects(fixture.client.analyze('Home opens'), /NLP sidecar request failed/);
   await fixture.client.shutdown();
 });
 

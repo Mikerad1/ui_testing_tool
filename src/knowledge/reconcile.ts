@@ -28,7 +28,7 @@ const schemas: Record<string, z.ZodTypeAny> = {
 const toPosixRelative = (root: string, file: string) => path.relative(root, file).split(path.sep).join('/');
 type Doc = { file: string; doc: any; hash: string };
 type RedactedDoc=Doc&{validated:ValidatedYamlDocument};
-type PreparedDoc = Doc & { normalized: string; fingerprint:YamlRecordFingerprint };
+type PreparedDoc = Doc & { normalized: string; fingerprint:YamlRecordFingerprint; observation?:import('../memory/store.js').CandidateObservationInput };
 type Entity = { type: string; key: string; name: string; attrs: LearningAttributes; hash: string; parent?: string; source: string };
 type Edge = { key: string; from: string; to: string; relation: string; attrs: LearningAttributes; source: string };
 const YAML_PROJECTION_VERSION='yaml-projection-v1';
@@ -116,7 +116,7 @@ export async function reconcile(root: string, store: Store, writer: LearningWrit
   const docs:PreparedDoc[]=[];
   for(const entry of redactedDocs){
     const prepared=await writer.normalizeYamlDocument(entry.validated);
-    docs.push({...entry,doc:prepared.value,normalized:prepared.normalized,fingerprint:entry.validated.fingerprint});
+    docs.push({...entry,doc:prepared.value,normalized:prepared.normalized,fingerprint:entry.validated.fingerprint,observation:prepared.observation});
   }
 
   const byKey = new Map<string, PreparedDoc>();
@@ -202,6 +202,7 @@ export async function reconcile(root: string, store: Store, writer: LearningWrit
     entities,
     edges,
     recordFingerprints:docs.map(entry=>entry.fingerprint),
+    candidateObservations:docs.flatMap(entry=>entry.observation?[entry.observation]:[]),
   };
   return writer.commitReconciliation(plan);
 }

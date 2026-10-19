@@ -28,7 +28,7 @@ test('YAML edge versions preserve declaration ownership and semantic conflicts',
     const routeOne=routes.find(e=>JSON.parse(e.attributes_json).path==='/one')!;
     const routeTwo=routes.find(e=>JSON.parse(e.attributes_json).path==='/two')!;
     const homeId=auth.from_node_id,nextId=auth.to_node_id;
-    const agent=await testWriter(store).addEdge({from_id:homeId,to_id:nextId,relation:'NAVIGATES_TO',attributes:{via:{action:'click'},rule_id:'auth'}}) as any;
+    const agent=await testWriter(store).addEdge({observation_id:'agent-nav-home-next',from_id:homeId,to_id:nextId,relation:'NAVIGATES_TO',attributes:{via:{action:'click'},rule_id:'auth'}}) as any;
     await reconcile(root, store, testWriter(store));
     const agentRow=store.db.prepare('SELECT * FROM edges WHERE id=?').get(agent.id) as any;
     assert.equal(agentRow.origin,'agent');assert.equal(agentRow.verification_status,'stale');assert.equal(agentRow.conflict_status,'conflict');

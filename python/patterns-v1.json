@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "entity_rules": [
+    {"id": "page.checkout", "label": "PAGE", "phrase": "checkout page"},
+    {"id": "page.login", "label": "PAGE", "phrase": "login page"},
+    {"id": "action.submit_button", "label": "ACTION", "phrase": "submit button"},
+    {"id": "field.email_address", "label": "FIELD", "phrase": "email address"},
+    {"id": "rule.required_field", "label": "RULE", "phrase": "required field"}
+  ],
+  "relation_rules": [
+    {"id": "relation.page_has_action", "relation": "HAS_ACTION", "source": "PAGE", "target": "ACTION", "cue": ["has"], "max_gap": 8}
+  ]
+}

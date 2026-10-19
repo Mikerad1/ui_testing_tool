@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile, symlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { resolveNlpRuntime } from '../src/memory/runtime.js';
+import { resolveNlpRuntime, resolveConfiguredPatternsFile } from '../src/memory/runtime.js';
 import type { Config } from '../src/config/config.js';
 
 const config = { memory: { python_executable: '/hostile/configured/python' } } as Config;
@@ -62,4 +62,19 @@ test('only non-packaged development modules use configured Python, with source a
       assert.deepEqual(resolveNlpRuntime(config, pathToFileURL(modulePath).href), { executable: config.memory.python_executable, args: [sidecar] });
     }
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('configured patterns resolve against config root and reject missing, escaping, and symlink paths', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'umb-pattern-root-'));
+  const outside = await mkdtemp(path.join(os.tmpdir(), 'umb-pattern-outside-'));
+  try {
+    const pattern = path.join(root, 'rules.json');
+    await writeFile(pattern, '{"schema_version":1}');
+    assert.equal(await resolveConfiguredPatternsFile(root, './rules.json'), pattern);
+    await assert.rejects(resolveConfiguredPatternsFile(root, '../rules.json'));
+    await assert.rejects(resolveConfiguredPatternsFile(root, './missing.json'));
+    await writeFile(path.join(outside, 'rules.json'), '{"schema_version":1}');
+    await symlink(path.join(outside, 'rules.json'), path.join(root, 'escape.json'));
+    await assert.rejects(resolveConfiguredPatternsFile(root, './escape.json'));
+  } finally { await rm(root, { recursive: true, force: true }); await rm(outside, { recursive: true, force: true }); }
 });

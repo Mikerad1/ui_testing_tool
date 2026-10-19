@@ -50,23 +50,21 @@ test('memory graph, YAML ownership, runs, and evidence are isolated by immutable
     assert.equal(legacy.get(productionScreen.id), null);
     assert.equal(staging.export().nodes.some((node: any) => node.id === productionScreen.id), false);
     assert.equal(staging.search('Home').some((node: any) => node.id === productionScreen.id), false);
-    assert.equal(staging.context().some((node: any) => node.stable_key === 'home'), true);
-    assert.equal(staging.recallWorkflowCandidates({goal: 'shared flow', currentUrl: 'http://localhost/home'}).find((item: any) => item.workflow_id === 'shared-flow')?.name, 'Staging flow');
-    assert.equal(production.recallWorkflowCandidates({goal: 'shared flow', currentUrl: 'http://localhost/home'}).find((item: any) => item.workflow_id === 'shared-flow')?.name, 'Production flow');
+    assert.equal((staging.context().authored_guidance as any).items.some((node: any) => node.stable_key === 'home'), true);
+    assert.equal(staging.recallWorkflowCandidates({goal: 'shared flow', currentUrl: 'http://localhost/home',trustYamlSeeds:true}).find((item: any) => item.workflow_id === 'shared-flow')?.name, 'Staging flow');
+    assert.equal(production.recallWorkflowCandidates({goal: 'shared flow', currentUrl: 'http://localhost/home',trustYamlSeeds:true}).find((item: any) => item.workflow_id === 'shared-flow')?.name, 'Production flow');
 
-    const stagingProposal = await testWriter(staging).propose({type: 'screen', stable_key: 'same-agent-key', display_name: 'Stage item'});
-    const productionProposal = await testWriter(production).propose({type: 'screen', stable_key: 'same-agent-key', display_name: 'Prod item'});
+    const stagingProposal = await testWriter(staging).propose({observation_id:'stage-node',type: 'screen', stable_key: 'same-agent-key', display_name: 'Stage item'});
+    const productionProposal = await testWriter(production).propose({observation_id:'prod-node',type: 'screen', stable_key: 'same-agent-key', display_name: 'Prod item'});
     assert.equal((stagingProposal as any).conflict_status, 'none');
     assert.equal((productionProposal as any).conflict_status, 'none');
-    await testWriter(staging).addEdge({from_id: stagingScreen.id, to_id: (stagingProposal as any).id, relation: 'stage_link'});
-    await testWriter(production).addEdge({from_id: productionScreen.id, to_id: (productionProposal as any).id, relation: 'prod_link'});
-    assert.equal((staging.listEdges() as any[]).some((edge: any) => edge.relation_type === 'stage_link'), true);
-    assert.equal((staging.listEdges() as any[]).some((edge: any) => edge.relation_type === 'prod_link'), false);
-    assert.equal((production.listEdges() as any[]).some((edge: any) => edge.relation_type === 'prod_link'), true);
-    assert.equal((production.listEdges() as any[]).some((edge: any) => edge.relation_type === 'stage_link'), false);
+    await testWriter(staging).addEdge({observation_id:'stage-edge',from_id: stagingScreen.id, to_id: (stagingProposal as any).id, relation: 'NAVIGATES_TO'});
+    await testWriter(production).addEdge({observation_id:'prod-edge',from_id: productionScreen.id, to_id: (productionProposal as any).id, relation: 'NAVIGATES_TO'});
+    assert.equal((staging.listEdges() as any[]).filter((edge:any)=>edge.relation_type==='NAVIGATES_TO').length,1);
+    assert.equal((production.listEdges() as any[]).filter((edge:any)=>edge.relation_type==='NAVIGATES_TO').length,1);
     assert.equal((staging.listConflicts() as any[]).length, 0);
     await assert.rejects(
-      testWriter(staging).addEdge({from_id: stagingScreen.id, to_id: productionScreen.id, relation: 'crosses_scope'}),
+      testWriter(staging).addEdge({observation_id:'cross-scope',from_id: stagingScreen.id, to_id: productionScreen.id, relation: 'NAVIGATES_TO'}),
       /Learning write failed safely/,
     );
 

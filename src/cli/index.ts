@@ -4,13 +4,14 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { loadConfig, safePath } from '../config/config.js';
 import { Store } from '../memory/store.js';
-import { createLearningWriter, persistentLearningWritesEnabled } from '../memory/runtime.js';
+import { createProjectLearningWriter, createLearningWriter, memoryBackfillEnabled } from '../memory/runtime.js';
 import { backfillMemory } from '../memory/backfill.js';
 import { reconcile, validateKnowledge } from '../knowledge/reconcile.js';
 import { BrowserController } from '../browser/controller.js';
 import { serve } from '../mcp/server.js';
 import { acquireProjectLock } from '../security/project-lock.js';
 import { runDoctor } from './doctor.js';
+import { runMemoryDoctor } from './memory-doctor.js';
 import { ShutdownLifecycle } from './lifecycle.js';
 import { createInterface } from 'node:readline/promises';
 import { confirmWorkflowLocatorProposal } from '../knowledge/locator-proposals.js';
@@ -58,12 +59,17 @@ jira.command('comment <issue_key>').description('Comment on one explicitly keyed
  try{const{config,root}=await loadConfig(o.config);const result=await publishJiraScreenshotComment(config,root,{issueKey,site:o.site,image:o.image,write:Boolean(o.write),experimentalInlineWiki:Boolean(o.experimentalInlineWiki),table:Boolean(o.table),emailEnv:o.emailEnv,tokenEnv:o.tokenEnv});console.log(result);}
  catch(error){console.error(`Jira comment failed safely: ${(error as Error).message}`);process.exitCode=1;}
 });
-cli.command('memory').description('Manage scoped persistent memory maintenance').command('backfill').description('Resume redacted NLP processing of stored memory records').option('--config <path>','Config file','umb.config.yaml').action(async o=>{
+const memory=cli.command('memory').description('Manage scoped persistent memory maintenance');
+memory.command('doctor').description('Read-only diagnostics for memory runtime and database readiness').option('--config <path>','Config file','umb.config.yaml').option('--json','Output machine-readable JSON').action(async o=>{
+  try {const result=await runMemoryDoctor(o.config);console.log(o.json?JSON.stringify(result):result.checks.map(check=>`${check.status.toUpperCase()} ${check.name}: ${check.message}${check.remediation?`\n  Remediation: ${check.remediation}`:''}`).join('\n'));if(!result.ok)process.exitCode=1;}
+  catch {const result={ok:false,checks:[{id:'memory-doctor.unexpected-error',name:'unexpected-error',status:'fail',message:'Memory diagnostics could not complete.',remediation:'Check the config path and permissions, then retry.'}]};console.log(o.json?JSON.stringify(result):'FAIL Memory diagnostics could not complete. Check the config path and permissions, then retry.');process.exitCode=1;}
+});
+memory.command('backfill').description('Resume redacted NLP processing of stored memory records').option('--config <path>','Config file','umb.config.yaml').action(async o=>{
   let store:Store|undefined,learningWriter:ReturnType<typeof createLearningWriter>|undefined,lock:Awaited<ReturnType<typeof acquireProjectLock>>|undefined;
   try{
     const{config,root}=await loadConfig(o.config);
-    if(!persistentLearningWritesEnabled())throw Error('Memory backfill is disabled until the Phase 1 offline release gate passes.');
-    const db=await safePath(root,config.memory.database);lock=await acquireProjectLock(root,config.project.id,config.memory.database);await mkdir(path.dirname(db),{recursive:true});store=await Store.open(db,config.project.id,config.memory.environment??'legacy');learningWriter=createLearningWriter(store,config);
+    if(!memoryBackfillEnabled())throw Error('Memory backfill is disabled because bulk rewriting existing records has not been authorized.');
+    const db=await safePath(root,config.memory.database);lock=await acquireProjectLock(root,config.project.id,config.memory.database);await mkdir(path.dirname(db),{recursive:true});store=await Store.open(db,config.project.id,config.memory.environment??'legacy');learningWriter=await createProjectLearningWriter(store,config,root);
     const summary=await backfillMemory(store,learningWriter);console.log(JSON.stringify(summary));
   }catch(error){console.error(`Memory backfill failed safely: ${(error as Error).message}`);process.exitCode=1;}
   finally{await learningWriter?.close();store?.close();await lock?.release().catch(()=>{});}
@@ -80,14 +86,14 @@ knowledge.command('validate').description('Read-only validation of YAML knowledg
 });
 knowledge.command('reload').option('--config <path>','Config file','umb.config.yaml').action(async o=>{
  let store:Store|undefined,learningWriter:ReturnType<typeof createLearningWriter>|undefined,lock:Awaited<ReturnType<typeof acquireProjectLock>>|undefined;
- try{const{config,root}=await loadConfig(o.config),knowledgeRoot=await safePath(root,config.knowledge.path),db=await safePath(root,config.memory.database);lock=await acquireProjectLock(root,config.project.id,config.memory.database);await mkdir(path.dirname(db),{recursive:true});store=await Store.open(db,config.project.id,config.memory.environment??'legacy');learningWriter=createLearningWriter(store,config);await reconcile(knowledgeRoot,store,learningWriter);console.log('Knowledge reload completed.');}
+ try{const{config,root}=await loadConfig(o.config),knowledgeRoot=await safePath(root,config.knowledge.path),db=await safePath(root,config.memory.database);lock=await acquireProjectLock(root,config.project.id,config.memory.database);await mkdir(path.dirname(db),{recursive:true});store=await Store.open(db,config.project.id,config.memory.environment??'legacy');learningWriter=await createProjectLearningWriter(store,config,root);await reconcile(knowledgeRoot,store,learningWriter);console.log('Knowledge reload completed.');}
  catch(error){console.error(error instanceof Error&&/already locked|lock gate .*busy/i.test(error.message)?'Knowledge reload refused because the project is locked by an active UMB process.':'Knowledge reload failed; the previous valid graph remains active.');process.exitCode=1;}
   finally{await learningWriter?.close();store?.close();await lock?.release().catch(()=>{});}
 });
  knowledge.command('confirm-locator <proposalId>').option('--config <path>','Config file','umb.config.yaml').action(async(proposalId,o)=>{
  if(!process.stdin.isTTY||!process.stdout.isTTY){console.error('Locator confirmation requires an interactive local TTY; no changes were made.');process.exitCode=1;return;}
   let store:Store|undefined,learningWriter:ReturnType<typeof createLearningWriter>|undefined,lock:Awaited<ReturnType<typeof acquireProjectLock>>|undefined;
-  try{const{config,root}=await loadConfig(o.config);const db=await safePath(root,config.memory.database),knowledgeRoot=await safePath(root,config.knowledge.path);lock=await acquireProjectLock(root,config.project.id,config.memory.database);await mkdir(path.dirname(db),{recursive:true});store=await Store.open(db,config.project.id,config.memory.environment??'legacy');learningWriter=createLearningWriter(store,config);const proposal=store.getWorkflowLocatorProposal(proposalId) as any;if(!proposal){console.error('Unknown locator proposal.');process.exitCode=1;return;}if(proposal.status==='accepted'){console.log('Locator proposal is already accepted.');return;}if(proposal.status!=='pending'){console.error(`Proposal is ${proposal.status}; no source change was made.`);process.exitCode=1;return;}console.log(`Confirm locator proposal ${proposal.id}?`);console.log(`Source document: ${proposal.source_path} (screen ${proposal.screen_id}, element ${proposal.element_id})`);console.log(`Prior locator — untrusted YAML source data: ${JSON.stringify(JSON.parse(proposal.previous_locator_json))}`);console.log(`Candidate locator — untrusted YAML source data: ${JSON.stringify(JSON.parse(proposal.candidate_locator_json))}`);console.log('Confirmation does not edit YAML. The source must already contain the candidate as primary and preserve the prior locator in fallback_locators.');const rl=createInterface({input:process.stdin,output:process.stdout});let answer:string;try{answer=await rl.question('Accept and validate/reconcile this manual YAML edit? [y/N] ');}finally{rl.close();}if(answer.trim().toLowerCase()!=='y'){store.setWorkflowLocatorProposalStatus(proposal.id,'rejected');console.log('Proposal rejected; YAML and graph were not changed.');return;}const result=await confirmWorkflowLocatorProposal(store,proposal.id,knowledgeRoot,learningWriter);if(result.status==='accepted')console.log('Locator proposal accepted after knowledge validation and reconciliation.');else{console.error('Proposal source is stale or invalid; it was not accepted.');process.exitCode=1;}}
+  try{const{config,root}=await loadConfig(o.config);const db=await safePath(root,config.memory.database),knowledgeRoot=await safePath(root,config.knowledge.path);lock=await acquireProjectLock(root,config.project.id,config.memory.database);await mkdir(path.dirname(db),{recursive:true});store=await Store.open(db,config.project.id,config.memory.environment??'legacy');learningWriter=await createProjectLearningWriter(store,config,root);const proposal=store.getWorkflowLocatorProposal(proposalId) as any;if(!proposal){console.error('Unknown locator proposal.');process.exitCode=1;return;}if(proposal.status==='accepted'){console.log('Locator proposal is already accepted.');return;}if(proposal.status!=='pending'){console.error(`Proposal is ${proposal.status}; no source change was made.`);process.exitCode=1;return;}console.log(`Confirm locator proposal ${proposal.id}?`);console.log(`Source document: ${proposal.source_path} (screen ${proposal.screen_id}, element ${proposal.element_id})`);console.log(`Prior locator — untrusted YAML source data: ${JSON.stringify(JSON.parse(proposal.previous_locator_json))}`);console.log(`Candidate locator — untrusted YAML source data: ${JSON.stringify(JSON.parse(proposal.candidate_locator_json))}`);console.log('Confirmation does not edit YAML. The source must already contain the candidate as primary and preserve the prior locator in fallback_locators.');const rl=createInterface({input:process.stdin,output:process.stdout});let answer:string;try{answer=await rl.question('Accept and validate/reconcile this manual YAML edit? [y/N] ');}finally{rl.close();}if(answer.trim().toLowerCase()!=='y'){store.setWorkflowLocatorProposalStatus(proposal.id,'rejected');console.log('Proposal rejected; YAML and graph were not changed.');return;}const result=await confirmWorkflowLocatorProposal(store,proposal.id,knowledgeRoot,learningWriter);if(result.status==='accepted')console.log('Locator proposal accepted after knowledge validation and reconciliation.');else{console.error('Proposal source is stale or invalid; it was not accepted.');process.exitCode=1;}}
  catch{console.error('Locator confirmation failed safely.');process.exitCode=1;}
   finally{await learningWriter?.close();store?.close();await lock?.release().catch(()=>{});}
  });
@@ -95,7 +101,7 @@ knowledge.command('reload').option('--config <path>','Config file','umb.config.y
  workflow.command('verify <workflowId>').requiredOption('--run-id <runId>','Successful workflow run id').option('--config <path>','Config file','umb.config.yaml').action(async(workflowId,o)=>{
   if(!process.stdin.isTTY||!process.stdout.isTTY){console.error('Workflow export verification requires an interactive local TTY.');process.exitCode=1;return;}
    let store:Store|undefined,learningWriter:ReturnType<typeof createLearningWriter>|undefined,lock:Awaited<ReturnType<typeof acquireProjectLock>>|undefined;
-   try{const{config,root}=await loadConfig(o.config);lock=await acquireProjectLock(root,config.project.id,config.memory.database);const db=await safePath(root,config.memory.database);await mkdir(path.dirname(db),{recursive:true});store=await Store.open(db,config.project.id,config.memory.environment??'legacy');learningWriter=createLearningWriter(store,config);await reconcile(await safePath(root,config.knowledge.path),store,learningWriter);
+   try{const{config,root}=await loadConfig(o.config);lock=await acquireProjectLock(root,config.project.id,config.memory.database);const db=await safePath(root,config.memory.database);await mkdir(path.dirname(db),{recursive:true});store=await Store.open(db,config.project.id,config.memory.environment??'legacy');learningWriter=await createProjectLearningWriter(store,config,root);await reconcile(await safePath(root,config.knowledge.path),store,learningWriter);
    const eligible=store.workflowExportEligibility(workflowId,o.runId);if(!eligible)throw Error('Workflow/run is not eligible for export verification.');
    console.log(`Verify workflow ${workflowId} from successful run ${o.runId} (source ${eligible.contentHash.slice(0,12)}) for static spec export?`);
    const rl=createInterface({input:process.stdin,output:process.stdout});let answer:string;try{answer=await rl.question('This creates export eligibility only; generated source requires review. [y/N] ');}finally{rl.close();}
@@ -105,7 +111,7 @@ knowledge.command('reload').option('--config <path>','Config file','umb.config.y
  });
  workflow.command('export <workflowId>').requiredOption('--output <relativePath>','New project-relative .spec.ts path').option('--config <path>','Config file','umb.config.yaml').action(async(workflowId,o)=>{
    let store:Store|undefined,learningWriter:ReturnType<typeof createLearningWriter>|undefined,lock:Awaited<ReturnType<typeof acquireProjectLock>>|undefined;
-   try{const{config,root}=await loadConfig(o.config);lock=await acquireProjectLock(root,config.project.id,config.memory.database);const db=await safePath(root,config.memory.database);await mkdir(path.dirname(db),{recursive:true});store=await Store.open(db,config.project.id,config.memory.environment??'legacy');learningWriter=createLearningWriter(store,config);await reconcile(await safePath(root,config.knowledge.path),store,learningWriter);
+   try{const{config,root}=await loadConfig(o.config);lock=await acquireProjectLock(root,config.project.id,config.memory.database);const db=await safePath(root,config.memory.database);await mkdir(path.dirname(db),{recursive:true});store=await Store.open(db,config.project.id,config.memory.environment??'legacy');learningWriter=await createProjectLearningWriter(store,config,root);await reconcile(await safePath(root,config.knowledge.path),store,learningWriter);
    if(!store.hasWorkflowExportVerification(workflowId))throw Error('Workflow has no verification for its current YAML content hash.');
    const relative=o.output as string,source=generateWorkflowSpec(store,workflowId,config.project.base_url,config.browser.allowed_origins);
    await writeWorkflowSpec(root,relative,source);console.log(`Generated ${relative}. Review the static source before running it; no test was executed.`);
@@ -127,7 +133,7 @@ knowledge.command('reload').option('--config <path>','Config file','umb.config.y
   const db = await safePath(root, config.memory.database);
   lock = await acquireProjectLock(root, config.project.id, config.memory.database);
    if (lifecycle.stopRequested) throw Error('Shutdown requested during startup');
-   await mkdir(path.dirname(db), { recursive: true }); store = await Store.open(db, config.project.id, config.memory.environment ?? 'legacy');learningWriter=createLearningWriter(store,config);
+   await mkdir(path.dirname(db), { recursive: true }); store = await Store.open(db, config.project.id, config.memory.environment ?? 'legacy');learningWriter=await createProjectLearningWriter(store,config,root);
    try{await reconcile(await safePath(root, config.knowledge.path), store,learningWriter);}catch(error){if(!(error instanceof Error&&error.message==='NLP sidecar request failed'))throw error;console.error('Knowledge load deferred; the last valid graph remains active and learning writes are unavailable.');}
    if (lifecycle.stopRequested) throw Error('Shutdown requested during startup');
   browser = new BrowserController(config, root); await browser.start();
@@ -152,7 +158,7 @@ knowledge.command('reload').option('--config <path>','Config file','umb.config.y
   try{
    const{config,root}=await loadConfig(o.config);if(lifecycle.stopRequested)throw Error('Shutdown requested during startup');
    const db=await safePath(root,config.memory.database);lock=await acquireProjectLock(root,config.project.id,config.memory.database);
-    await mkdir(path.dirname(db),{recursive:true});store=await Store.open(db,config.project.id,config.memory.environment??'legacy');learningWriter=createLearningWriter(store,config);
+    await mkdir(path.dirname(db),{recursive:true});store=await Store.open(db,config.project.id,config.memory.environment??'legacy');learningWriter=await createProjectLearningWriter(store,config,root);
     try{await reconcile(await safePath(root,config.knowledge.path),store,learningWriter);}catch(error){if(!(error instanceof Error&&error.message==='NLP sidecar request failed'))throw error;console.error('Knowledge load deferred; the last valid graph remains active and learning writes are unavailable.');}if(lifecycle.stopRequested)throw Error('Shutdown requested during startup');
    browser=new BrowserController(config,root);await browser.start();if(lifecycle.stopRequested)throw Error('Shutdown requested during startup');
     let applicationReady = false;

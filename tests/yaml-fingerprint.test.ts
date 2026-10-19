@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {Store} from '../src/memory/store.js';
 import {reconcile} from '../src/knowledge/reconcile.js';
-import {testLearningWriter} from './helpers/learning.js';
+import {runFixtureSql,testLearningWriter} from './helpers/learning.js';
 
 const screen=(id:string,name:string,element=false)=>`schema_version: 1\nkind: screen\nid: ${id}\nname: ${name}\n${element?`elements: [{id: submit, description: Send form, locator: {by: test_id, value: submit}}]\n`:''}`;
 
@@ -16,6 +16,7 @@ test('validated YAML record fingerprints skip only NLP and retain full reconcili
   const store=new Store(filename,'yaml-fingerprint'),inputs:string[]=[],writer=testLearningWriter(store,{inputs});
   try{
     await reconcile(knowledge,store,writer);assert.equal(inputs.length,2);
+    assert.equal((store.listCandidateObservations({source_kind:'yaml_document'} ) as any[]).length,2,'normalization cache hits retain the committed candidate observations');
     const homeId=(store.getByTypeKey('screen','home') as any).id,elementId=(store.getByTypeKey('ui_element','screen:home/submit') as any).id;
     assert.equal((store.listEdges(homeId) as any[]).some(edge=>edge.relation_type==='CONTAINS'&&edge.to_node_id===elementId),true);
     const fingerprints=()=>store.db.prepare('SELECT document_kind,document_id,source_path,raw_hash,redacted_hash,preparation_key FROM yaml_record_fingerprints WHERE project_id=? AND environment=? ORDER BY document_kind,document_id').all(store.projectId,store.memoryEnvironment);
@@ -30,6 +31,7 @@ test('validated YAML record fingerprints skip only NLP and retain full reconcili
 
     const movedDir=path.join(knowledge,'moved');await mkdir(movedDir);await rename(home,path.join(movedDir,'home.yaml'));
     await reconcile(knowledge,store,writer);assert.equal(inputs.length,3,'moving an unchanged record can reuse its scoped cached normalization');
+    assert.equal((store.listCandidateObservations({source_kind:'yaml_document',source_key:'screen:home'}) as any[]).length,1,'a moved document keeps one ledger observation under its stable document identity');
     assert.equal((store.getByTypeKey('screen','home') as any).id,homeId);
     assert.equal((store.db.prepare("SELECT source_path,tombstone FROM yaml_ownership WHERE project_id=? AND environment=? AND entity_type='screen' AND entity_key='home' AND tombstone=0").get(store.projectId,store.memoryEnvironment) as any).source_path,'moved/home.yaml');
 
@@ -116,4 +118,28 @@ test('YAML preparation fingerprints and cached normalization are isolated by env
     assert.deepEqual(staging.db.prepare('SELECT environment FROM yaml_record_fingerprints WHERE project_id=? ORDER BY environment').all('yaml-env'),[{environment:'production'},{environment:'staging'}]);
     const repeated:string[]=[];await reconcile(knowledge,production,testLearningWriter(production,{inputs:repeated}));assert.equal(repeated.length,0,'the matching environment can reuse its own normalization');
   }finally{staging.close();production.close();await rm(root,{recursive:true,force:true});}
+});
+
+test('legacy YAML normalization cache without a v13 observation is re-analyzed and backfilled',async()=>{
+  const root=await mkdtemp(path.join(os.tmpdir(),'umb-yaml-legacy-cache-')),knowledge=path.join(root,'knowledge'),filename=path.join(root,'memory.sqlite');
+  await mkdir(knowledge);await writeFile(path.join(knowledge,'home.yaml'),screen('home','Home'));
+  const store=new Store(filename,'yaml-legacy-cache');
+  try{
+    const initialInputs:string[]=[],writer=testLearningWriter(store,{inputs:initialInputs});
+    await reconcile(knowledge,store,writer);assert.equal(initialInputs.length,1);
+    // Simulate a pre-v13 migrated database: the YAML fingerprint and graph remain, but
+    // candidate observations were not present in that schema.
+    // Test-only legacy fixture: bypass the v13 immutability trigger to model a
+    // database migrated before candidate observations existed.
+    runFixtureSql(filename,'DROP TRIGGER memory_candidate_observations_no_delete');
+    runFixtureSql(filename,"DELETE FROM memory_candidate_observations WHERE project_id=? AND environment=? AND source_kind='yaml_document'",store.projectId,store.memoryEnvironment);
+    runFixtureSql(filename,"CREATE TRIGGER memory_candidate_observations_no_delete BEFORE DELETE ON memory_candidate_observations BEGIN SELECT RAISE(ABORT,'candidate observations are immutable'); END");
+    assert.equal((store.db.prepare('SELECT COUNT(*) count FROM yaml_record_fingerprints WHERE project_id=? AND environment=?').get(store.projectId,store.memoryEnvironment) as any).count,1);
+
+    const repairInputs:string[]=[],repairWriter=testLearningWriter(store,{inputs:repairInputs});
+    await reconcile(knowledge,store,repairWriter);
+    assert.equal(repairInputs.length,1,'a legacy normalization without exact candidate provenance must be re-analyzed');
+    assert.equal((store.listCandidateObservations({source_kind:'yaml_document',source_key:'screen:home'})).length,1,'reconciliation creates the missing exact observation');
+    assert.equal((store.getByTypeKey('screen','home') as any).display_name,'Home','legacy cache repair still commits the complete graph');
+  }finally{store.close();await rm(root,{recursive:true,force:true});}
 });
