@@ -97,7 +97,42 @@ Persistent graph memory is available for context/search/read and reuse across UM
 
 For Jira-backed work, supply an explicit issue key and configure your Jira MCP independently; use it to read that issue's description/custom fields and, when authorized, for normal Jira comments. UMB has no issue discovery, no general UMB Jira client, and does not configure or replace your Jira MCP. The skill requires the exact supplied key and forbids searching/selecting issues.
 
-UMB's only narrow Jira write surfaces are the experimental CLI screenshot-comment publisher and `jira_publish_screenshot_table` MCP tool. They are not a general reporting client. The CLI is local-only by default; its network path requires both `--write` and `--experimental-inline-wiki`, managed redacted screenshot artifacts, and an HTTPS Jira Cloud origin. Legacy inline-wiki rendering is experimental and not guaranteed generally. Structured MCP writes also require explicit write flags and exact task authorization. Never use either against production. **The prior one-call Jira authorization has been consumed; no further Jira writes are authorized.** This README authorizes no write.
+UMB's only narrow Jira write surfaces are the experimental CLI screenshot-comment publisher and `jira_publish_screenshot_table` MCP tool. They are not general comment/reporting clients: the MCP tool publishes a bounded table with a managed screenshot; use your separately configured Jira MCP for ordinary comments. Never use either UMB publisher against production.
+
+#### Credentials and MCP-host setup
+
+Create an Atlassian API token for the Jira account at [Atlassian API tokens](https://id.atlassian.com/manage-profile/security/api-tokens). That account must be able to browse the target non-production issue and add comments and attachments. UMB reads `JIRA_EMAIL` and `JIRA_API_TOKEN` from the **UMB process environment** by default. Supply them to the UMB MCP server process using your MCP host's environment/secret mechanism, then restart that server. This applies to any MCP host; OpenCode is not required. If you launch the MCP host from a terminal, its child UMB server inherits that terminal's environment.
+
+PowerShell (session-scoped; the token is masked while entered):
+
+```powershell
+$env:JIRA_EMAIL = Read-Host "Jira account email"
+$secureToken = Read-Host "Atlassian API token" -AsSecureString
+$tokenPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureToken)
+try {
+    $env:JIRA_API_TOKEN = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($tokenPointer)
+} finally {
+    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($tokenPointer)
+}
+# Launch/restart your MCP host from this shell, or inject these variables
+# into the UMB MCP server through the host's secure environment mechanism.
+```
+
+Bash (session-scoped; the token is not echoed or placed in shell history):
+
+```bash
+read -r -p 'Jira account email: ' JIRA_EMAIL
+export JIRA_EMAIL
+read -r -s -p 'Atlassian API token: ' JIRA_API_TOKEN
+printf '\n'
+export JIRA_API_TOKEN
+# Launch/restart your MCP host from this shell, or inject these variables
+# into the UMB MCP server through the host's secure environment mechanism.
+```
+
+For a desktop MCP host, use its documented secure environment injection or a local wrapper; setting variables in a separate terminal does not change an already-running host. These variables are available in plaintext to the UMB process and its children, so do not store them in project files, commit them, or expose them in logs. Credentials only make API access possible; they do not authorize a write.
+
+Both publishers default to dry-run. The CLI network path requires `--write` and `--experimental-inline-wiki`, an HTTPS Jira Cloud origin, `artifacts.redact_sensitive: true`, and an image inside the managed `.umb-managed` artifacts directory. The MCP tool requires both `write: true` and `experimental_inline_wiki: true`, plus a valid managed image and bounded table data. Every write additionally requires fresh, exact task authorization naming the non-production issue, site, and operation. Inline wiki rendering remains experimental and must be checked in Jira. The previous one-call authorization is consumed; it grants no future writes. This README authorizes no write.
 
 To locate existing results, use the explicitly supplied issue in your Jira MCP and inspect its comments; use the referenced Jira attachment to view the image. UMB's CLI prints the result of its local/dry-run operation, but does not provide a Jira browsing interface. Do not report an attachment as uploaded unless Jira confirms it.
 
