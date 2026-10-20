@@ -1,6 +1,6 @@
 import test, { afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile, access } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile, access, realpath } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
@@ -21,7 +21,7 @@ const readyHealth: Extract<NlpResponse, { op: 'health' }> = {
 };
 
 async function tempDir(): Promise<string> {
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'umb-memory-doctor-'));
+  const dir = await realpath(await mkdtemp(path.join(os.tmpdir(), 'umb-memory-doctor-')));
   directories.push(dir);
   return dir;
 }

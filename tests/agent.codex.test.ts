@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, writeFile, symlink, lstat, readdir, rm, rename } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, symlink, lstat, readdir, rm, rename, realpath } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { CODEX_SKILL, agentDoctor, codexDoctor, installAgentSkill, installCodexSkill, inspectAgentSkill, inspectCodexSkill, uninstallAgentSkill, uninstallCodexSkill } from '../src/agent/codex.js';
 
 async function fixture(fn: (cwd: string, home: string) => Promise<void>): Promise<void> {
-  const base = await mkdtemp(path.join(os.tmpdir(), 'umb-agent-'));
+  const base = await mkdtemp(path.join(await realpath(os.tmpdir()), 'umb-agent-'));
   const cwd = path.join(base, 'project'); const home = path.join(base, 'home');
   await mkdir(cwd); await mkdir(home);
   try { await fn(cwd, home); } finally { await rm(base, { recursive: true, force: true }); }
@@ -232,8 +232,10 @@ test('restored quarantine data is reported accurately when residual sibling prev
   }).then(() => { throw new Error('Expected changed target to be reported.'); }, error => error as Error);
   assert.match(failure.message, /moved file was restored at/); assert.match(failure.message, /quarantine cleanup failed at/);
   assert.doesNotMatch(failure.message, /Recovery entry:/); assert.deepEqual(await readFile(target), racing);
-  const quarantine = failure.message.match(/quarantine cleanup failed at ([^:]+):/)?.[1]; assert.ok(quarantine);
-  assert.equal(await readFile(path.join(quarantine!, 'residual-sibling'), 'utf8'), 'leave me');
+  const parent = path.dirname(target);
+  const quarantine = (await readdir(parent, { withFileTypes: true })).find(entry => entry.isDirectory() && entry.name.startsWith('.umb-skill-quarantine-'));
+  assert.ok(quarantine);
+  assert.equal(await readFile(path.join(parent, quarantine!.name, 'residual-sibling'), 'utf8'), 'leave me');
   assert.equal(await readFile(saved, 'utf8'), 'initial conflict');
 }));
 

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile, symlink } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile, symlink, realpath } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -23,7 +23,7 @@ async function makeBundle(root: string, marker?: string, executable = true) {
 }
 
 test('packaged module uses only the sidecar at the bundle path, never configured Python', async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'umb-runtime-bundle-'));
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'umb-runtime-bundle-')));
   try {
     const modulePath = await makeBundle(root, JSON.stringify({ format: 2, repository: 'test', payload: 'payload' }));
     const executableName = process.platform === 'win32' ? 'umb-memory-sidecar.exe' : 'umb-memory-sidecar';
@@ -40,7 +40,7 @@ test('damaged packaged bundles fail closed instead of falling back to configured
     ['unsupported marker', JSON.stringify({ format: 1, payload: 'payload' }), true],
     ['missing sidecar', JSON.stringify({ format: 2, payload: 'payload' }), false],
   ] as const) {
-    const root = await mkdtemp(path.join(os.tmpdir(), `umb-runtime-${label.replaceAll(' ', '-')}-`));
+    const root = await realpath(await mkdtemp(path.join(os.tmpdir(), `umb-runtime-${label.replaceAll(' ', '-')}-`)));
     try {
       const modulePath = await makeBundle(root, marker, executable);
       assert.equal(resolveNlpRuntime(config, pathToFileURL(modulePath).href), undefined, label);
@@ -49,7 +49,7 @@ test('damaged packaged bundles fail closed instead of falling back to configured
 });
 
 test('only non-packaged development modules use configured Python, with source and dist sidecar paths', async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'umb-runtime-dev-'));
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'umb-runtime-dev-')));
   try {
     const sourceModule = path.join(root, 'src', 'memory', 'runtime.ts');
     const distModule = path.join(root, 'dist', 'src', 'memory', 'runtime.js');
@@ -65,8 +65,8 @@ test('only non-packaged development modules use configured Python, with source a
 });
 
 test('configured patterns resolve against config root and reject missing, escaping, and symlink paths', async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'umb-pattern-root-'));
-  const outside = await mkdtemp(path.join(os.tmpdir(), 'umb-pattern-outside-'));
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'umb-pattern-root-')));
+  const outside = await realpath(await mkdtemp(path.join(os.tmpdir(), 'umb-pattern-outside-')));
   try {
     const pattern = path.join(root, 'rules.json');
     await writeFile(pattern, '{"schema_version":1}');
