@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,readFile,writeFile,rm,access,mkdir} from 'node:fs/promises';
+import {mkdtemp,readFile,writeFile,rm,access,mkdir,realpath} from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
@@ -61,7 +61,7 @@ test('spawned CLI help advertises workflow examples and JSON diagnostics',()=>{
 });
 
 test('spawned Codex agent commands use isolated project and user scopes without touching real home/config',async()=>{
- const root=await mkdtemp(path.join(os.tmpdir(),'umb-agent-cli-'));
+ const root=await realpath(await mkdtemp(path.join(os.tmpdir(),'umb-agent-cli-')));
   const home=path.join(root,'home'),codexHome=path.join(root,'codex-home'),project=path.join(root,'project');
   await mkdir(home);await mkdir(codexHome);await mkdir(project);
  try{
