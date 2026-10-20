@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "entity_rules": [
+    {"id": "page.checkout", "label": "PAGE", "phrase": "checkout page"},
+    {"id": "page.login", "label": "PAGE", "phrase": "login page"},
+    {"id": "action.submit_button", "label": "ACTION", "phrase": "submit button"},
+    {"id": "field.email_address", "label": "FIELD", "phrase": "email address"},
+    {"id": "rule.required_field", "label": "RULE", "phrase": "required field"},
+    {"id": "locator.save_button", "label": "LOCATOR", "phrase": "#SaveBtn"},
+    {"id": "test.login", "label": "TEST", "phrase": "TC-Login-01"},
+    {"id": "ac.login", "label": "AC", "phrase": "AC-17"}
+  ],
+  "relation_rules": [
+    {"id": "relation.page_has_action", "relation": "HAS_ACTION", "source": "PAGE", "target": "ACTION", "cue": ["has"], "max_gap": 8},
+    {"id": "relation.action_navigates_page", "relation": "NAVIGATES_TO", "source": "ACTION", "target": "PAGE", "cue": ["opens"], "max_gap": 8},
+    {"id": "relation.page_navigates_page", "relation": "NAVIGATES_TO", "source": "PAGE", "target": "PAGE", "cue": ["links", "to"], "max_gap": 8},
+    {"id": "relation.field_has_validation", "relation": "HAS_VALIDATION", "source": "FIELD", "target": "RULE", "cue": ["must", "be"], "max_gap": 8},
+    {"id": "relation.locator_belongs_page", "relation": "BELONGS_TO", "source": "LOCATOR", "target": "PAGE", "cue": ["belongs", "to"], "max_gap": 8},
+    {"id": "relation.test_covers_ac", "relation": "COVERS", "source": "TEST", "target": "AC", "cue": ["covers"], "max_gap": 8}
+  ]
+}

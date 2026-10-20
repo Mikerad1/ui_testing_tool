@@ -9,11 +9,11 @@ function options(argv) {
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i];
     const value = argv[i + 1];
-    if (!key?.startsWith('--') || !value) throw new Error('Expected --platform, --node-runtime, and --output options');
+    if (!key?.startsWith('--') || !value) throw new Error('Expected --platform, --node-runtime, --memory-sidecar, and --output options');
     result[key.slice(2)] = value;
   }
-  if (!['windows', 'linux'].includes(result.platform) || !result['node-runtime'] || !result.output) {
-    throw new Error('Usage: package-release.mjs --platform windows|linux --node-runtime <extracted-node-dir> --output <bundle-dir>');
+  if (!['windows', 'linux'].includes(result.platform) || !result['node-runtime'] || !result['memory-sidecar'] || !result.output) {
+    throw new Error('Usage: package-release.mjs --platform windows|linux --node-runtime <extracted-node-dir> --memory-sidecar <PyInstaller-onedir-dir> --output <bundle-dir>');
   }
   return result;
 }
@@ -22,15 +22,23 @@ const opts = options(process.argv.slice(2));
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const output = path.resolve(opts.output);
 const runtime = path.resolve(opts['node-runtime']);
+const memorySidecar = path.resolve(opts['memory-sidecar']);
+const sidecarExecutableName = opts.platform === 'windows' ? 'umb-memory-sidecar.exe' : 'umb-memory-sidecar';
+const sidecarExecutable = path.join(memorySidecar, sidecarExecutableName);
 
 for (const required of ['dist', 'node_modules']) await readFile(path.join(root, required, required === 'dist' ? 'src/cli/index.js' : 'better-sqlite3/package.json'));
 await readFile(path.join(runtime, opts.platform === 'windows' ? 'node.exe' : 'bin/node'));
+await readFile(sidecarExecutable);
+await assertNoSymlinks(memorySidecar);
 await mkdir(output, { recursive: true });
 const payload = path.join(output, 'payload');
 await mkdir(payload, { recursive: true });
 for (const entry of ['dist', 'node_modules']) await cp(path.join(root, entry), path.join(payload, entry), { recursive: true, force: true, dereference: true });
 for (const entry of ['package.json', 'package-lock.json']) await cp(path.join(root, entry), path.join(payload, entry));
 await cp(runtime, path.join(payload, 'runtime'), { recursive: true, force: true, dereference: true });
+const stagedSidecar = path.join(payload, 'runtime', 'memory-sidecar');
+await cp(memorySidecar, stagedSidecar, { recursive: true, force: true, dereference: true });
+await readFile(path.join(stagedSidecar, sidecarExecutableName));
 for (const entry of ['LICENSE', 'README.md']) await cp(path.join(root, entry), path.join(output, entry));
 for (const entry of ['umb-update-helper.ps1', 'umb-update-helper.sh']) await cp(path.join(root, 'scripts', entry), path.join(output, entry));
 if (opts.platform === 'linux') await chmod(path.join(output, 'umb-update-helper.sh'), 0o755);
@@ -51,6 +59,8 @@ const smoke = spawnSync(bundledNode, ['-e', smokeCode], { cwd: payload, encoding
 if (smoke.error || smoke.status !== 0) throw new Error(`Bundled SQLite smoke failed: ${smoke.stderr || smoke.error?.message || smoke.status}`);
 
 async function assertNoSymlinks(directory) {
+  const rootInfo = await lstat(directory);
+  if (rootInfo.isSymbolicLink()) throw new Error(`Release bundle contains a symlink, unsupported by safe self-update: ${directory}`);
   for (const entry of await readdir(directory)) {
     const file = path.join(directory, entry);
     const info = await lstat(file);

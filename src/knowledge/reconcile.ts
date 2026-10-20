@@ -1,67 +1,263 @@
-import {createHash} from 'node:crypto';
-import {lstat,readFile,readdir} from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { lstat, readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
-import {parse} from 'yaml';
-import {z} from 'zod';
-import type {Store} from '../memory/store.js';
-import {workflowSchema} from '../workflow/contract.js';
+import { parse } from 'yaml';
+import { z } from 'zod';
+import type { Store } from '../memory/store.js';
+import type { LearningWriter } from '../memory/learning-writer.js';
+import { withNlpMetadata, type LearningAttributes, type YamlRecordFingerprint, type YamlReconciliationPlan } from '../memory/learning-types.js';
+import type {ValidatedYamlDocument} from '../memory/learning-writer.js';
+import { workflowSchema } from '../workflow/contract.js';
 
-const locator=z.object({by:z.enum(['role','label','placeholder','test_id','text','css']),role:z.string().optional(),name:z.string().optional(),value:z.string().optional(),exact:z.boolean().optional()}).strict();
-const common={schema_version:z.literal(1),id:z.string().min(1).max(120).regex(/^[\w-]+$/),name:z.string().min(1).max(300)};
-const schemas:any={
- application:z.object({...common,kind:z.literal('application'),base_url:z.string().url().optional(),start_screen:z.string().optional(),route_patterns:z.array(z.object({screen:z.string(),path:z.string()}).strict()).optional()}).strict(),
- role:z.object({...common,kind:z.literal('role'),permissions:z.array(z.string().max(150)).optional()}).strict(),
- screen:z.object({...common,kind:z.literal('screen'),route:z.string().optional(),landmarks:z.array(z.object({locator}).strict()).optional(),elements:z.array(z.object({id:z.string().min(1).max(120),description:z.string().optional(),locator,fallback_locators:z.array(locator).optional(),sensitive:z.boolean().optional()}).strict()).optional(),actions:z.array(z.object({id:z.string(),element:z.string(),effect:z.object({navigates_to:z.string().optional()}).strict().optional()}).strict()).optional()}).strict(),
- workflow:workflowSchema,
-  navigation_rules:z.object({schema_version:z.literal(1),id:z.string().min(1).max(120).regex(/^[\w-]+$/),name:z.string().min(1).max(300).default('Navigation rules'),kind:z.literal('navigation_rules'),rules:z.array(z.object({id:z.string().min(1).max(120),from:z.string(),to:z.string(),via:z.object({action:z.enum(['click','navigate']),target:locator.optional()}).strict(),preconditions:z.array(z.record(z.unknown()).refine(x=>Object.keys(x).length>0)).max(20).optional(),verify:z.object({condition:z.string().min(1).max(120),pattern:z.string().max(500).optional()}).strict().optional()}).strict())}).strict()
+const locator = z.object({
+  by: z.enum(['role', 'label', 'placeholder', 'test_id', 'text', 'css']),
+  role: z.string().optional(),
+  name: z.string().optional(),
+  value: z.string().optional(),
+  exact: z.boolean().optional(),
+}).strict();
+const common = { schema_version: z.literal(1), id: z.string().min(1).max(120).regex(/^[\w-]+$/), name: z.string().min(1).max(300) };
+const schemas: Record<string, z.ZodTypeAny> = {
+  application: z.object({ ...common, kind: z.literal('application'), base_url: z.string().url().optional(), start_screen: z.string().optional(), route_patterns: z.array(z.object({ screen: z.string(), path: z.string() }).strict()).optional() }).strict(),
+  role: z.object({ ...common, kind: z.literal('role'), permissions: z.array(z.string().max(150)).optional() }).strict(),
+  screen: z.object({ ...common, kind: z.literal('screen'), route: z.string().optional(), landmarks: z.array(z.object({ locator }).strict()).optional(), elements: z.array(z.object({ id: z.string().min(1).max(120), description: z.string().optional(), locator, fallback_locators: z.array(locator).optional(), sensitive: z.boolean().optional() }).strict()).optional(), actions: z.array(z.object({ id: z.string(), element: z.string(), effect: z.object({ navigates_to: z.string().optional() }).strict().optional() }).strict()).optional() }).strict(),
+  workflow: workflowSchema,
+  navigation_rules: z.object({ schema_version: z.literal(1), id: z.string().min(1).max(120).regex(/^[\w-]+$/), name: z.string().min(1).max(300).default('Navigation rules'), kind: z.literal('navigation_rules'), rules: z.array(z.object({ id: z.string().min(1).max(120), from: z.string(), to: z.string(), via: z.object({ action: z.enum(['click', 'navigate']), target: locator.optional() }).strict(), preconditions: z.array(z.record(z.unknown()).refine(value => Object.keys(value).length > 0)).max(20).optional(), verify: z.object({ condition: z.string().min(1).max(120), pattern: z.string().max(500).optional() }).strict().optional() }).strict()) }).strict(),
 };
-const hashId=(s:string)=>createHash('sha1').update(s).digest('hex');
-const canonical=(value:any):string=>Array.isArray(value)?`[${value.map(canonical).join(',')}]`:value&&typeof value==='object'?`{${Object.keys(value).sort().map(k=>`${JSON.stringify(k)}:${canonical(value[k])}`).join(',')}}`:JSON.stringify(value);
-const toPosixRelative=(root:string,file:string)=>path.relative(root,file).split(path.sep).join('/');
-type Doc={file:string;doc:any;hash:string}; type Entity={type:string;key:string;name:string;attrs:any;hash:string;parent?:string;source:string}; type Edge={key:string;from:string;to:string;relation:string;attrs:any;source:string};
-async function walk(dir:string):Promise<string[]>{const out:string[]=[];for(const e of await readdir(dir,{withFileTypes:true})){const p=path.join(dir,e.name);if(e.isSymbolicLink())throw Error(`Knowledge symlink not allowed: ${p}`);if(e.isDirectory())out.push(...await walk(p));else if(/\.ya?ml$/i.test(e.name))out.push(p);}return out.sort();}
-export async function reconcile(root:string,store:Store){
- let all:string[]=[];try{all=await walk(root);}catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')throw e;}
- const docs:Doc[]=[];for(const file of all){if(!(await lstat(file)).isFile())continue;const text=await readFile(file,'utf8');if(text.length>1048576)throw Error(`YAML too large: ${file}`);const raw=parse(text,{uniqueKeys:true});if(!raw||typeof raw!=='object'||Array.isArray(raw)||!schemas[raw.kind])throw Error(`Invalid or unsupported document kind in ${file}`);docs.push({file,doc:schemas[raw.kind].parse(raw),hash:createHash('sha256').update(text).digest('hex')});}
- const byKey=new Map<string,Doc>();for(const x of docs){const k=`${x.doc.kind}:${x.doc.id}`;if(byKey.has(k))throw Error(`Duplicate knowledge id ${k}`);byKey.set(k,x);}
- const ref=(value:string,kind:string)=>{const k=value.includes(':')?value:`${kind}:${value}`;if(!byKey.has(k))throw Error(`Unknown ${kind} reference ${value}`);if(k.split(':')[0]!==kind)throw Error(`Wrong kind for reference ${value}; expected ${kind}`);return k;};
- const entityById=new Map<string,string>(),entities:Entity[]=[],edges:Edge[]=[];
-  for(const x of docs){const d=x.doc,k=`${d.kind}:${d.id}`,key=d.id,source=toPosixRelative(root,x.file);const push=(type:string,childKey:string,name:string,attrs:any,parent?:string)=>{const ck=`${type}:${childKey}`,id=hashId(`${store.projectId}:${ck}`);entities.push({type,key:childKey,name,attrs,hash:x.hash,parent,source});entityById.set(ck,id);return id;};push(d.kind,key,d.name,d);
-   if(d.kind==='screen')for(const el of d.elements??[]){push('ui_element',`${k}/${el.id}`,el.description??el.id,el,k);edges.push({key:`${k}:contains:${el.id}`,from:k,to:`ui_element:${k}/${el.id}`,relation:'CONTAINS',attrs:{},source});}
-   if(d.kind==='screen')for(const a of d.actions??[]){if(!(d.elements??[]).some((e:any)=>e.id===a.element))throw Error(`Unknown local element ${a.element} in ${k}`);const ak=`${k}/${a.id}`;push('action',ak,a.id,a,k);edges.push({key:`${k}:trigger:${a.id}`,from:k,to:`action:${ak}`,relation:'TRIGGERED_BY',attrs:{},source});edges.push({key:`${k}:uses:${a.id}`,from:`action:${ak}`,to:`ui_element:${k}/${a.element}`,relation:'USES_ELEMENT',attrs:{},source});if(a.effect?.navigates_to){const dest=ref(a.effect.navigates_to,'screen');edges.push({key:`${k}:nav:${a.id}`,from:`action:${ak}`,to:dest,relation:'NAVIGATES_TO',attrs:{},source});}}
- }
-    const app=docs.find(x=>x.doc.kind==='application');for(const x of docs){const d=x.doc,k=`${d.kind}:${d.id}`,source=toPosixRelative(root,x.file);if(d.kind==='application'){if(d.start_screen)ref(d.start_screen,'screen');for(const r of d.route_patterns??[]){const target=ref(r.screen,'screen');edges.push({key:`${k}:route:${r.path}:${target}`,from:k,to:target,relation:'HAS_SCREEN',attrs:{path:r.path},source});}}if(d.kind==='workflow'){if(d.start_screen)edges.push({key:`${k}:start`,from:k,to:ref(d.start_screen,'screen'),relation:'LEADS_TO',attrs:{kind:'start'},source});if(d.end_screen)edges.push({key:`${k}:end`,from:k,to:ref(d.end_screen,'screen'),relation:'LEADS_TO',attrs:{kind:'end'},source});if(d.requires?.role)edges.push({key:`${k}:role`,from:k,to:ref(d.requires.role,'role'),relation:'REQUIRES_ROLE',attrs:{},source});const checkTarget=(t:any)=>{if(t?.screen){const target=ref(t.screen,'screen'),screen=byKey.get(target)!.doc;if(t.element&&!(screen.elements??[]).some((e:any)=>e.id===t.element))throw Error(`Unknown local element ${t.element} in ${target}`);return target;}return undefined;};for(const check of d.preconditions??[])checkTarget(check.target);for(let i=0;i<d.steps.length;i++){const step=d.steps[i],target=checkTarget(step.target);if(target)edges.push({key:`${k}:step:${step.id}`,from:k,to:step.target.element?`ui_element:${target}/${step.target.element}`:target,relation:step.target.element?'USES_ELEMENT':'EXECUTES',attrs:{step_id:step.id,order:i,action:step.action},source});}}if(d.kind==='navigation_rules')for(const r of d.rules){const from=ref(r.from,'screen'),to=ref(r.to,'screen');edges.push({key:`${k}:rule:${r.id}`,from,to,relation:'NAVIGATES_TO',attrs:{via:r.via,preconditions:r.preconditions,verify:r.verify,rule_id:r.id},source});}}
- // Application route declarations also materialize direct routes for screen.route.
-  if(app)for(const x of docs.filter(y=>y.doc.kind==='screen'&&y.doc.route))edges.push({key:`application:${app.doc.id}:route:${x.doc.id}:${x.doc.route}`,from:`application:${app.doc.id}`,to:`screen:${x.doc.id}`,relation:'HAS_SCREEN',attrs:{path:x.doc.route},source:toPosixRelative(root,app.file)});
- // Resolve deterministic IDs and detect source-independent ownership keys before SQL.
-  const activeNodes=new Set<string>(),activeEdges=new Set<string>(),sourcePaths=new Set<string>();
- store.db.transaction(()=>{
-   const now=new Date().toISOString();
-   const nodeId=(type:string,key:string)=>{const owned=store.db.prepare('SELECT entity_id FROM yaml_ownership WHERE project_id=? AND entity_type=? AND entity_key=? AND tombstone=0').get(store.projectId,type,key) as any;return owned?.entity_id??hashId(`${store.projectId}:${type}:${key}`);};
-   const resolve=(reference:string)=>{const [type='unknown',...rest]=reference.split(':');return nodeId(type,rest.join(':'));};
-    store.db.prepare('UPDATE yaml_sources SET active=0 WHERE project_id=?').run(store.projectId);
-     for(const x of docs){const rel=toPosixRelative(root,x.file);sourcePaths.add(rel);store.db.prepare(`INSERT INTO yaml_sources(project_id,path,hash,imported_at,active) VALUES(?,?,?,?,1) ON CONFLICT(project_id,path) DO UPDATE SET hash=excluded.hash,imported_at=excluded.imported_at,active=1`).run(store.projectId,rel,x.hash,now);}
-    const saveOwner=(source:string,type:string,key:string,id:string,hash:string,conflict:string,conflicting:string|null)=>{const owners=store.db.prepare('SELECT source_path FROM yaml_ownership WHERE project_id=? AND entity_type=? AND entity_key=? AND tombstone=0').all(store.projectId,type,key) as {source_path:string}[];const previous=owners[0]?.source_path;if(previous){store.db.prepare('UPDATE yaml_ownership SET source_path=?,entity_id=?,hash=?,tombstone=0,conflict_status=?,conflicting_entity_id=? WHERE project_id=? AND source_path=? AND entity_type=? AND entity_key=?').run(source,id,hash,conflict,conflicting,store.projectId,previous,type,key);for(const duplicate of owners.slice(1))store.db.prepare('UPDATE yaml_ownership SET tombstone=1 WHERE project_id=? AND source_path=? AND entity_type=? AND entity_key=?').run(store.projectId,duplicate.source_path,type,key);}else store.db.prepare(`INSERT INTO yaml_ownership(project_id,source_path,entity_type,entity_key,entity_id,hash,tombstone,conflict_status,conflicting_entity_id) VALUES(?,?,?,?,?,?,0,?,?) ON CONFLICT(project_id,source_path,entity_type,entity_key) DO UPDATE SET entity_id=excluded.entity_id,hash=excluded.hash,tombstone=0,conflict_status=excluded.conflict_status,conflicting_entity_id=excluded.conflicting_entity_id`).run(store.projectId,source,type,key,id,hash,conflict,conflicting);};
-   for(const e of entities){const id=nodeId(e.type,e.key),occupied=store.db.prepare('SELECT id,origin FROM nodes WHERE project_id=? AND type=? AND canonical_key=? AND tombstone=0 AND id<>? LIMIT 1').get(store.projectId,e.type,e.key,id) as any;let stable=e.key;if(occupied)stable=`yaml:${hashId(`${store.projectId}:${e.type}:${e.key}`)}`;
-     store.db.prepare(`INSERT INTO nodes(id,project_id,type,stable_key,canonical_key,display_name,attributes_json,origin,verification_status,confidence,content_hash,tombstone,conflict_status,conflicting_node_id,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET display_name=excluded.display_name,attributes_json=excluded.attributes_json,content_hash=excluded.content_hash,tombstone=0,updated_at=excluded.updated_at`).run(id,store.projectId,e.type,stable,e.key,e.name,JSON.stringify(e.attrs),'yaml','proposed',0.7,e.hash,0,occupied?'conflict':'none',occupied?.id??null,now);
-     activeNodes.add(id);if(occupied){store.db.prepare("UPDATE nodes SET conflict_status='conflict',conflicting_node_id=? WHERE project_id=? AND id=?").run(id,store.projectId,occupied.id);store.db.prepare("UPDATE nodes SET verification_status='stale' WHERE project_id=? AND id=? AND origin<>'yaml'").run(store.projectId,occupied.id);}
-      saveOwner(e.source,e.type,e.key,id,e.hash,occupied?'conflict':'none',occupied?.id??null);
-   }
-     const previousYamlEdgeIds=new Set((store.db.prepare("SELECT entity_id FROM yaml_ownership WHERE project_id=? AND entity_type='edge' AND tombstone=0").all(store.projectId) as any[]).map(x=>x.entity_id));
-     for(const edge of edges){const from=resolve(edge.from),to=resolve(edge.to),key=edge.key,attrs=canonical(edge.attrs),stableKey=`${key}:${hashId(`${from}:${to}:${edge.relation}:${attrs}`)}`,eid=hashId(`${store.projectId}:edge:${stableKey}`);const matches=store.db.prepare("SELECT id,attributes_json FROM edges WHERE project_id=? AND origin='agent' AND from_node_id=? AND to_node_id=? AND relation_type=? AND tombstone=0 ORDER BY id").all(store.projectId,from,to,edge.relation) as any[];const conflicts=matches.filter(x=>canonical(JSON.parse(x.attributes_json))!==attrs),conflict=conflicts.length>0;store.db.prepare(`INSERT INTO edges(id,project_id,from_node_id,to_node_id,relation_type,attributes_json,origin,verification_status,tombstone,created_at,updated_at,conflict_status,conflicting_edge_id,stable_key) VALUES(?,?,?,?,?,?,?, ?,0,?,?,?,?,?) ON CONFLICT(project_id,origin,stable_key) DO UPDATE SET tombstone=0,updated_at=excluded.updated_at,conflict_status=excluded.conflict_status,conflicting_edge_id=excluded.conflicting_edge_id`).run(eid,store.projectId,from,to,edge.relation,attrs,'yaml','proposed',now,now,conflict?'conflict':'none',conflicts[0]?.id??null,stableKey);activeEdges.add(eid);for(const agent of conflicts){store.db.prepare("UPDATE edges SET conflict_status='conflict',conflicting_edge_id=? WHERE project_id=? AND id=?").run(eid,store.projectId,agent.id);store.db.prepare("UPDATE edges SET verification_status='stale' WHERE project_id=? AND id=?").run(store.projectId,agent.id);}saveOwner(edge.source,'edge',key,eid,'',conflict?'conflict':'none',conflicts[0]?.id??null);}
-    for(const id of previousYamlEdgeIds)if(!activeEdges.has(id))store.db.prepare('UPDATE edges SET tombstone=1,updated_at=? WHERE project_id=? AND id=?').run(now,store.projectId,id);
-   for(const row of store.db.prepare("SELECT entity_id,entity_type,entity_key FROM yaml_ownership WHERE project_id=? AND tombstone=0").all(store.projectId) as any[]){if(row.entity_type==='edge'&&!activeEdges.has(row.entity_id)){store.db.prepare('UPDATE yaml_ownership SET tombstone=1 WHERE project_id=? AND entity_type=? AND entity_key=?').run(store.projectId,row.entity_type,row.entity_key);store.db.prepare('UPDATE edges SET tombstone=1,updated_at=? WHERE project_id=? AND id=?').run(now,store.projectId,row.entity_id);}else if(row.entity_type!=='edge'&&!activeNodes.has(row.entity_id)){store.db.prepare('UPDATE yaml_ownership SET tombstone=1 WHERE project_id=? AND entity_type=? AND entity_key=?').run(store.projectId,row.entity_type,row.entity_key);store.db.prepare('UPDATE nodes SET tombstone=1,updated_at=? WHERE project_id=? AND id=? AND origin=\'yaml\'').run(now,store.projectId,row.entity_id);}}
-   for(const s of store.db.prepare('SELECT path FROM yaml_sources WHERE project_id=?').all(store.projectId) as {path:string}[])if(!sourcePaths.has(s.path))store.db.prepare('UPDATE yaml_sources SET active=0 WHERE project_id=? AND path=?').run(store.projectId,s.path);
-  })();
- return docs.length;
+
+const toPosixRelative = (root: string, file: string) => path.relative(root, file).split(path.sep).join('/');
+type Doc = { file: string; doc: any; hash: string };
+type RedactedDoc=Doc&{validated:ValidatedYamlDocument};
+type PreparedDoc = Doc & { normalized: string; fingerprint:YamlRecordFingerprint; observation?:import('../memory/store.js').CandidateObservationInput };
+type Entity = { type: string; key: string; name: string; attrs: LearningAttributes; hash: string; parent?: string; source: string };
+type Edge = { key: string; from: string; to: string; relation: string; attrs: LearningAttributes; source: string };
+const YAML_PROJECTION_VERSION='yaml-projection-v1';
+
+function validateReferences(docs:Array<{doc:any}>):void{
+  const byKey=new Map<string,{doc:any}>();
+  for(const entry of docs){const key=`${entry.doc.kind}:${entry.doc.id}`;if(byKey.has(key))throw new Error('Duplicate knowledge identity');byKey.set(key,entry);}
+  const ref=(value:string,kind:string)=>{
+    const key=value.includes(':')?value:`${kind}:${value}`;
+    if(!byKey.has(key))throw new Error('Knowledge reference is missing');
+    if(key.split(':')[0]!==kind)throw new Error('Knowledge reference has the wrong kind');
+    return key;
+  };
+  for(const entry of docs){
+    const doc=entry.doc;
+    if(doc.kind==='screen')for(const action of doc.actions??[]){
+      if(!(doc.elements??[]).some((element:any)=>element.id===action.element))throw new Error('Knowledge action references an unknown element');
+      if(action.effect?.navigates_to)ref(action.effect.navigates_to,'screen');
+    }
+    if(doc.kind==='application'){
+      if(doc.start_screen)ref(doc.start_screen,'screen');
+      for(const route of doc.route_patterns??[])ref(route.screen,'screen');
+    }
+    if(doc.kind==='workflow'){
+      if(doc.start_screen)ref(doc.start_screen,'screen');
+      if(doc.end_screen)ref(doc.end_screen,'screen');
+      if(doc.requires?.role)ref(doc.requires.role,'role');
+      const checkTarget=(target:any)=>{
+        if(!target?.screen)return;
+        const targetKey=ref(target.screen,'screen'),screen=byKey.get(targetKey)!.doc;
+        if(target.element&&!(screen.elements??[]).some((element:any)=>element.id===target.element))throw new Error('Workflow target references an unknown element');
+      };
+      for(const check of doc.preconditions??[])checkTarget(check.target);
+      for(const step of doc.steps)checkTarget(step.target);
+    }
+    if(doc.kind==='navigation_rules')for(const rule of doc.rules){ref(rule.from,'screen');ref(rule.to,'screen');}
+  }
+}
+
+async function walk(dir: string): Promise<string[]> {
+  const out: string[] = [];
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    const filename = path.join(dir, entry.name);
+    if (entry.isSymbolicLink()) throw new Error(`Knowledge symlink not allowed: ${filename}`);
+    if (entry.isDirectory()) out.push(...await walk(filename));
+    else if (/\.ya?ml$/i.test(entry.name)) out.push(filename);
+  }
+  return out.sort();
+}
+
+export async function reconcile(root: string, store: Store, writer: LearningWriter): Promise<number> {
+  await writer.ensureReady();
+  let all: string[] = [];
+  try { all = await walk(root); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+
+  const rawDocs: Doc[] = [];
+  for (const file of all) {
+    if (!(await lstat(file)).isFile()) continue;
+    const text = await readFile(file, 'utf8');
+    if (Buffer.byteLength(text, 'utf8') > 1_048_576) throw new Error('Knowledge document is too large');
+    let raw: unknown;
+    try { raw = parse(text, { uniqueKeys: true }); } catch { throw new Error('Knowledge document could not be parsed safely'); }
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw) || typeof (raw as any).kind !== 'string' || !schemas[(raw as any).kind]) {
+      throw new Error('Invalid or unsupported knowledge document');
+    }
+    const schema = schemas[(raw as any).kind]!;
+    let parsed: any;
+    try { parsed = schema.parse(raw); } catch { throw new Error('Knowledge document failed validation'); }
+    const rawHash=createHash('sha256').update(text).digest('hex');
+    rawDocs.push({file,doc:parsed,hash:rawHash});
+  }
+
+  const redactedDocs:RedactedDoc[]=[];
+  for(const entry of rawDocs){
+    const sourcePath=toPosixRelative(root,entry.file),schema=schemas[entry.doc.kind]!;
+    const validated=await writer.validateYamlDocument(entry.doc,{sourcePath,documentKind:entry.doc.kind,documentId:entry.doc.id,rawHash:entry.hash,projectionVersion:YAML_PROJECTION_VERSION},value=>{
+      try{return schema.parse(value);}catch{throw new Error('Redacted knowledge document failed validation');}
+    });
+    redactedDocs.push({...entry,doc:validated.value,validated});
+  }
+
+  // Validate the complete redacted source set before allowing any NLP cache hit or analysis.
+  validateReferences(redactedDocs);
+
+  const docs:PreparedDoc[]=[];
+  for(const entry of redactedDocs){
+    const prepared=await writer.normalizeYamlDocument(entry.validated);
+    docs.push({...entry,doc:prepared.value,normalized:prepared.normalized,fingerprint:entry.validated.fingerprint,observation:prepared.observation});
+  }
+
+  const byKey = new Map<string, PreparedDoc>();
+  for (const entry of docs) {
+    const key = `${entry.doc.kind}:${entry.doc.id}`;
+    if (byKey.has(key)) throw new Error('Duplicate knowledge identity');
+    byKey.set(key, entry);
+  }
+  const ref = (value: string, kind: string) => {
+    const key = value.includes(':') ? value : `${kind}:${value}`;
+    if (!byKey.has(key)) throw new Error('Knowledge reference is missing');
+    if (key.split(':')[0] !== kind) throw new Error('Knowledge reference has the wrong kind');
+    return key;
+  };
+
+  const entities: Entity[] = [];
+  const edges: Edge[] = [];
+  for (const entry of docs) {
+    const doc = entry.doc;
+    const key = `${doc.kind}:${doc.id}`;
+    const source = toPosixRelative(root, entry.file);
+    const push = (type: string, entityKey: string, name: string, attrs: Record<string, unknown>, parent?: string) => {
+      entities.push({ type, key: entityKey, name, attrs: withNlpMetadata(attrs, entry.normalized), hash: entry.hash, parent, source });
+    };
+    push(doc.kind, doc.id, doc.name, doc);
+    if (doc.kind !== 'screen') continue;
+    for (const element of doc.elements ?? []) {
+      push('ui_element', `${key}/${element.id}`, element.description ?? element.id, element, key);
+      edges.push({ key: `${key}:contains:${element.id}`, from: key, to: `ui_element:${key}/${element.id}`, relation: 'CONTAINS', attrs: withNlpMetadata({}, entry.normalized), source });
+    }
+    for (const action of doc.actions ?? []) {
+      if (!(doc.elements ?? []).some((element: any) => element.id === action.element)) throw new Error('Knowledge action references an unknown element');
+      const actionKey = `${key}/${action.id}`;
+      push('action', actionKey, action.id, action, key);
+      edges.push({ key: `${key}:trigger:${action.id}`, from: key, to: `action:${actionKey}`, relation: 'TRIGGERED_BY', attrs: withNlpMetadata({}, entry.normalized), source });
+      edges.push({ key: `${key}:uses:${action.id}`, from: `action:${actionKey}`, to: `ui_element:${key}/${action.element}`, relation: 'USES_ELEMENT', attrs: withNlpMetadata({}, entry.normalized), source });
+      if (action.effect?.navigates_to) edges.push({ key: `${key}:nav:${action.id}`, from: `action:${actionKey}`, to: ref(action.effect.navigates_to, 'screen'), relation: 'NAVIGATES_TO', attrs: withNlpMetadata({}, entry.normalized), source });
+    }
+  }
+
+  const app = docs.find(entry => entry.doc.kind === 'application');
+  for (const entry of docs) {
+    const doc = entry.doc;
+    const key = `${doc.kind}:${doc.id}`;
+    const source = toPosixRelative(root, entry.file);
+    if (doc.kind === 'application') {
+      if (doc.start_screen) ref(doc.start_screen, 'screen');
+      for (const route of doc.route_patterns ?? []) {
+        const target = ref(route.screen, 'screen');
+        edges.push({ key: `${key}:route:${route.path}:${target}`, from: key, to: target, relation: 'HAS_SCREEN', attrs: withNlpMetadata({ path: route.path }, entry.normalized), source });
+      }
+    }
+    if (doc.kind === 'workflow') {
+      if (doc.start_screen) edges.push({ key: `${key}:start`, from: key, to: ref(doc.start_screen, 'screen'), relation: 'LEADS_TO', attrs: withNlpMetadata({ kind: 'start' }, entry.normalized), source });
+      if (doc.end_screen) edges.push({ key: `${key}:end`, from: key, to: ref(doc.end_screen, 'screen'), relation: 'LEADS_TO', attrs: withNlpMetadata({ kind: 'end' }, entry.normalized), source });
+      if (doc.requires?.role) edges.push({ key: `${key}:role`, from: key, to: ref(doc.requires.role, 'role'), relation: 'REQUIRES_ROLE', attrs: withNlpMetadata({}, entry.normalized), source });
+      const checkTarget = (target: any) => {
+        if (!target?.screen) return undefined;
+        const targetKey = ref(target.screen, 'screen');
+        const screen = byKey.get(targetKey)!.doc;
+        if (target.element && !(screen.elements ?? []).some((element: any) => element.id === target.element)) throw new Error('Workflow target references an unknown element');
+        return targetKey;
+      };
+      for (const check of doc.preconditions ?? []) checkTarget(check.target);
+      for (let index = 0; index < doc.steps.length; index += 1) {
+        const step = doc.steps[index]!;
+        const target = checkTarget(step.target);
+        if (target) edges.push({ key: `${key}:step:${step.id}`, from: key, to: step.target.element ? `ui_element:${target}/${step.target.element}` : target, relation: step.target.element ? 'USES_ELEMENT' : 'EXECUTES', attrs: withNlpMetadata({ step_id: step.id, order: index, action: step.action }, entry.normalized), source });
+      }
+    }
+    if (doc.kind === 'navigation_rules') {
+      for (const rule of doc.rules) edges.push({ key: `${key}:rule:${rule.id}`, from: ref(rule.from, 'screen'), to: ref(rule.to, 'screen'), relation: 'NAVIGATES_TO', attrs: withNlpMetadata({ via: rule.via, preconditions: rule.preconditions, verify: rule.verify, rule_id: rule.id }, entry.normalized), source });
+    }
+  }
+  if (app) {
+    for (const entry of docs.filter(item => item.doc.kind === 'screen' && item.doc.route)) {
+      edges.push({ key: `application:${app.doc.id}:route:${entry.doc.id}:${entry.doc.route}`, from: `application:${app.doc.id}`, to: `screen:${entry.doc.id}`, relation: 'HAS_SCREEN', attrs: withNlpMetadata({ path: entry.doc.route }, entry.normalized), source: toPosixRelative(root, app.file) });
+    }
+  }
+
+  const plan: YamlReconciliationPlan = {
+    sources: docs.map(entry => ({ path: toPosixRelative(root, entry.file), hash: entry.hash })),
+    entities,
+    edges,
+    recordFingerprints:docs.map(entry=>entry.fingerprint),
+    candidateObservations:docs.flatMap(entry=>entry.observation?[entry.observation]:[]),
+  };
+  return writer.commitReconciliation(plan);
 }
 
 /** Validate knowledge documents without opening a store or changing filesystem state. */
-export async function validateKnowledge(root:string):Promise<number>{
- let all:string[]=[];try{all=await walk(root);}catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')throw e;}
- const docs:Doc[]=[];for(const file of all){if(!(await lstat(file)).isFile())continue;const text=await readFile(file,'utf8');if(text.length>1048576)throw Error(`YAML too large: ${file}`);const raw=parse(text,{uniqueKeys:true});if(!raw||typeof raw!=='object'||Array.isArray(raw)||!schemas[raw.kind])throw Error(`Invalid or unsupported document kind in ${file}`);docs.push({file,doc:schemas[raw.kind].parse(raw),hash:createHash('sha256').update(text).digest('hex')});}
- const byKey=new Map<string,Doc>();for(const x of docs){const k=`${x.doc.kind}:${x.doc.id}`;if(byKey.has(k))throw Error(`Duplicate knowledge id ${k}`);byKey.set(k,x);}
- const ref=(value:string,kind:string)=>{const k=value.includes(':')?value:`${kind}:${value}`;if(!byKey.has(k))throw Error(`Unknown ${kind} reference ${value}`);if(k.split(':')[0]!==kind)throw Error(`Wrong kind for reference ${value}; expected ${kind}`);return k;};
-  for(const x of docs){const d=x.doc,k=`${d.kind}:${d.id}`;if(d.kind==='screen')for(const a of d.actions??[]){if(!(d.elements??[]).some((e:any)=>e.id===a.element))throw Error(`Unknown local element ${a.element} in ${k}`);if(a.effect?.navigates_to)ref(a.effect.navigates_to,'screen');}if(d.kind==='application'){if(d.start_screen)ref(d.start_screen,'screen');for(const r of d.route_patterns??[])ref(r.screen,'screen');}if(d.kind==='workflow'){if(d.start_screen)ref(d.start_screen,'screen');if(d.end_screen)ref(d.end_screen,'screen');if(d.requires?.role)ref(d.requires.role,'role');const checkTarget=(t:any)=>{if(!t?.screen)return;const target=ref(t.screen,'screen');if(t.element&&!(byKey.get(target)!.doc.elements??[]).some((e:any)=>e.id===t.element))throw Error(`Unknown local element ${t.element} in ${target}`);};for(const check of d.preconditions??[])checkTarget(check.target);for(const step of d.steps)checkTarget(step.target);}if(d.kind==='navigation_rules')for(const r of d.rules){ref(r.from,'screen');ref(r.to,'screen');}}
- return docs.length;
+export async function validateKnowledge(root: string): Promise<number> {
+  let all: string[] = [];
+  try { all = await walk(root); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  const docs: Doc[] = [];
+  for (const file of all) {
+    if (!(await lstat(file)).isFile()) continue;
+    const text = await readFile(file, 'utf8');
+    if (Buffer.byteLength(text, 'utf8') > 1_048_576) throw new Error(`YAML too large: ${file}`);
+    const raw = parse(text, { uniqueKeys: true });
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw) || !schemas[(raw as any).kind]) throw new Error(`Invalid or unsupported document kind in ${file}`);
+    docs.push({ file, doc: schemas[(raw as any).kind]!.parse(raw), hash: createHash('sha256').update(text).digest('hex') });
+  }
+  const byKey = new Map<string, Doc>();
+  for (const entry of docs) {
+    const key = `${entry.doc.kind}:${entry.doc.id}`;
+    if (byKey.has(key)) throw new Error(`Duplicate knowledge id ${key}`);
+    byKey.set(key, entry);
+  }
+  const ref = (value: string, kind: string) => {
+    const key = value.includes(':') ? value : `${kind}:${value}`;
+    if (!byKey.has(key)) throw new Error(`Unknown ${kind} reference ${value}`);
+    if (key.split(':')[0] !== kind) throw new Error(`Wrong kind for reference ${value}; expected ${kind}`);
+    return key;
+  };
+  for (const entry of docs) {
+    const doc = entry.doc;
+    const key = `${doc.kind}:${doc.id}`;
+    if (doc.kind === 'screen') {
+      for (const action of doc.actions ?? []) {
+        if (!(doc.elements ?? []).some((element: any) => element.id === action.element)) throw new Error(`Unknown local element ${action.element} in ${key}`);
+        if (action.effect?.navigates_to) ref(action.effect.navigates_to, 'screen');
+      }
+    }
+    if (doc.kind === 'application') {
+      if (doc.start_screen) ref(doc.start_screen, 'screen');
+      for (const route of doc.route_patterns ?? []) ref(route.screen, 'screen');
+    }
+    if (doc.kind === 'workflow') {
+      if (doc.start_screen) ref(doc.start_screen, 'screen');
+      if (doc.end_screen) ref(doc.end_screen, 'screen');
+      if (doc.requires?.role) ref(doc.requires.role, 'role');
+      const checkTarget = (target: any) => {
+        if (!target?.screen) return;
+        const targetKey = ref(target.screen, 'screen');
+        if (target.element && !((byKey.get(targetKey)!.doc.elements ?? []).some((element: any) => element.id === target.element))) throw new Error(`Unknown local element ${target.element} in ${targetKey}`);
+      };
+      for (const check of doc.preconditions ?? []) checkTarget(check.target);
+      for (const step of doc.steps) checkTarget(step.target);
+    }
+    if (doc.kind === 'navigation_rules') for (const rule of doc.rules) { ref(rule.from, 'screen'); ref(rule.to, 'screen'); }
+  }
+  return docs.length;
 }

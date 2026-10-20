@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { NLP_METADATA_KEY } from '../memory/learning-types.js';
 
 const safeId = z.string().min(1).max(120).regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/);
 const screenRef = z.union([safeId,z.string().max(127).regex(/^screen:[A-Za-z0-9][A-Za-z0-9_-]{0,119}$/)]);
@@ -82,6 +83,18 @@ export type WorkflowStep=StepBase & (
 );
 export type WorkflowDocument={schema_version:1;kind:'workflow';id:string;name:string;start_screen?:string;end_screen?:string;requires?:{role?:string;environment?:string[]};variables?:Record<string,{from_env:string;sensitive:boolean}>;preconditions?:WorkflowAssertion[];steps:WorkflowStep[];on_failure?:{capture?:('snapshot'|'screenshot'|'console_errors')[];stop:true}};
 export function parseWorkflowDocument(input:unknown):WorkflowDocument{return workflowSchema.parse(input) as WorkflowDocument;}
+export function parseStoredWorkflowDocument(input:unknown):WorkflowDocument{
+  if(!input||typeof input!=='object'||Array.isArray(input))return parseWorkflowDocument(input);
+  const copy={...(input as Record<string,unknown>)};
+  const metadata=copy[NLP_METADATA_KEY];
+  if(metadata!==undefined){
+    if(!metadata||typeof metadata!=='object'||Array.isArray(metadata))throw Error('Invalid stored workflow metadata');
+    const record=metadata as Record<string,unknown>;
+    if(record.protocol!==1||typeof record.normalized!=='string'||record.normalized.length>64*1024)throw Error('Invalid stored workflow metadata');
+    delete copy[NLP_METADATA_KEY];
+  }
+  return parseWorkflowDocument(copy);
+}
 export function resolveWorkflowVariables(workflow:WorkflowDocument,env:NodeJS.ProcessEnv=process.env):Record<string,string>{
   const resolved:Record<string,string>={};for(const [name,declaration] of Object.entries(workflow.variables??{})){const value=env[declaration.from_env];if(value===undefined)throw new Error(`Missing environment variable ${declaration.from_env} for workflow variable ${name}`);if(value.length>10_000)throw new Error(`Environment variable ${declaration.from_env} exceeds the workflow value limit`);resolved[name]=value;}return resolved;
 }

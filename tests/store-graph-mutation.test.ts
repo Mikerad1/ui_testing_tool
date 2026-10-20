@@ -1,0 +1,58 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdtemp,rm} from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import {Store} from '../src/memory/store.js';
+import {registerNextStoreGraphMutationFinalizer,storeLearningCommit} from '../src/memory/store-internal.js';
+import {withNlpMetadata} from '../src/memory/learning-types.js';
+import {testWriter} from './helpers/learning.js';
+
+test('Store graph mutation boundary captures bootstrap, graph writes, nested YAML reconciliation, and rolls back on finalizer failure',async()=>{
+  const root=await mkdtemp(path.join(os.tmpdir(),'store-graph-boundary-')),filename=path.join(root,'memory.sqlite'),calls:any[]=[];
+  let store:Store|undefined,removeNext:(()=>void)|undefined,failFinalizer=false;
+  try{
+    removeNext=registerNextStoreGraphMutationFinalizer(set=>{calls.push(set);if(failFinalizer)throw new Error('finalizer failure');});
+    store=new Store(filename,'boundary-project');removeNext();removeNext=undefined;
+    assert.equal(calls.length,1,'bootstrap insertion is finalized once before Store construction completes');
+    assert.equal(calls[0].nodes.some((change:any)=>change.next?.type==='application'),true);
+    const generation=()=> (store!.db.prepare('SELECT generation FROM memory_search_state WHERE project_id=? AND environment=?').get(store!.projectId,store!.memoryEnvironment) as any).generation;
+    const writer=testWriter(store),screen=await writer.propose({observation_id:'screen-one',type:'screen',stable_key:'screen-one',display_name:'Screen one',attributes:{id:'screen-one'}});
+    assert.equal(calls.length,2,'screen insertion finalizes once after bootstrap');assert(calls[1]!.changedNodeIds.includes(screen.id));
+    assert.equal((store.db.prepare('SELECT count(*) count FROM memory_search_values WHERE project_id=? AND environment=? AND node_id=?').get(store.projectId,store.memoryEnvironment,screen.id) as any).count,0,'unverified proposal is not indexed');
+    const element=await writer.propose({observation_id:'element-one',type:'ui_element',stable_key:'screen-one/button',display_name:'Submit button',attributes:{id:'submit'}});
+    assert.equal(calls.length,3);assert(calls[2]!.changedNodeIds.includes(element.id));
+    const edge=await writer.addEdge({observation_id:'edge-one',from_id:screen.id,to_id:element.id,relation:'CONTAINS',attributes:{}});
+    assert.equal(calls.length,4);assert(calls[3]!.changedEdgeIds.includes(edge.id));assert(calls[3]!.changedEdgeEndpoints.includes(screen.id));assert(calls[3]!.changedEdgeEndpoints.includes(element.id));
+    const action=await writer.propose({observation_id:'action-one',type:'action',stable_key:'open-submit',display_name:'Open submit',attributes:{id:'open-submit',element:'submit'}});
+    await writer.addEdge({observation_id:'triggered-by-one',from_id:screen.id,to_id:action.id,relation:'TRIGGERED_BY',attributes:{}});
+    assert(calls.at(-1)!.affectedActionNodeIds.includes(action.id),'TRIGGERED_BY changes identify dependent action nodes');
+    const beforeYaml=calls.length;await writer.commitReconciliation({sources:[{path:'yaml-screen.yaml',hash:'a'.repeat(64)}],entities:[{type:'screen',key:'yaml-screen',name:'YAML screen',attrs:withNlpMetadata({id:'yaml-screen'},'yaml screen'),hash:'a'.repeat(64),source:'yaml-screen.yaml'}],edges:[]});
+    assert.equal(calls.length,beforeYaml+1);assert(calls.at(-1)!.owners.some((change:any)=>change.next?.entity_key==='yaml-screen'));assert(calls.at(-1)!.sources.some((change:any)=>change.next?.path==='yaml-screen.yaml'));
+    const beforeDeactivate=calls.length;
+    await writer.commitReconciliation({sources:[],entities:[],edges:[]});
+    assert.equal(calls.length,beforeDeactivate+1);assert(calls.at(-1)!.changedSourcePaths.includes('yaml-screen.yaml'));assert(calls.at(-1)!.affectedOwnerEntityIds.length>0,'source deactivation includes owners from the deactivated source');
+    const beforeDuplicate=calls.length;
+    const beforeLedgerOnly=generation();
+    const duplicate=await writer.propose({observation_id:'screen-repeat',type:'screen',stable_key:'screen-one',display_name:'Screen one',attributes:{id:'screen-one'}});
+    assert.equal(duplicate.id,screen.id);assert.equal(calls.length,beforeDuplicate+1,'candidate-ledger/idempotent path finalizes once with an empty graph change set');assert.deepEqual(calls.at(-1)!.changedNodeIds,[]);assert.deepEqual(calls.at(-1)!.changedEdgeIds,[]);
+    assert.equal(generation(),beforeLedgerOnly,'candidate-ledger-only writes do not change search generation');
+    const beforeTombstone=generation();store.tombstoneEdge(edge.id);assert.equal(generation(),beforeTombstone+1);assert(calls.at(-1)!.changedEdgeIds.includes(edge.id));const tombstoneChange=calls.at(-1)!.edges.find((change:any)=>change.old?.id===edge.id);assert.equal(tombstoneChange.old.from_node_id,screen.id);assert.equal(tombstoneChange.next.to_node_id,element.id);
+    const prepared=storeLearningCommit.proposedNode(store,{type:'screen',stable_key:'prepared-node',display_name:'Prepared node',attributes:withNlpMetadata({id:'prepared-node'},'prepared node')});
+    assert(calls.at(-1)!.changedNodeIds.includes(prepared.id));
+    storeLearningCommit.preparedEdge(store,{from_id:screen.id,to_id:element.id,relation:'CONTAINS',attributes:withNlpMetadata({source:'prepared'},'prepared edge')});
+    assert(calls.at(-1)!.changedEdgeIds.length>0);
+    const makeVerified=async(key:string)=>{const node=await writer.propose({observation_id:`verified-${key}`,type:'screen',stable_key:`verified-${key}`,display_name:`Verified ${key}`,attributes:{id:`verified-${key}`}}),run=store!.createRun();store!.addEvidence({run_id:run,subject_node_id:node.id,kind:'assertion',outcome:'passed'});store!.finishRun(run,'passed');const beforeVerify=generation();assert.equal(store!.verify(node.id,run,{approved:true,source:'local_approver'}),true);assert.equal(generation(),beforeVerify+1);assert.equal((store!.db.prepare('SELECT count(*) count FROM memory_search_values WHERE project_id=? AND environment=? AND node_id=?').get(store!.projectId,store!.memoryEnvironment,node.id) as any).count>0,true,'verified node is incrementally indexed');return node;};
+    const old=await makeVerified('old');assert(calls[calls.length-1]!.changedNodeIds.includes(old.id));
+    const replacement=await makeVerified('new'),beforeSupersede=calls.length,beforeSupersedeGeneration=generation();assert.equal(store.supersede(old.id,replacement.id),true);assert.equal(calls.length,beforeSupersede+1);assert.equal(generation(),beforeSupersedeGeneration+1);assert(calls.at(-1)!.changedNodeIds.includes(old.id));assert.equal((store.db.prepare('SELECT count(*) count FROM memory_search_values WHERE project_id=? AND environment=? AND node_id=?').get(store.projectId,store.memoryEnvironment,old.id) as any).count,0,'superseded node index rows are removed');
+    const backfill=store.beginMemoryBackfill('c'.repeat(64)),records=store.memoryBackfillRecords(backfill,0,50),nodeRecord=records.find((item:any)=>item.kind==='node') as any,edgeRecord=records.find((item:any)=>item.kind==='edge') as any;
+    assert(nodeRecord&&edgeRecord);const beforeNodeBackfill=calls.length,beforeNodeBackfillGeneration=generation();await writer.reprocessBackfillNode(backfill,nodeRecord.record);assert.equal(calls.length,beforeNodeBackfill+1);assert.equal(generation(),beforeNodeBackfillGeneration+1);
+    const beforeEdgeBackfill=calls.length,beforeEdgeBackfillGeneration=generation();await writer.reprocessBackfillEdge(backfill,edgeRecord.record);assert.equal(calls.length,beforeEdgeBackfill+1);assert.equal(generation(),beforeEdgeBackfillGeneration+1);assert(calls.at(-1)!.changedEdgeIds.includes(edgeRecord.record.id));
+    const before=(store.db.prepare('SELECT count(*) count FROM nodes WHERE project_id=?').get(store.projectId) as any).count;
+    const beforeIndexRows=(store.db.prepare('SELECT count(*) count FROM memory_search_values WHERE project_id=?').get(store.projectId) as any).count,beforeGeneration=(store.db.prepare('SELECT generation FROM memory_search_state WHERE project_id=? AND environment=?').get(store.projectId,store.memoryEnvironment) as any).generation;
+    failFinalizer=true;
+    await assert.rejects(()=>writer.propose({observation_id:'rollback-node',type:'screen',stable_key:'rollback',display_name:'Rollback',attributes:{id:'rollback'}}));
+    assert.equal((store.db.prepare('SELECT count(*) count FROM nodes WHERE project_id=?').get(store.projectId) as any).count,before,'finalizer error rolls graph mutation back');
+    assert.equal((store.db.prepare('SELECT count(*) count FROM memory_search_values WHERE project_id=?').get(store.projectId) as any).count,beforeIndexRows,'finalizer error rolls search index changes back');assert.equal((store.db.prepare('SELECT generation FROM memory_search_state WHERE project_id=? AND environment=?').get(store.projectId,store.memoryEnvironment) as any).generation,beforeGeneration);
+  }finally{removeNext?.();store?.close();await rm(root,{recursive:true,force:true});}
+});

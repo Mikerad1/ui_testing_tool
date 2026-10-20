@@ -1,0 +1,16 @@
+{
+  "version": "3.13.16",
+  "release": "3.13.16-36805956071",
+  "targets": {
+    "windows-x64": {
+      "url": "https://github.com/actions/python-versions/releases/download/3.13.16-36805956071/python-3.13.16-win32-x64.zip",
+      "sha256": "80566a71bdc2f5e446daceb1c832e0f52d56cee8ff0e40de1d54131d5c68c487",
+      "archive": "zip"
+    },
+    "linux-x64": {
+      "url": "https://github.com/actions/python-versions/releases/download/3.13.16-36805956071/python-3.13.16-linux-22.04-x64.tar.gz",
+      "sha256": "1b505e67454851c1a91774a23d4cf9615db2d48a90fc0f50579e35c28e9e91b0",
+      "archive": "tar.gz"
+    }
+  }
+}

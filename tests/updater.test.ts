@@ -497,10 +497,11 @@ test('Windows launcher runs the helper after Node exits and preserves the caller
 
 test('Windows generated release launcher applies requests from payload CWD and propagates helper failure', { skip: process.platform !== 'win32' }, async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'umb generated release bundle '));
-  const runtimeRoot = path.join(tempRoot, 'node runtime'), bundleRoot = path.join(tempRoot, 'bundle with spaces');
+  const runtimeRoot = path.join(tempRoot, 'node runtime'), sidecarRoot = path.join(tempRoot, 'memory sidecar'), bundleRoot = path.join(tempRoot, 'bundle with spaces');
   await mkdir(runtimeRoot); await copyFile(process.execPath, path.join(runtimeRoot, 'node.exe'));
+  await mkdir(sidecarRoot); await writeFile(path.join(sidecarRoot, 'umb-memory-sidecar.exe'), 'fixture');
   try {
-    const packaged = spawnSync(process.execPath, [path.resolve('scripts/package-release.mjs'), '--platform', 'windows', '--node-runtime', runtimeRoot, '--output', bundleRoot], { encoding: 'utf8', timeout: 180000 });
+    const packaged = spawnSync(process.execPath, [path.resolve('scripts/package-release.mjs'), '--platform', 'windows', '--node-runtime', runtimeRoot, '--memory-sidecar', sidecarRoot, '--output', bundleRoot], { encoding: 'utf8', timeout: 180000 });
     assert.equal(packaged.status, 0, packaged.stderr);
     const currentPayload = path.join(bundleRoot, 'payload'), callerCwd = path.join(currentPayload, 'dist/src/cli');
     const stage = path.join(bundleRoot, '.umb-update-stage-generated-test');

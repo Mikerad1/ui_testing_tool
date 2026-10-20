@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "entity_rules": [
+    {"id": "demo.page.account", "label": "PAGE", "phrase": "account page"},
+    {"id": "demo.page.settings", "label": "PAGE", "phrase": "settings page"},
+    {"id": "demo.action.save_changes", "label": "ACTION", "phrase": "save changes"},
+    {"id": "demo.action.submit_form", "label": "ACTION", "phrase": "submit form"},
+    {"id": "demo.field.phone_number", "label": "FIELD", "phrase": "phone number"},
+    {"id": "demo.rule.required_field", "label": "RULE", "phrase": "required field"},
+    {"id": "demo.rule.valid_email", "label": "RULE", "phrase": "valid email"}
+  ],
+  "relation_rules": [
+    {"id": "demo.relation.page_has_action", "relation": "HAS_ACTION", "source": "PAGE", "target": "ACTION", "cue": ["offers"], "max_gap": 8},
+    {"id": "demo.relation.field_has_validation", "relation": "HAS_VALIDATION", "source": "FIELD", "target": "RULE", "cue": ["must", "be"], "max_gap": 8}
+  ]
+}
