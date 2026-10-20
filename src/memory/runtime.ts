@@ -8,10 +8,9 @@ import { createMemoryRedactor, type MemoryRedactor } from './redactor.js';
 import { LearningWriter, type NlpProcessor } from './learning-writer.js';
 import type { Store } from './store.js';
 
-// Keep persistent learning disabled until every FR-07 acceptance gate passes; do not enable it as part of this work.
-const PERSISTENT_LEARNING_WRITES_ENABLED = false;
+// Bulk backfill remains a separate, disabled capability regardless of project opt-in.
 const MEMORY_BACKFILL_ENABLED = false;
-export const persistentLearningWritesEnabled=()=>PERSISTENT_LEARNING_WRITES_ENABLED;
+export const persistentLearningWritesEnabled=(config?:Pick<Config,'memory'>|null)=>config?.memory?.persistent_learning_writes===true;
 export const memoryBackfillEnabled=()=>MEMORY_BACKFILL_ENABLED;
 
 /** Resolves the frozen runtime only from a recognized installed bundle. */
@@ -57,15 +56,16 @@ function createWriter(
   config: Config,
   options: { env?: NodeJS.ProcessEnv; nlp?: NlpProcessor; patternsFile?: string; analysisOnly?: boolean } = {},
 ): LearningWriter {
+  const writesEnabled = persistentLearningWritesEnabled(config);
   let redactor: MemoryRedactor | undefined;
   try { redactor = createMemoryRedactor(config.memory, options.env ?? process.env); } catch { redactor = undefined; }
 
-  let nlp = (PERSISTENT_LEARNING_WRITES_ENABLED || options.analysisOnly) ? options.nlp : undefined;
-  if ((PERSISTENT_LEARNING_WRITES_ENABLED || options.analysisOnly) && !nlp) {
+  let nlp = (writesEnabled || options.analysisOnly) ? options.nlp : undefined;
+  if ((writesEnabled || options.analysisOnly) && !nlp) {
     const runtime = resolveNlpRuntime(config, import.meta.url, options.patternsFile);
     if (runtime) try { nlp = new NlpClient(runtime); } catch { nlp = undefined; }
   }
-  return new LearningWriter(store, nlp, redactor, PERSISTENT_LEARNING_WRITES_ENABLED, Boolean(options.analysisOnly));
+  return new LearningWriter(store, nlp, redactor, writesEnabled, Boolean(options.analysisOnly), MEMORY_BACKFILL_ENABLED);
 }
 
 export function createLearningWriter(store:Store,config:Config,options:{env?:NodeJS.ProcessEnv;nlp?:NlpProcessor;patternsFile?:string}={}):LearningWriter{

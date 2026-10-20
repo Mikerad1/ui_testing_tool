@@ -10,6 +10,8 @@ import {Store} from '../src/memory/store.js';
 import {backfillMemory} from '../src/memory/backfill.js';
 import {previewMemoryReindex,type PreviewAnalyzer} from '../src/memory/reindex-preview.js';
 import {hashBackfillNode} from '../src/memory/content-fingerprint.js';
+import {memoryBackfillEnabled,persistentLearningWritesEnabled} from '../src/memory/runtime.js';
+import {loadConfig} from '../src/config/config.js';
 import {runFixtureSql,testLearningWriter} from './helpers/learning.js';
 
 function assertInvocationAccounting(summary:{invocation:{scanned:number;migrated:number;merged:number;rejected:number;stale:number;failed:number;unchanged:number}}){
@@ -169,7 +171,9 @@ test('backfill reports invocation-scoped read failure without attributing an ite
 test('production CLI keeps bulk backfill disabled even when ordinary learning writes are enabled',async()=>{
   const dir=await mkdtemp(path.join(os.tmpdir(),'umb-backfill-cli-')),config=path.join(dir,'umb.config.yaml'),database=path.join(dir,'memory.sqlite');
   try{
-    await writeFile(config,`version: 1\nproject: {id: backfill-cli, name: Backfill CLI, base_url: http://127.0.0.1:3000}\nmemory: {database: ${database}}\n`);
+    assert.equal(memoryBackfillEnabled(),false,'bulk backfill remains separately gated');
+    await writeFile(config,`version: 1\nproject: {id: backfill-cli, name: Backfill CLI, base_url: http://127.0.0.1:3000}\nmemory: {database: ${database}, persistent_learning_writes: true}\n`);
+    assert.equal(persistentLearningWritesEnabled((await loadConfig(config)).config),true,'the CLI project explicitly opts into ordinary learning writes');
     const result=spawnSync(process.execPath,['--import','tsx',path.resolve('src/cli/index.ts'),'memory','backfill','--config',config],{cwd:process.cwd(),encoding:'utf8',timeout:30000});
     assert.notEqual(result.status,0);assert.match(result.stderr,/bulk rewriting existing records has not been authorized/);
     await assert.rejects(stat(database),{code:'ENOENT'});

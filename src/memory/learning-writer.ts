@@ -69,6 +69,7 @@ export class LearningWriter {
     private readonly redactor: MemoryRedactor | undefined,
     private readonly writesEnabled = true,
     private readonly analysisOnly = false,
+    private readonly backfillEnabled = false,
   ) {}
 
   async ensureReady(): Promise<void> {
@@ -206,7 +207,7 @@ export class LearningWriter {
   }
 
   async reprocessBackfillNode(jobId:string,record:BackfillNodeRecord):Promise<boolean>{
-    this.assertWritable();
+    this.assertBackfillEnabled();
     const prepared=await this.prepareAnalyzed({type:record.type,stable_key:record.stable_key,display_name:record.display_name,attributes:withoutNlpMetadata(record.attributes)}),safe=asRecord(prepared.value),attributes=asRecord(safe.attributes);
     const redactedHash=hashBackfillNode({type:safe.type as string,stable_key:safe.stable_key as string,display_name:safe.display_name as string,attributes});
     const observation=this.backfillObservation('backfill_node',`node:${record.id}`,redactedHash,prepared);
@@ -214,7 +215,7 @@ export class LearningWriter {
   }
 
   async reprocessBackfillEdge(jobId:string,record:BackfillEdgeRecord):Promise<boolean>{
-    this.assertWritable();
+    this.assertBackfillEnabled();
     const prepared=await this.prepareAnalyzed({from_id:record.from_id,to_id:record.to_id,relation:record.relation,attributes:withoutNlpMetadata(record.attributes)}),safe=asRecord(prepared.value),attributes=asRecord(safe.attributes);
     const redactedHash=hashBackfillEdge({from_id:safe.from_id as string,to_id:safe.to_id as string,relation:safe.relation as string,attributes});
     const observation=this.backfillObservation('backfill_edge',`edge:${record.id}`,redactedHash,prepared);
@@ -263,6 +264,7 @@ export class LearningWriter {
   }
 
   private assertWritable():void{if(!this.writesEnabled)throw new Error(NLP_GENERIC_ERROR);}
+  assertBackfillEnabled():void{if(!this.backfillEnabled)throw new Error(NLP_GENERIC_ERROR);this.assertWritable();}
 
   private async analyze(text:string):Promise<AnalyzeResponse>{
     try{

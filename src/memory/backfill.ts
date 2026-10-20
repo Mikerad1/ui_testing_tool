@@ -15,6 +15,7 @@ const withUnchanged=(summary:BackfillSummary,invocation:BackfillInvocationSummar
 };
 
 export async function backfillMemory(store:Store,writer:LearningWriter,options:{batchSize?:number}={}):Promise<BackfillSummary>{
+  writer.assertBackfillEnabled();
   // Readiness failures happen before a durable job exists and carry no invocation summary.
   await writer.ensureReady();
   const fingerprint=await writer.pipelineFingerprint(),jobId=store.beginMemoryBackfill(fingerprint),batchSize=Math.max(1,Math.min(50,Math.trunc(options.batchSize??10)));

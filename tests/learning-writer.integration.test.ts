@@ -6,7 +6,8 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import { Store } from '../src/memory/store.js';
 import { reconcile } from '../src/knowledge/reconcile.js';
-import { createLearningWriter, persistentLearningWritesEnabled } from '../src/memory/runtime.js';
+import { createLearningWriter, memoryBackfillEnabled, persistentLearningWritesEnabled } from '../src/memory/runtime.js';
+import { backfillMemory } from '../src/memory/backfill.js';
 import type { Config } from '../src/config/config.js';
 import { testLearningWriter } from './helpers/learning.js';
 
@@ -96,6 +97,41 @@ test('YAML candidate observations preserve redacted mentions, are idempotent, an
   }finally{store?.close();await rm(dir,{recursive:true,force:true});}
 });
 
+test('opted-in production LearningWriter factory reconciles redacted YAML and persists a proposed observation',async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),'learning-yaml-factory-')),root=path.join(dir,'knowledge');let store:Store|undefined;
+  let writer:ReturnType<typeof createLearningWriter>|undefined;
+  const sentinel='YAML_FACTORY_PRIVATE_SENTINEL',analyzed:string[]=[];
+  try{
+    await mkdir(root);
+    const filename=path.join(dir,'memory.sqlite');store=new Store(filename,'yaml-factory');
+    await writeFile(path.join(root,'home.yaml'),'schema_version: 1\nkind: screen\nid: home\nname: Home\nelements:\n  - id: title\n    description: YAML_FACTORY_PRIVATE_SENTINEL\n    locator: {by: text, value: Home}\n');
+    const config={memory:{database:filename,persistent_learning_writes:true,sensitive_paths:['/elements/0/description'],sensitive_values_env:[]}} as Config;
+    writer=createLearningWriter(store,config,{env:{},nlp:{
+      async health(){return{version:3,id:'yaml-factory-health',ok:true,op:'health',health:{protocol:3,python:'test',spacy:'fake',model:'fake',model_version:'1.0.0',rules:'1',patterns_schema_version:1,patterns_digest:'b'.repeat(64),pattern_count:1,patterns_ready:true,ready:true}};},
+      async analyze(text:string){analyzed.push(text);return{version:3,id:'yaml-factory-analyze',ok:true,op:'analyze',normalized:'safe normalized',tokens:[],entities:[],relations:[]};},
+    }});
+    await reconcile(root,store,writer);
+
+    assert.equal(analyzed.length,1);
+    assert.equal(analyzed[0]!.includes(sentinel),false,'the configured non-identity field is redacted before NLP');
+    assert.equal(analyzed[0]!.includes('[REDACTED]'),true,'NLP receives the redaction marker');
+    const screen=store.getByTypeKey('screen','home') as any;
+    const element=store.getByTypeKey('ui_element','screen:home/title') as any;
+    assert.ok(screen,'YAML-owned screen graph node persists');
+    assert.ok(element,'YAML-owned element graph node persists');
+    const yamlNodes=store.db.prepare("SELECT type,stable_key,display_name,attributes_json FROM nodes WHERE project_id=? AND environment=? AND origin='yaml' ORDER BY type,stable_key").all(store.projectId,store.memoryEnvironment);
+    const persisted=JSON.stringify(yamlNodes);
+    assert.equal(persisted.includes(sentinel),false,'YAML graph data excludes the raw sentinel');
+    assert.equal(persisted.includes('[REDACTED]'),true,'the redacted field is retained safely in YAML graph data');
+    assert.equal(JSON.stringify({screen,element}).includes(sentinel),false);
+    const observation=store.listCandidateObservations({source_kind:'yaml_document',source_key:'screen:home'})[0];
+    assert.ok(observation,'YAML candidate observation persists through the production factory');
+    assert.equal(observation.status,'proposed','candidate observation remains unverified');
+    assert.equal(observation.redacted_source_text!.includes(sentinel),false);
+    assert.equal(observation.redacted_source_text!.includes('[REDACTED]'),true);
+  }finally{await writer?.close();store?.close();await rm(dir,{recursive:true,force:true});}
+});
+
 test('YAML empty rules persist normalized-only evidence and reconciliation rollback removes observations',async()=>{
   const dir=await mkdtemp(path.join(os.tmpdir(),'learning-yaml-rollback-')),root=path.join(dir,'knowledge');let store:Store|undefined;
   try{
@@ -157,24 +193,104 @@ test('unready NLP fails closed while operational assertion writes remain availab
   } finally { store?.close(); await rm(dir, { recursive: true, force: true }); }
 });
 
-test('production runtime keeps persistent learning disabled until the FR-07 gate passes', async () => {
+test('production LearningWriter factory defaults off, honors project opt-in, and keeps backfill separately gated', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'learning-runtime-'));
   let store: Store | undefined;
+  const secretName = 'UMB_RUNTIME_FACTORY_SECRET';
+  const secret = 'RUNTIME_FACTORY_SECRET_VALUE';
   let healthCalls = 0;
   let analyzeCalls = 0;
+  const analyzed: string[] = [];
+  const processor = (ready = true) => ({
+    async health() {
+      healthCalls += 1;
+      return { version: 3, id: 'health', ok: true, op: 'health', health: { protocol: 3, python: 'test', spacy: 'fake', model: 'fake', model_version: '1.0.0', rules: '1', patterns_schema_version: 1, patterns_digest: 'b'.repeat(64), pattern_count: 1, patterns_ready: true, ready } } as any;
+    },
+    async analyze(text: string) {
+      analyzeCalls += 1;
+      analyzed.push(text);
+      return { version: 3, id: 'analyze', ok: true, op: 'analyze', normalized: 'safe normalized', tokens: [], entities: [], relations: [] } as any;
+    },
+  });
   try {
-    store = new Store(path.join(dir, 'memory.sqlite'), 'p');
-    const config = { memory: { database: path.join(dir, 'memory.sqlite'), sensitive_paths: ['/attributes/private'], sensitive_values_env: [] } } as Config;
-    assert.equal(persistentLearningWritesEnabled(), false);
-    const writer = createLearningWriter(store, config, { env: {}, nlp: {
-      async health() { healthCalls += 1; return { version: 3, id: 'health', ok: true, op: 'health', health: { protocol: 3, python: 'test', spacy: 'fake', model: 'fake', model_version: '1.0.0', rules: '1', patterns_schema_version: 1, patterns_digest: 'b'.repeat(64), pattern_count: 1, patterns_ready: true, ready: true } }; },
-      async analyze() { analyzeCalls += 1; return { version: 3, id: 'analyze', ok: true, op: 'analyze', normalized: 'safe normalized', tokens: [], entities: [], relations: [] }; },
-    } });
-    await assert.rejects(() => writer.propose({ observation_id:'runtime-proposal',type: 'screen', stable_key: 'runtime-proposal', display_name: 'Safe', attributes: { private: 'RUNTIME_SECRET' } }));
-    assert.equal(healthCalls, 0, 'the disabled runtime rejects before consulting injected NLP');
-    assert.equal(analyzeCalls, 0);
-    assert.equal(store.getByTypeKey('screen', 'runtime-proposal'), null);
-    assert.equal(store.listCandidateObservations({ source_kind: 'mcp_node' }).length, 0);
+    const filename = path.join(dir, 'memory.sqlite');
+    store = new Store(filename, 'runtime-factory');
+    const defaultConfig = { memory: { database: filename, sensitive_paths: ['/attributes/private'], sensitive_values_env: [secretName] } } as Config;
+    const config = { memory: { ...defaultConfig.memory, persistent_learning_writes: true } } as Config;
+    assert.equal(persistentLearningWritesEnabled(), false, 'omitted per-project opt-in is safely off');
+    assert.equal(persistentLearningWritesEnabled(defaultConfig), false);
+    assert.equal(persistentLearningWritesEnabled(config), true);
+    assert.equal(persistentLearningWritesEnabled({} as Config), false, 'malformed manual config is safely off');
+    assert.equal(persistentLearningWritesEnabled({ memory: { persistent_learning_writes: 'true' } } as any), false, 'non-boolean manual values are safely off');
+    assert.equal(memoryBackfillEnabled(), false, 'enabling ordinary learning does not enable bulk backfill');
+
+    const snapshot = () => ({
+      nodes: (store!.db.prepare('SELECT count(*) AS count FROM nodes WHERE project_id=?').get(store!.projectId) as any).count,
+      edges: (store!.db.prepare('SELECT count(*) AS count FROM edges WHERE project_id=?').get(store!.projectId) as any).count,
+      observations: (store!.db.prepare('SELECT count(*) AS count FROM memory_candidate_observations WHERE project_id=?').get(store!.projectId) as any).count,
+      jobs: (store!.db.prepare('SELECT count(*) AS count FROM memory_backfill_jobs WHERE project_id=?').get(store!.projectId) as any).count,
+      items: (store!.db.prepare('SELECT count(*) AS count FROM memory_backfill_items WHERE project_id=?').get(store!.projectId) as any).count,
+    });
+    const initial = snapshot();
+    const disabled = createLearningWriter(store, defaultConfig, { env: { [secretName]: secret }, nlp: processor() });
+    await assert.rejects(() => disabled.propose({ observation_id: 'default-off', type: 'screen', stable_key: 'default-off', display_name: 'Must not persist' }));
+    await disabled.close();
+    assert.equal(healthCalls, 0, 'default-off factory does not consult injected processor');
+    assert.equal(analyzeCalls, 0, 'default-off factory does not analyze');
+    assert.deepEqual(snapshot(), initial, 'default-off factory makes no graph or ledger writes');
+
+    const writer = createLearningWriter(store, config, { env: { [secretName]: secret }, nlp: processor() });
+    const anchor = store.applicationSubject()!;
+    const assertion = store.recordAssertion({ session_id: 'runtime-factory-test', subject_node_id: anchor.id, passed: true, observed_count: 1, actions: [] });
+    const afterEvidence = snapshot();
+    await assert.rejects(() => backfillMemory(store!, writer), /NLP/);
+    assert.equal(healthCalls, 0, 'direct backfill rejection precedes readiness');
+    assert.equal(analyzeCalls, 0, 'direct backfill rejection precedes analysis');
+    assert.deepEqual(snapshot(), afterEvidence, 'direct backfill rejection creates no jobs/items or graph/ledger mutations');
+    await assert.rejects(() => writer.reprocessBackfillNode('unauthorized-backfill', {
+      id: 'not-written', type: 'note', stable_key: 'not-written', display_name: 'Backfill blocked', attributes: {}, payloadHash: 'a'.repeat(64), redactedHash: '',
+    }));
+    assert.equal(healthCalls, 0, 'project opt-in alone does not enable writer-level backfill');
+    assert.deepEqual(snapshot(), afterEvidence, 'backfill guard rejects before graph or ledger mutation');
+    const proposal = await writer.propose({
+      observation_id: 'runtime-factory-proposal', type: 'screen', stable_key: 'runtime-factory-proposal',
+      display_name: 'Runtime factory proposal', attributes: { private: secret, note: 'ordinary' },
+      evidence_refs: [{ evidence_id: (assertion.evidence as any).id, run_id: assertion.id, subject_node_id: anchor.id }],
+    }) as any;
+    assert.equal(healthCalls, 1, 'the factory uses the injected processor readiness');
+    assert.equal(analyzeCalls, 1, 'the factory uses the injected processor for analysis');
+    assert.equal(analyzed.length, 1);
+    assert.equal(analyzed[0]!.includes(secret), false, 'redaction occurs before analyze');
+    assert.equal(analyzed[0]!.includes('[REDACTED]'), true);
+    const persisted = store.get(proposal.id) as any;
+    assert.ok(persisted);
+    assert.equal(JSON.stringify(persisted).includes(secret), false, 'redacted proposal is persisted');
+    assert.equal(persisted.verification_status, 'proposed', 'proposal remains unverified');
+    const observation = store.listCandidateObservations({ source_kind: 'mcp_node', source_key: 'runtime-factory-proposal' })[0];
+    assert.ok(observation, 'candidate observation is persisted');
+    assert.equal(observation.status, 'proposed');
+    assert.equal(observation.redacted_source_text!.includes(secret), false);
     await writer.close();
+
+    const unchanged = snapshot();
+
+    const missingNlp = createLearningWriter(store, { memory: { database: filename, persistent_learning_writes: true, sensitive_paths: [], sensitive_values_env: [] } } as Config, { env: {} });
+    await assert.rejects(() => missingNlp.propose({ observation_id: 'missing-nlp', type: 'screen', stable_key: 'missing-nlp', display_name: 'Must not persist' }));
+    await missingNlp.close();
+    assert.deepEqual(snapshot(), unchanged, 'missing NLP cannot write graph or ledger rows');
+
+    const unhealthy = createLearningWriter(store, config, { env: { [secretName]: secret }, nlp: processor(false) });
+    await assert.rejects(() => unhealthy.propose({ observation_id: 'unhealthy-nlp', type: 'screen', stable_key: 'unhealthy-nlp', display_name: 'Must not persist' }));
+    await unhealthy.close();
+    assert.deepEqual(snapshot(), unchanged, 'unhealthy NLP cannot write graph or ledger rows');
+
+    const callsBeforeInvalidRedactor = healthCalls;
+    const invalidRedactor = createLearningWriter(store, config, { env: {}, nlp: processor() });
+    await assert.rejects(() => invalidRedactor.propose({ observation_id: 'invalid-redactor', type: 'screen', stable_key: 'invalid-redactor', display_name: 'Must not persist' }));
+    await invalidRedactor.close();
+    assert.equal(healthCalls, callsBeforeInvalidRedactor, 'invalid redactor fails before invoking NLP');
+    assert.deepEqual(snapshot(), unchanged, 'unavailable redactor cannot write graph or ledger rows');
+    assert.equal(persistentLearningWritesEnabled(config), true);
+    assert.equal(memoryBackfillEnabled(), false);
   } finally { store?.close(); await rm(dir, { recursive: true, force: true }); }
 });

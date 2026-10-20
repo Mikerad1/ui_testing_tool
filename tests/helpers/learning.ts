@@ -68,7 +68,7 @@ export function testLearningWriter(store: Store, state: { ready?: boolean; failA
     },
     async shutdown() {},
   };
-  return withTestEvidence(new LearningWriter(store, nlp, createMemoryRedactor({ sensitive_paths: state.sensitivePaths ?? [], sensitive_values_env: state.sensitiveValuesEnv ?? [] }, state.env ?? {})), store);
+  return withTestEvidence(new LearningWriter(store, nlp, createMemoryRedactor({ sensitive_paths: state.sensitivePaths ?? [], sensitive_values_env: state.sensitiveValuesEnv ?? [] }, state.env ?? {}), true, false, true), store);
 }
 
 export function testWriter(store: Store): TestLearningWriter {

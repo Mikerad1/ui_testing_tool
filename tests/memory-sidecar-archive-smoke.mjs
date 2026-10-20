@@ -19,11 +19,10 @@ assert.equal(bundleMeta.payload, 'payload');
 await assertNoSymlinks(bundleRoot);
 
 const importDist = relative => import(pathToFileURL(path.join(payloadRoot, 'dist', relative)).href);
-const [{ Store }, { NlpClient }, { LearningWriter }, { createMemoryRedactor }, { persistentLearningWritesEnabled }] = await Promise.all([
-  importDist('src/memory/store.js'), importDist('src/memory/nlp-client.js'), importDist('src/memory/learning-writer.js'),
-  importDist('src/memory/redactor.js'), importDist('src/memory/runtime.js'),
+const [{ Store }, { NlpClient }, { createLearningWriter, createProjectLearningWriter, memoryBackfillEnabled, persistentLearningWritesEnabled }] = await Promise.all([
+  importDist('src/memory/store.js'), importDist('src/memory/nlp-client.js'), importDist('src/memory/runtime.js'),
 ]);
-assert.equal(persistentLearningWritesEnabled(), false);
+assert.equal(memoryBackfillEnabled(), false, 'persistent proposals do not enable bulk backfill');
 
 const temp = await mkdtemp(path.join(os.tmpdir(), 'umb-final-archive-smoke-'));
 const secretEnvName = 'UMB_C2_ARCHIVE_SECRET';
@@ -31,51 +30,61 @@ const secret = `UMB_ARCHIVE_SECRET_${Date.now()}_${Math.random().toString(36).sl
 const oldSecret = process.env[secretEnvName];
 process.env[secretEnvName] = secret;
 let store;
-let client;
 let writer;
 try {
-  store = new Store(path.join(temp, 'memory.sqlite'), 'phase1c-final-archive');
-  client = new NlpClient({ executable: sidecarExecutable, args: [] });
-  const redactor = createMemoryRedactor({ sensitive_paths: [], sensitive_values_env: [secretEnvName] }, process.env);
-  const sentTexts = [];
-  writer = new LearningWriter(store, {
-    health: () => client.health(),
-    analyze: text => { sentTexts.push(text); return client.analyze(text); },
-    shutdown: () => client.shutdown(),
-  }, redactor, true);
-  const health = await client.health();
-  assert.deepEqual({
-    protocol: health.health.protocol, python: health.health.python, spacy: health.health.spacy,
-    model: health.health.model, model_version: health.health.model_version, ready: health.health.ready,
-  }, { protocol: 3, python: '3.13.16', spacy: '3.8.9', model: 'en_core_web_sm', model_version: '3.8.0', ready: true });
+  const filename = path.join(temp, 'memory.sqlite');
+  store = new Store(filename, 'phase1c-final-archive');
+  const config = { memory: { database: filename, persistent_learning_writes: true, sensitive_paths: [], sensitive_values_env: [secretEnvName] } };
+  assert.equal(persistentLearningWritesEnabled(config), true, 'the temporary project explicitly opts in');
+  // This runtime module is loaded from payload/dist, so its project factory must resolve the bundled sidecar itself.
+  writer = await createProjectLearningWriter(store, config, temp);
+  await writer.ensureReady();
+  assert.equal(persistentLearningWritesEnabled(config), true);
   const subject = store.applicationSubject();
   const assertion = store.recordAssertion({ session_id: 'release-archive-smoke', subject_node_id: subject.id, passed: true, observed_count: 1 });
   const evidenceRef = { evidence_id: assertion.evidence.id, run_id: assertion.id, subject_node_id: subject.id };
   const proposal = await writer.propose({ observation_id: 'release-real-nlp', type: 'screen', stable_key: 'release-real-nlp', display_name: `Screen ${secret}`, evidence_refs: [evidenceRef] });
-  assert.equal(sentTexts.length, 1);
-  assert.equal(sentTexts[0].includes(secret), false, 'redaction sentinel reached sidecar input');
   const row = store.db.prepare('SELECT display_name, attributes_json FROM nodes WHERE id=?').get(proposal.id);
   assert.ok(row);
   assert.equal(`${row.display_name}${row.attributes_json}`.includes(secret), false, 'redaction sentinel reached SQLite');
+  assert.equal(store.get(proposal.id).verification_status, 'proposed', 'bundled factory proposal stays unverified');
   const attrs = JSON.parse(row.attributes_json);
   assert.ok(attrs.__umb_memory_nlp?.normalized?.length, 'proposal row has NLP metadata');
   assert.equal(attrs.__umb_memory_nlp.normalized.includes(secret), false);
-  assert.equal(persistentLearningWritesEnabled(), false);
+  const observation = store.listCandidateObservations({ source_kind: 'mcp_node', source_key: 'release-real-nlp' })[0];
+  assert.ok(observation, 'bundled factory persisted the candidate observation');
+  assert.equal(observation.status, 'proposed');
+  assert.equal(observation.redacted_source_text.includes(secret), false);
+  assert.equal(observation.python_version, '3.13.16');
+  assert.equal(observation.spacy_version, '3.8.9');
+  assert.equal(observation.model_version, '3.8.0');
 
+  const snapshot = () => ({
+    nodes: store.db.prepare('SELECT count(*) AS count FROM nodes WHERE project_id=?').get(store.projectId).count,
+    edges: store.db.prepare('SELECT count(*) AS count FROM edges WHERE project_id=?').get(store.projectId).count,
+    observations: store.listCandidateObservations().length,
+  });
+  const beforeFailures = snapshot();
   const missingClient = new NlpClient({ executable: missingModelExecutable, args: [] });
-  const missingWriter = new LearningWriter(store, missingClient, redactor, true);
+  const missingWriter = createLearningWriter(store, config, { nlp: missingClient });
   try {
-    const before = store.db.prepare('SELECT count(*) AS count FROM nodes WHERE stable_key=?').get('missing-model-never-writes').count;
     await assert.rejects(missingClient.health(), /NLP sidecar request failed/, 'corrupted onedir should fail health without model data');
-    await assert.rejects(missingWriter.propose({ observation_id: 'missing-model-never-writes', type: 'screen', stable_key: 'missing-model-never-writes', display_name: 'Must not persist', evidence_refs: [evidenceRef] }), /NLP sidecar request failed/);
-    const after = store.db.prepare('SELECT count(*) AS count FROM nodes WHERE stable_key=?').get('missing-model-never-writes').count;
-    assert.equal(after, before, 'missing model readiness must not commit a proposal');
+    await assert.rejects(missingWriter.propose({ observation_id: 'missing-model-never-writes', type: 'screen', stable_key: 'missing-model-never-writes', display_name: 'Must not persist', evidence_refs: [] }));
+    assert.deepEqual(snapshot(), beforeFailures, 'missing model readiness must not commit graph or candidate ledger rows');
   } finally { await missingWriter.close(); }
-  assert.equal(persistentLearningWritesEnabled(), false);
-  console.log('Extracted relocated sidecar archive smoke passed (exact pins, persistence, redaction, missing-model no-write).');
+  const unhealthyWriter = createLearningWriter(store, config, { nlp: {
+    async health() { return { version: 3, id: 'unhealthy', ok: true, op: 'health', health: { protocol: 3, python: '3.13.16', spacy: '3.8.9', model: 'en_core_web_sm', model_version: '3.8.0', rules: '1', patterns_schema_version: 1, patterns_digest: 'b'.repeat(64), pattern_count: 1, patterns_ready: true, ready: false } }; },
+    async analyze() { throw new Error('must not analyze'); },
+  } });
+  try {
+    await assert.rejects(unhealthyWriter.propose({ observation_id: 'unhealthy-never-writes', type: 'screen', stable_key: 'unhealthy-never-writes', display_name: 'Must not persist', evidence_refs: [] }));
+    assert.deepEqual(snapshot(), beforeFailures, 'unhealthy readiness must not commit graph or candidate ledger rows');
+  } finally { await unhealthyWriter.close(); }
+  assert.equal(persistentLearningWritesEnabled(config), true);
+  assert.equal(memoryBackfillEnabled(), false);
+  console.log('Extracted relocated sidecar archive smoke passed (bundled factory, exact pins, proposal persistence, redaction, missing/unhealthy no-write).');
 } finally {
   await writer?.close();
-  if (!writer) await client?.shutdown();
   store?.close();
   if (oldSecret === undefined) delete process.env[secretEnvName]; else process.env[secretEnvName] = oldSecret;
   await rm(temp, { recursive: true, force: true });
