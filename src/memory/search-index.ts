@@ -4,7 +4,7 @@ import type Database from 'better-sqlite3';
 import type {GraphMutationFinalizer,GraphMutationWriteSet} from './graph-mutation.js';
 
 export const SEARCH_ALLOWLIST_VERSION='fr07d-paths-v1';
-export const SEARCH_RANKER_VERSION='fr07d-ranker-v1';
+export const SEARCH_RANKER_VERSION='fr07d-ranker-v2';
 const MAX_NODE_BYTES=16*1024,MAX_NODE_TOKENS=256;
 const TOKEN_PATTERN=/[\p{L}\p{N}\p{M}]+/gu;
 type NodeRow={id:string;project_id:string;environment:string;type:string;canonical_key:string;display_name:string;attributes_json:string;origin:string;verification_status:string;confidence:number;tombstone:number;superseded_by:string|null;conflict_status:string;updated_at:string;content_hash:string|null};

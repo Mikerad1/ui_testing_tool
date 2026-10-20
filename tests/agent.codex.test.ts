@@ -21,7 +21,7 @@ test('skill instructions hold phase boundaries and actual tool names', () => {
     'Record Jira MCP/tool source, retrieval time, and each AC\'s source field/path', 'Preserve each AC verbatim',
     'combine criteria from the available sources without inventing or changing semantics', 'After checking all available sources, if no AC content remains, stop and report', 'stable, report-local AC IDs',
     'tables, or ADF', 'ambiguous, contradictory, API-only, and non-UI-testable ACs', 'observable assertion(s), evidence, and status', 'unsupported ACs explicitly',
-    'Before browser navigation', 'memory_context', 'memory_search', 'memory_get_node', 'potentially stale', 'never mix project or environment context',
+    'Before browser navigation', 'memory_context', 'memory_search', 'memory_get_node', 'potentially stale', 'validate against the live app', 'never mix project or environment context',
     'only configured browser and assertion/report tools actually available', 'Do not claim unavailable tools or implement a planner/runner',
     'semantic/accessibility locators', 'Refresh snapshots after state changes', 'Navigation or screenshots alone are not test results',
     'at least one positive', 'meaningful negative/boundary case', 'isolated approved test accounts/data', 'Never run destructive/write tests against production',

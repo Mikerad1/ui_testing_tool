@@ -13,6 +13,7 @@ import {migrateEnvironmentSchema} from './schema-v11.js';
 import {migrateCandidateObservations} from './schema-v13.js';
 import {appendLifecycleEvent,migrateLifecycleEventsV15} from './schema-v15.js';
 import {migrateEvidenceAssociationsV16} from './schema-v16.js';
+import {migrateProvenanceIndexesV17} from './schema-v17.js';
 import {normalizeSearchText, SEARCH_NORMALIZER_VERSION, SEARCH_RANKER_VERSION} from './search-index.js';
 import {commitYamlReconciliation} from './yaml-commit.js';
 import {backupSqlite} from './sqlite-backup.js';
@@ -90,7 +91,7 @@ function semanticAttributesJson(value:string|Record<string,unknown>):string{
   }
 }
 
-export const CURRENT_SCHEMA_VERSION=16;
+export const CURRENT_SCHEMA_VERSION=17;
 
 export type CandidateObservationSourceKind='mcp_node'|'mcp_edge'|'yaml_document'|'backfill_node'|'backfill_edge';
 export type CandidateObservationStatus='proposed'|'conflict'|'stale'|'superseded'|'rejected';
@@ -351,7 +352,8 @@ export class Store {
     if(!has(13))migrateCandidateObservations(this.#database);
     if(!has(14))this.#database.transaction(()=>migrateSearchIndexV14(this.#database))();
      if(!has(15))migrateLifecycleEventsV15(this.#database);
-     if(!has(16))migrateEvidenceAssociationsV16(this.#database);
+      if(!has(16))migrateEvidenceAssociationsV16(this.#database);
+      if(!has(17))migrateProvenanceIndexesV17(this.#database);
   }
   close(){this.#database.close();}
   #yamlNodeOwnedSql(alias:string):string{return `EXISTS(SELECT 1 FROM yaml_ownership y JOIN yaml_sources ys ON ys.project_id=y.project_id AND ys.environment=y.environment AND ys.path=y.source_path WHERE y.project_id=${alias}.project_id AND y.environment=${alias}.environment AND y.entity_id=${alias}.id AND y.entity_type=${alias}.type AND y.entity_key=${alias}.canonical_key AND y.tombstone=0 AND y.conflict_status='none' AND y.hash=${alias}.content_hash AND ys.active=1 AND ys.hash=y.hash)`;}
@@ -373,6 +375,36 @@ export class Store {
     return{trusted_facts:trusted,authored_guidance:authored.length?{label:'authored_unverified',warning:'YAML-authored guidance is unverified; revalidate against the current application before acting.',items:authored}:null};
   }
   search(q:string,options:MemoryReadOptions&{mode?:'auto'|'exact'|'prose';page_size?:number;cursor?:string}={}):any{return options.mode!==undefined||options.page_size!==undefined||options.cursor!==undefined?this.searchPage(q,options):this.searchPage(q,options).data;}
+  #searchProvenance(nodeId:string):Record<string,unknown>|undefined{
+    const yaml=this.#database.prepare(`SELECT y.hash source_revision_hash FROM nodes n
+      JOIN yaml_ownership y ON y.project_id=n.project_id AND y.environment=n.environment AND y.entity_id=n.id AND y.entity_type=n.type AND y.entity_key=n.canonical_key
+      JOIN yaml_sources ys ON ys.project_id=y.project_id AND ys.environment=y.environment AND ys.path=y.source_path
+      WHERE n.project_id=? AND n.environment=? AND n.id=? AND n.origin='yaml' AND y.tombstone=0 AND y.conflict_status='none'
+        AND y.hash=n.content_hash AND ys.active=1 AND ys.hash=y.hash LIMIT 1`).get(this.projectId,this.memoryEnvironment,nodeId) as {source_revision_hash:string}|undefined;
+    if(yaml&&/^[a-f0-9]{64}$/.test(yaml.source_revision_hash))return{provenance:{source_kind:'yaml_document',source_revision_hash:yaml.source_revision_hash,status:'source_provenance_only'}};
+    const node=this.#database.prepare("SELECT origin,verification_status FROM nodes WHERE project_id=? AND environment=? AND id=?").get(this.projectId,this.memoryEnvironment,nodeId) as {origin:string;verification_status:string}|undefined;
+    if(node?.origin!=='agent'||node.verification_status!=='verified')return undefined;
+    const unavailable={provenance:{status:'unavailable',evidence:[]}};
+    const audit=this.#database.prepare("SELECT detail_json FROM memory_audit WHERE project_id=? AND subject_node_id=? AND action='verify' ORDER BY created_at DESC,id DESC LIMIT 1").get(this.projectId,nodeId) as {detail_json:string}|undefined;
+    if(!audit)return unavailable;
+    let detail:unknown;try{detail=JSON.parse(audit.detail_json);}catch{return unavailable;}
+    if(!detail||typeof detail!=='object'||Array.isArray(detail))return unavailable;
+    const runId=(detail as Record<string,unknown>).runId;
+    const safeId=(value:unknown):value is string=>typeof value==='string'&&value.length>0&&value.length<=128&&!/[\u0000-\u001f\u007f]/.test(value);
+    const safeTimestamp=(value:unknown):value is string=>typeof value==='string'&&value.length<=100&&Number.isFinite(Date.parse(value))&&!/[\u0000-\u001f\u007f]/.test(value);
+    if(!safeId(runId)||!safeId(nodeId))return unavailable;
+    const run=this.#database.prepare("SELECT id,status,created_at FROM runs WHERE project_id=? AND memory_environment=? AND id=? AND status='passed'").get(this.projectId,this.memoryEnvironment,runId) as {id:string;status:string;created_at:string}|undefined;
+    if(!run||!safeId(run.id)||!safeTimestamp(run.created_at))return unavailable;
+    const evidence=this.#database.prepare("SELECT e.id,e.subject_node_id,e.kind,e.outcome,e.metadata_json,e.created_at FROM evidence e WHERE e.project_id=? AND e.subject_node_id=? AND e.run_id=? AND e.kind='assertion' AND e.outcome='passed' ORDER BY e.created_at DESC,e.id DESC LIMIT 4").all(this.projectId,nodeId,run.id) as Array<{id:string;subject_node_id:string;kind:string;outcome:string;metadata_json:string;created_at:string}>;
+    const refs=evidence.slice(0,3).flatMap(row=>{
+      if(!safeId(row.id)||row.subject_node_id!==nodeId||!safeTimestamp(row.created_at))return[];
+      const metadata=this.safeReportMetadata('assertion',row.metadata_json),ref:Record<string,unknown>={evidence_id:row.id,run_id:run.id,subject_node_id:nodeId,kind:'assertion',outcome:'passed',run_status:'passed',run_created_at:run.created_at,evidence_created_at:row.created_at};
+      if(typeof metadata?.observed_count==='number')ref.observed_count=metadata.observed_count;
+      if(Array.isArray(metadata?.actions))ref.action_count=metadata.actions.length;
+      return[ref];
+    });
+    return refs.length?{provenance:{status:'provenance_only',evidence:refs}}:unavailable;
+  }
   searchPage(q:string,options:MemoryReadOptions&{mode?:'auto'|'exact'|'prose';page_size?:number;cursor?:string}={}):{data:Array<Record<string,unknown>>;pagination:Record<string,unknown>}{
     const invalid=(status:'invalid_cursor'|'cursor_expired')=>({data:[],pagination:{status,page_size:pageSize}});
     const mode=options.mode??'auto',pageSize=options.page_size??50,view=options.trustYamlSeeds===true?1:0;
@@ -405,11 +437,11 @@ export class Store {
         offset=cursorOffset;
       }catch{return invalid('invalid_cursor');}
     }
-    const ranked=new Map<string,{row:any;trust:number;exact:boolean;score:number;paths:Set<string>}>();let work=0,tooBroad=false;
+      const ranked=new Map<string,{row:any;trust:number;exact:boolean;score:number;graphEdges:Set<string>;graphSourceTerms:Set<string>;graphNeighborTerms:Set<string>;graphRelationTerms:Set<string>;coverage:number;paths:Set<string>;graph_matches:any[];graph_matches_truncated:boolean;recency:string}>();let work=0,tooBroad=false;
     const budget=1000;
     // The raw-value index bounds exact candidate enumeration before node dedupe.
     const exactHash=(type:string,path:string)=>{const hash=createHash('sha256').update('umb-search-exact\0v1\0');for(const part of [this.projectId,this.memoryEnvironment,type,path,q]){const bytes=Buffer.from(part,'utf8'),length=Buffer.allocUnsafe(4);length.writeUInt32BE(bytes.length);hash.update(length).update(bytes);}return hash.digest('hex');};
-    const add=(hit:any,exact:boolean,score=0,path?:string)=>{let item=ranked.get(hit.id);if(!item){item={row:hit,trust:hit.verification_status==='verified'?0:1,exact,score,paths:new Set()};ranked.set(hit.id,item);}else{item.exact ||= exact;item.score=Math.max(item.score,score);}if(path)item.paths.add(path);};
+      const add=(hit:any,exact:boolean,score=0,path?:string,coverage=0,graphMatch?:any,graphTerms?:{source:Set<string>;neighbor:Set<string>;relation:Set<string>;recency:string})=>{let item=ranked.get(hit.id);if(!item){item={row:hit,trust:hit.verification_status==='verified'?0:1,exact,score,graphEdges:new Set(),graphSourceTerms:new Set(),graphNeighborTerms:new Set(),graphRelationTerms:new Set(),coverage,paths:new Set(),graph_matches:[],graph_matches_truncated:false,recency:String(hit.updated_at??'')};ranked.set(hit.id,item);}else{item.exact ||= exact;item.score=Math.max(item.score,score);item.coverage=Math.max(item.coverage,coverage);}if(path)item.paths.add(path);if(graphMatch&&!item.graph_matches.some((match:any)=>match.edge_id===graphMatch.edge_id)){item.graphEdges.add(graphMatch.edge_id);if(item.graph_matches.length<3)item.graph_matches.push(graphMatch);else item.graph_matches_truncated=true;}if(graphTerms){for(const term of graphTerms.source)item.graphSourceTerms.add(term);for(const term of graphTerms.neighbor)item.graphNeighborTerms.add(term);for(const term of graphTerms.relation)item.graphRelationTerms.add(term);const current=Date.parse(item.recency),incoming=Date.parse(graphTerms.recency);if(Number.isFinite(incoming)&&( !Number.isFinite(current)||incoming>current))item.recency=graphTerms.recency;}};
     if(mode!=='prose'){
       const remaining=budget-work;
       const exactHits=this.#database.prepare(`SELECT v.raw_value,v.path,v.value_hash,n.id,n.type,n.canonical_key stable_key,n.display_name,n.verification_status,n.updated_at
@@ -420,27 +452,57 @@ export class Store {
       else for(const hit of exactHits){work++;if(!Buffer.from(hit.raw_value,'utf8').equals(rawBytes))continue;if(hit.value_hash!==exactHash(hit.type,hit.path))continue;add(hit,true,0,hit.path);}
     }
     if(!tooBroad&&mode!=='exact'&&tokens.length){
-      const uniqueTokens=[...new Set(tokens)];
-      const df=(token:string)=>Number((this.#database.prepare('SELECT document_frequency FROM memory_search_df WHERE project_id=? AND environment=? AND trust_view=? AND token=?').get(this.projectId,this.memoryEnvironment,view,token) as any)?.document_frequency??0);
-      const rarest=[...uniqueTokens].sort((a,b)=>df(a)-df(b)||Buffer.compare(Buffer.from(a),Buffer.from(b)))[0]!;
-       const remaining=budget-work,candidates=this.#database.prepare('SELECT DISTINCT node_id FROM memory_search_tokens WHERE project_id=? AND environment=? AND trust_view=? AND token=? ORDER BY node_id LIMIT ?').all(this.projectId,this.memoryEnvironment,view,rarest,remaining+1) as Array<{node_id:string}>;
-       if(candidates.length>remaining)tooBroad=true;
-      else for(const candidate of candidates){if(++work>budget){tooBroad=true;break;}const matched=this.#database.prepare(`SELECT t.token,t.path,t.path_weight FROM memory_search_tokens t WHERE t.project_id=? AND t.environment=? AND t.trust_view=? AND t.node_id=? AND t.token IN (${uniqueTokens.map(()=>'?').join(',')})`).all(this.projectId,this.memoryEnvironment,view,candidate.node_id,...uniqueTokens) as Array<{token:string;path:string;path_weight:number}>;
-        if(new Set(matched.map(x=>x.token)).size!==uniqueTokens.length)continue;
-         const node=this.#database.prepare(`SELECT n.id,n.type,n.canonical_key stable_key,n.display_name,n.verification_status,n.updated_at FROM nodes n WHERE n.project_id=? AND n.environment=? AND n.id=? AND ${this.#trustedNodeSql('n',view===1)}`).get(this.projectId,this.memoryEnvironment,candidate.node_id) as any;if(!node)continue;
-        let score=0;for(const token of uniqueTokens){const weight=Math.max(...matched.filter(x=>x.token===token).map(x=>x.path_weight));score+=Math.max(1,Math.floor(1_000_000/(df(token)+1)))*weight;}
-        for(const hit of matched)add({...node},false,score,hit.path);
-        if(tooBroad)break;
-      }
+       const uniqueTokens=[...new Set(tokens)];
+       const df=(token:string)=>Number((this.#database.prepare('SELECT document_frequency FROM memory_search_df WHERE project_id=? AND environment=? AND trust_view=? AND token=?').get(this.projectId,this.memoryEnvironment,view,token) as any)?.document_frequency??0);
+       const rarest=[...uniqueTokens].sort((a,b)=>df(a)-df(b)||Buffer.compare(Buffer.from(a),Buffer.from(b)))[0]!;
+       const candidateLimit=budget-work,candidates=this.#database.prepare('SELECT DISTINCT node_id FROM memory_search_tokens WHERE project_id=? AND environment=? AND trust_view=? AND token=? ORDER BY node_id LIMIT ?').all(this.projectId,this.memoryEnvironment,view,rarest,candidateLimit+1) as Array<{node_id:string}>;
+       if(candidates.length>candidateLimit)tooBroad=true;
+       else work+=candidates.length;
+       const postingsFor=(nodeId:string,limit:number)=>this.#database.prepare(`SELECT token,path,path_weight FROM memory_search_tokens WHERE project_id=? AND environment=? AND trust_view=? AND node_id=? AND token IN (${uniqueTokens.map(()=>'?').join(',')}) ORDER BY token,path LIMIT ?`).all(this.projectId,this.memoryEnvironment,view,nodeId,...uniqueTokens,limit) as Array<{token:string;path:string;path_weight:number}>;
+       if(!tooBroad)for(const candidate of candidates){
+         const sourceId=candidate.node_id,remainingWork=budget-work,sourcePostings=postingsFor(sourceId,remainingWork+1);work+=sourcePostings.length;if(sourcePostings.length>remainingWork){tooBroad=true;break;}
+         const sourceTerms=new Set(sourcePostings.map(item=>item.token));
+         const node=this.#database.prepare(`SELECT n.id,n.type,n.canonical_key stable_key,n.display_name,n.verification_status,n.updated_at FROM nodes n WHERE n.project_id=? AND n.environment=? AND n.id=? AND ${this.#trustedNodeSql('n',view===1)}`).get(this.projectId,this.memoryEnvironment,sourceId) as any;if(!node)continue;
+         const scoreFor=(postings:Array<{token:string;path:string;path_weight:number}>)=>{let score=0;for(const token of new Set(postings.map(x=>x.token))){score+=Math.max(1,Math.floor(1_000_000/(df(token)+1)))*Math.max(...postings.filter(x=>x.token===token).map(x=>x.path_weight));}return score;};
+         if(sourceTerms.size===uniqueTokens.length)for(const posting of sourcePostings)add({...node},false,scoreFor(sourcePostings),posting.path,sourceTerms.size);
+         if(uniqueTokens.length===1)continue;
+         const rawEdgeSql=`SELECT e.id edge_id,e.from_node_id,e.to_node_id,e.relation_type,e.origin edge_origin,e.verification_status edge_verification_status,e.conflict_status edge_conflict_status,e.tombstone edge_tombstone,e.updated_at edge_updated_at,
+             f.id from_id,f.type from_type,f.verification_status from_verification_status,f.origin from_origin,f.conflict_status from_conflict_status,f.tombstone from_tombstone,f.superseded_by from_superseded_by,f.content_hash from_content_hash,f.canonical_key from_canonical_key,
+             t.id to_id,t.type to_type,t.verification_status to_verification_status,t.origin to_origin,t.conflict_status to_conflict_status,t.tombstone to_tombstone,t.superseded_by to_superseded_by,t.content_hash to_content_hash,t.canonical_key to_canonical_key
+           FROM edges e JOIN nodes f ON f.project_id=e.project_id AND f.environment=e.environment AND f.id=e.from_node_id
+           JOIN nodes t ON t.project_id=e.project_id AND t.environment=e.environment AND t.id=e.to_node_id
+           WHERE e.project_id=? AND e.environment=? AND `;
+         const outgoing=this.#database.prepare(`${rawEdgeSql}e.from_node_id=? ORDER BY e.id LIMIT 4`).all(this.projectId,this.memoryEnvironment,sourceId) as any[];
+         const incoming=this.#database.prepare(`${rawEdgeSql}e.to_node_id=? ORDER BY e.id LIMIT 4`).all(this.projectId,this.memoryEnvironment,sourceId) as any[];
+         const inspectedEdges=[...outgoing,...incoming],rawEdges=[...new Map(inspectedEdges.map(edge=>[edge.edge_id,edge])).values()].sort((a,b)=>Buffer.compare(Buffer.from(a.edge_id),Buffer.from(b.edge_id)));work+=inspectedEdges.length;
+         if(outgoing.length>3||incoming.length>3||rawEdges.length>3||work>budget){tooBroad=true;break;}
+         const edgeIsTrusted=(edge:any)=>edge.edge_tombstone===0&&edge.edge_conflict_status==='none'&&!['stale','superseded'].includes(edge.edge_verification_status)&&((edge.edge_verification_status==='verified'&&(edge.edge_origin!=='yaml'||this.#database.prepare(`SELECT 1 FROM yaml_ownership y JOIN yaml_sources s ON s.project_id=y.project_id AND s.environment=y.environment AND s.path=y.source_path WHERE y.project_id=? AND y.environment=? AND y.entity_id=? AND y.entity_type='edge' AND y.tombstone=0 AND y.conflict_status='none' AND s.active=1 LIMIT 1`).get(this.projectId,this.memoryEnvironment,edge.edge_id)))||(view===1&&edge.edge_origin==='yaml'&&this.#database.prepare(`SELECT 1 FROM yaml_ownership y JOIN yaml_sources s ON s.project_id=y.project_id AND s.environment=y.environment AND s.path=y.source_path WHERE y.project_id=? AND y.environment=? AND y.entity_id=? AND y.entity_type='edge' AND y.tombstone=0 AND y.conflict_status='none' AND s.active=1 LIMIT 1`).get(this.projectId,this.memoryEnvironment,edge.edge_id)));
+         for(const edge of rawEdges){
+           if(!edgeIsTrusted(edge))continue;
+           const neighborId=edge.from_node_id===sourceId?edge.to_id:edge.from_id,neighborType=edge.from_node_id===sourceId?edge.to_type:edge.from_type;
+           const trustedNeighbor=this.#database.prepare(`SELECT n.id,n.type,n.verification_status,n.updated_at FROM nodes n WHERE n.project_id=? AND n.environment=? AND n.id=? AND ${this.#trustedNodeSql('n',view===1)}`).get(this.projectId,this.memoryEnvironment,neighborId) as any;if(!trustedNeighbor)continue;
+           const neighborRows=postingsFor(neighborId,budget-work+1);work+=neighborRows.length;if(work>budget){tooBroad=true;break;}
+           const relationTokens=new Set((normalizeSearchText(edge.relation_type.replace(/_/g,' ')).match(/[\p{L}\p{N}\p{M}]+/gu)??[]).filter(token=>uniqueTokens.includes(token))),neighborTerms=new Set(neighborRows.map(item=>item.token));
+           const allTerms=new Set([...sourceTerms,...neighborTerms,...relationTokens]);if(!uniqueTokens.every(token=>allTerms.has(token)))continue;
+           const neighborOnly=new Set([...neighborTerms].filter(token=>!sourceTerms.has(token)));
+           const graphMatch={node_id:sourceId,node_type:node.type,candidate_paths:[...new Set(sourcePostings.filter(row=>uniqueTokens.includes(row.token)).map(row=>row.path))].sort((a,b)=>Buffer.compare(Buffer.from(a),Buffer.from(b))),edge_id:edge.edge_id,relation_type:edge.relation_type,from_node_id:edge.from_node_id,to_node_id:edge.to_node_id,neighbor_id:neighborId,neighbor_type:neighborType,neighbor_paths:[...new Set(neighborRows.map(row=>row.path))].sort((a,b)=>Buffer.compare(Buffer.from(a),Buffer.from(b))),path:'one_hop',trust_basis:node.verification_status==='verified'?'verified_fact':'trusted_seed',edge_trust_basis:edge.edge_verification_status==='verified'?'verified_fact':'trusted_seed',neighbor_trust_basis:trustedNeighbor.verification_status==='verified'?'verified_fact':'trusted_seed'};
+           const recency=[node.updated_at,trustedNeighbor.updated_at,edge.edge_updated_at].map(String).sort((a,b)=>Buffer.compare(Buffer.from(b),Buffer.from(a)))[0]!;
+           const graphTerms={source:sourceTerms,neighbor:neighborOnly,relation:relationTokens,recency};
+           add({...node},false,scoreFor(sourcePostings)+scoreFor(neighborRows),undefined,uniqueTokens.length,graphMatch,graphTerms);
+         }
+         if(tooBroad)break;
+       }
     }
     if(tooBroad)return{data:[],pagination:{status:'too_broad',page_size:pageSize}};
-    const utf8=(a:string,b:string)=>Buffer.compare(Buffer.from(a,'utf8'),Buffer.from(b,'utf8'));
-    const ordered=[...ranked.values()].sort((a,b)=>a.trust-b.trust||Number(b.exact)-Number(a.exact)||b.score-a.score||utf8(String(b.row.updated_at),String(a.row.updated_at))||utf8(a.row.type,b.row.type)||utf8(a.row.stable_key,b.row.stable_key)||utf8(a.row.id,b.row.id));
-    const projections=ordered.map(item=>{const projection={id:item.row.id,type:item.row.type,stable_key:item.row.stable_key,display_name:item.row.display_name,trust_basis:item.trust?'trusted_seed':'verified_fact',matched_paths:[...item.paths].sort(utf8)};while(Buffer.byteLength(JSON.stringify(projection),'utf8')>2*1024&&projection.matched_paths.length)projection.matched_paths.pop();return projection;});
+     const utf8=(a:string,b:string)=>Buffer.compare(Buffer.from(a,'utf8'),Buffer.from(b,'utf8'));
+     const recencyOrder=(a:string,b:string)=>{const left=Date.parse(a),right=Date.parse(b);return Number.isFinite(left)&&Number.isFinite(right)?left-right:utf8(a,b);};
+     const graphScore=(item:any)=>1000*Math.min(3,item.graphEdges.size)+100*Math.min(32,item.graphNeighborTerms.size)+[...item.graphRelationTerms].filter(term=>!item.graphSourceTerms.has(term)&&!item.graphNeighborTerms.has(term)).length;
+     const ordered=[...ranked.values()].sort((a,b)=>a.trust-b.trust||Number(b.exact)-Number(a.exact)||b.coverage-a.coverage||(graphScore(b)-graphScore(a))||b.score-a.score||recencyOrder(b.recency,a.recency)||utf8(a.row.type,b.row.type)||utf8(a.row.stable_key,b.row.stable_key)||utf8(a.row.id,b.row.id));
+     const projections=ordered.map(item=>{const projection={id:item.row.id,type:item.row.type,stable_key:item.row.stable_key,display_name:item.row.display_name,trust_basis:item.trust?'trusted_seed':'verified_fact',matched_paths:[...item.paths].sort(utf8),...(item.graph_matches.length?{graph_matches:item.graph_matches,...(item.graph_matches_truncated?{graph_matches_truncated:true}:{})}: {})};while(Buffer.byteLength(JSON.stringify(projection),'utf8')>2*1024&&projection.matched_paths.length)projection.matched_paths.pop();return projection;});
     if(projections.some(projection=>Buffer.byteLength(JSON.stringify({...projection,matched_paths:[]}),'utf8')>2*1024))return{data:[],pagination:{status:'too_broad',page_size:pageSize}};
     const cursorFor=(at:number)=>{const payload=Buffer.from(JSON.stringify({...bind,offset:at})).toString('base64url');return `${payload}.${sign(payload)}`;};
     const data:typeof projections=[];let omitted=0,index=offset;
-    while(index<projections.length&&data.length<pageSize){const row=projections[index]!;if(Buffer.byteLength(JSON.stringify([...data,row]),'utf8')>14*1024){omitted=projections.length-index;break;}data.push(row);index++;}
+     while(index<projections.length&&data.length<pageSize){const base=projections[index]!,provenance=this.#searchProvenance(String(base.id)),row={...base,...provenance};if(Buffer.byteLength(JSON.stringify(row),'utf8')>2*1024)return{data:[],pagination:{status:'too_broad',page_size:pageSize}};if(Buffer.byteLength(JSON.stringify([...data,row]),'utf8')>14*1024){omitted=projections.length-index;break;}data.push(row);index++;}
     const hasMore=index<projections.length,pagination:Record<string,unknown>={status:hasMore?'has_more':'complete',page_size:pageSize,...(hasMore?{next_cursor:cursorFor(index)}:{}),...(omitted?{omitted_count:omitted}:{})};
     while(data.length&&Buffer.byteLength(JSON.stringify({data,pagination}),'utf8')>16*1024){data.pop();index--;omitted++;pagination.status='has_more';pagination.next_cursor=cursorFor(index);pagination.omitted_count=omitted;}
     return{data,pagination};

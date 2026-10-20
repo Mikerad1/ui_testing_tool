@@ -68,6 +68,87 @@ test('prose candidate cap returns too_broad without partial matches',async()=>{
   }finally{store?.close();await rm(root,{recursive:true,force:true});}
 });
 
+test('prose search composes one trusted adjacent node and reports safe graph identity',async()=>{
+  const root=await mkdtemp(path.join(os.tmpdir(),'memory-search-graph-'));let store:Store|undefined;
+  try{
+    store=new Store(path.join(root,'memory.sqlite'),'search-graph');const source='graph.yaml',hash='f'.repeat(64);
+    storeLearningCommit.reconciliation(store,{sources:[{path:source,hash}],entities:[
+      {type:'screen',key:'checkout',name:'Checkout',attrs:withNlpMetadata({id:'checkout',elements:[{id:'pay'}]},'ignored'),hash,source},
+      {type:'action',key:'invoice',name:'Invoice',attrs:withNlpMetadata({id:'pay-invoice',element:'pay'},'ignored'),hash,source},
+    ],edges:[{key:'checkout-invoice',from:'screen:checkout',to:'action:invoice',relation:'TRIGGERED_BY',attrs:withNlpMetadata({},'ignored'),source}]} as any);
+    const result=store.searchPage('checkout invoice',{mode:'prose',trustYamlSeeds:true});
+    assert.equal(result.pagination.status,'complete');assert(result.data.length>=1);
+    const hit=result.data.find((row:any)=>row.stable_key==='checkout') as any;assert(hit);assert.equal(hit.graph_matches[0].relation_type,'TRIGGERED_BY');
+    assert.equal(hit.graph_matches[0].path,'one_hop');assert(hit.graph_matches.length<=3);assert(hit.graph_matches[0].candidate_paths.length);assert(hit.graph_matches[0].neighbor_paths.length);assert.equal('attributes' in hit.graph_matches[0],false);
+    assert.deepEqual(store.searchPage('TRIGGERED_BY',{mode:'prose',trustYamlSeeds:true}).data,[],'a relation label alone is not a query match');
+    assert.deepEqual(store.searchPage('checkout invoice',{mode:'exact',trustYamlSeeds:true}).data,[],'exact mode stays direct raw-value lookup');
+    const screenId=store.db.prepare("SELECT id FROM nodes WHERE project_id=? AND canonical_key='checkout'").get(store.projectId) as {id:string};
+    const actionId=store.db.prepare("SELECT id FROM nodes WHERE project_id=? AND canonical_key='invoice'").get(store.projectId) as {id:string};
+    store.close();store=undefined;
+    const external=new Database(path.join(root,'memory.sqlite'));
+    const addUntrusted=external.prepare("INSERT INTO edges(id,project_id,environment,from_node_id,to_node_id,relation_type,attributes_json,origin,verification_status,stable_key) VALUES(?,?,?, ?,?,'MENTIONS','{}','agent','stale',?)");
+    for(let i=0;i<3;i++)addUntrusted.run(`untrusted-${i}`, 'search-graph','legacy',screenId.id,actionId.id,`untrusted-${i}`);
+    external.close();store=new Store(path.join(root,'memory.sqlite'),'search-graph');
+    const overflow=store.searchPage('checkout invoice',{mode:'prose',trustYamlSeeds:true});assert.deepEqual(overflow.data,[]);assert.equal(overflow.pagination.status,'too_broad','raw untrusted edge fanout must be bounded before trust filtering');
+  }finally{store?.close();await rm(root,{recursive:true,force:true});}
+});
+
+test('prose search does not compose across an untrusted edge below the fanout limit',async()=>{
+  const root=await mkdtemp(path.join(os.tmpdir(),'memory-search-untrusted-edge-')),filename=path.join(root,'memory.sqlite');let store:Store|undefined;
+  try{
+    store=new Store(filename,'search-untrusted-edge');const source='graph.yaml',hash='9'.repeat(64);
+    storeLearningCommit.reconciliation(store,{sources:[{path:source,hash}],entities:[
+      {type:'screen',key:'checkout',name:'Checkout',attrs:withNlpMetadata({id:'checkout',elements:[]},'ignored'),hash,source},
+      {type:'screen',key:'invoice',name:'Invoice',attrs:withNlpMetadata({id:'invoice',elements:[]},'ignored'),hash,source},
+    ],edges:[{key:'checkout-invoice',from:'screen:checkout',to:'screen:invoice',relation:'NAVIGATES_TO',attrs:withNlpMetadata({},'ignored'),source}]} as any);
+    store.close();store=undefined;const external=new Database(filename);external.prepare("UPDATE edges SET verification_status='stale' WHERE project_id=? AND relation_type='NAVIGATES_TO'").run('search-untrusted-edge');external.close();
+    store=new Store(filename,'search-untrusted-edge');const result=store.searchPage('checkout invoice',{mode:'prose',trustYamlSeeds:true});
+    assert.deepEqual(result.data,[]);assert.equal(result.pagination.status,'complete');
+  }finally{store?.close();await rm(root,{recursive:true,force:true});}
+});
+
+test('single-token direct search remains complete for a high-degree trusted node',async()=>{
+  const root=await mkdtemp(path.join(os.tmpdir(),'memory-search-single-token-fanout-')),filename=path.join(root,'memory.sqlite');let store:Store|undefined;
+  try{
+    store=new Store(filename,'single-token-fanout');const source='fanout.yaml',hash='7'.repeat(64);
+    storeLearningCommit.reconciliation(store,{sources:[{path:source,hash}],entities:[
+      {type:'screen',key:'account',name:'Account screen',attrs:withNlpMetadata({id:'account',elements:[]},'ignored'),hash,source},
+      ...Array.from({length:4},(_,index)=>({type:'screen',key:`neighbor-${index}`,name:`Neighbor ${index}`,attrs:withNlpMetadata({id:`neighbor-${index}`,elements:[]},'ignored'),hash,source})),
+    ],edges:[]} as any);
+    const sourceId=(store.db.prepare("SELECT id FROM nodes WHERE project_id=? AND canonical_key='account'").get(store.projectId) as {id:string}).id;
+    const neighbors=store.db.prepare("SELECT id FROM nodes WHERE project_id=? AND canonical_key LIKE 'neighbor-%' ORDER BY id").all(store.projectId) as Array<{id:string}>;
+    store.close();store=undefined;const external=new Database(filename);
+    const insert=external.prepare("INSERT INTO edges(id,project_id,environment,from_node_id,to_node_id,relation_type,attributes_json,origin,verification_status,stable_key) VALUES(?,?,?, ?,?,'MENTIONS','{}','agent','stale',?)");
+    neighbors.forEach((neighbor,index)=>insert.run(`stale-neighbor-${index}`,'single-token-fanout','legacy',sourceId,neighbor.id,`stale-neighbor-${index}`));external.close();
+    store=new Store(filename,'single-token-fanout');const result=store.searchPage('Account',{mode:'prose',trustYamlSeeds:true});
+    assert.equal(result.pagination.status,'complete');assert.equal(result.data.length,1);assert.equal(result.data[0]?.stable_key,'account');assert.equal(result.data[0]?.trust_basis,'trusted_seed');assert.equal('graph_matches' in (result.data[0] as any),false);
+  }finally{store?.close();await rm(root,{recursive:true,force:true});}
+});
+
+test('graph relevance ranks two supporting edges above one and counts relation tokens',async()=>{
+  const root=await mkdtemp(path.join(os.tmpdir(),'memory-search-graph-rank-'));let store:Store|undefined;
+  try{
+    store=new Store(path.join(root,'memory.sqlite'),'graph-rank');const source='rank.yaml',hash='8'.repeat(64);
+    const entities=[
+      {type:'screen',key:'two-edge',name:'Start two-edge screen',attrs:{id:'two-edge',elements:[{id:'one'},{id:'two'}]}},
+      {type:'action',key:'invoice-one',name:'Invoice action one',attrs:{id:'invoice-one',element:'one'}},
+      {type:'action',key:'invoice-two',name:'Invoice action two',attrs:{id:'invoice-two',element:'two'}},
+      {type:'screen',key:'one-edge',name:'Start one-edge screen',attrs:{id:'one-edge',elements:[{id:'three'}]}},
+      {type:'action',key:'invoice-triggered',name:'Invoice triggered helper',attrs:{id:'invoice-triggered',element:'three'}},
+      ...Array.from({length:4},(_,index)=>({type:'validation_rule',key:`unrelated-${index}`,name:`Triggered unrelated ${index}`,attrs:{id:`unrelated-${index}`,description:'unrelated'}})),
+    ].map(entity=>({...entity,attrs:withNlpMetadata(entity.attrs,'ignored'),hash,source}));
+    const edges=[['two-edge','invoice-one','first'],['two-edge','invoice-two','second'],['one-edge','invoice-triggered','third']].map(([from,to,key])=>({key,from:`${from.startsWith('two')||from.startsWith('one')?'screen':'action'}:${from}`,to:`${to.startsWith('invoice')?'action':'screen'}:${to}`,relation:'TRIGGERED_BY',attrs:withNlpMetadata({},'ignored'),source}));
+    storeLearningCommit.reconciliation(store,{sources:[{path:source,hash}],entities,edges} as any);
+    const result=store.searchPage('start invoice triggered',{mode:'prose',trustYamlSeeds:true});
+    const stableKeys=result.data.map((row:any)=>row.stable_key);
+    assert(stableKeys.indexOf('two-edge')>=0);assert(stableKeys.indexOf('one-edge')>=0);
+    assert(stableKeys.indexOf('two-edge')<stableKeys.indexOf('one-edge'),`two trusted supporting edges should rank ahead: ${stableKeys.join(', ')}`);
+    const twoEdge=result.data.find((row:any)=>row.stable_key==='two-edge') as any;
+    assert.equal(twoEdge.graph_matches.length,2);
+    assert(twoEdge.graph_matches.every((match:any)=>match.relation_type==='TRIGGERED_BY'));
+  }finally{store?.close();await rm(root,{recursive:true,force:true});}
+});
+
 test('cursor scope binding stays below MCP input limits for long valid project IDs',async()=>{
   const root=await mkdtemp(path.join(os.tmpdir(),'memory-search-long-scope-'));let store:Store|undefined;
   try{

@@ -87,7 +87,7 @@ test('public retrieval is trusted-only by default and labels current YAML seed g
     assert(trustedContext.trusted_facts.some((item:any)=>item.id===account&&item.trust_basis==='trusted_seed'));
     assert(!trustedContext.trusted_facts.some((item:any)=>[conflicted,stale,deleted].includes(item.id)));
     assert.equal(trustedContext.authored_guidance,null);
-    assert.equal(store.search('Account',{trustYamlSeeds:true})[0]!.trust_basis,'trusted_seed');
+    assert.equal(store.search('Account',{trustYamlSeeds:true}).find((item:any)=>item.id===account)?.trust_basis,'trusted_seed');
     assert.deepEqual(store.search('Proposal',{trustYamlSeeds:true}),[]);for(const term of ['Conflicted','Stale','Deleted'])assert.equal(store.search(term,{trustYamlSeeds:true}).some((item:any)=>[conflicted,stale,deleted].includes(item.id)),false);
     const seedNode=store.getTrustedNode(account,{trustYamlSeeds:true}) as any;assert.equal(seedNode.verification_status,'proposed');assert.equal(seedNode.trust_basis,'trusted_seed');
     const seedNeighbors=store.neighbors(home,20,{trustYamlSeeds:true}) as any[];
