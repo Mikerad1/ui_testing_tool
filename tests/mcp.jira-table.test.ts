@@ -58,8 +58,8 @@ test('MCP structured Jira table tool validates locally, defaults to dry-run, and
     client = new Client({ name: 'jira-table-integration', version: '1.0.0' }); await client.connect(transport);
     const listed = await client.listTools();
     const tableTool = listed.tools.find(tool => tool.name === 'jira_publish_screenshot_table'); assert.ok(tableTool);
-    assert.match(tableTool.description ?? '', /Never use production Jira/);
-    assert.match(tableTool.description ?? '', /exact task-specific user authorization naming the exact non-production issue, site, and operation/);
+    assert.match(tableTool.description ?? '', /Writes to any Jira project require exact task-specific user authorization naming the exact issue, site, and operation/);
+    assert.doesNotMatch(tableTool.description ?? '', /non-production|Never use production Jira/);
     const args = { issue_key: 'PROJ-12', site: 'https://example.atlassian.net', image_path: '.umb-managed/evidence.png', headers: tableData.headers, rows: tableData.rows, image_cell: tableData.imageCell };
     const dryRun: any = await client.callTool({ name: 'jira_publish_screenshot_table', arguments: args });
     assert.equal(dryRun.structuredContent.data.status, 'dry_run'); assert.equal(calls.length, 0);
