@@ -17,7 +17,7 @@ const response = (status: number, data: unknown) => new Response(JSON.stringify(
 
 test('MCP structured Jira table tool validates locally, defaults to dry-run, and writes only on both opt-ins', { timeout: 30000 }, async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'umb-mcp-jira-')); const managed = path.join(root, 'artifacts', '.umb-managed');
-  await mkdir(managed, { recursive: true }); await writeFile(path.join(managed, 'evidence.png'), png);
+  await mkdir(managed, { recursive: true }); await writeFile(path.join(managed, 'evidence.png'), png); const secondPng = Buffer.from([137,80,78,71,13,10,26,10,4,5,6]); await writeFile(path.join(managed, 'second.png'), secondPng);
   const port = await freePort(), tokenName = 'UMB_MCP_JIRA_TEST_TOKEN', oldUmbToken = process.env[tokenName], oldEmail = process.env.JIRA_EMAIL, oldApiToken = process.env.JIRA_API_TOKEN;
   process.env[tokenName] = 'local-test-token'; process.env.JIRA_EMAIL = 'test@example.invalid'; process.env.JIRA_API_TOKEN = 'mock-token';
   const config = { project: { id: 'jira-table-test', name: 'test', base_url: 'http://127.0.0.1:3000' }, server: { host: '127.0.0.1', port, auth: { mode: 'token', token_env: tokenName } }, artifacts: { directory: './artifacts', redact_sensitive: true, max_file_bytes: 1000 }, browser: { allowed_origins: [] }, memory: { database: './memory.sqlite' }, knowledge: { path: './knowledge' } } as unknown as Config;
@@ -76,6 +76,10 @@ test('MCP structured Jira table tool validates locally, defaults to dry-run, and
     assert.equal(published.structuredContent.data.marker, marker);
     const duplicate: any = await client.callTool({ name: 'jira_publish_screenshot_table', arguments: { ...args, write: true, experimental_inline_wiki: true } });
     assert.equal(duplicate.structuredContent.data.status, 'already_published'); assert.equal(duplicate.structuredContent.data.comment_id, 'comment-7');
+    const multi: any = await client.callTool({ name: 'jira_publish_screenshot_table', arguments: { issue_key: args.issue_key, site: args.site, headers: args.headers, rows: args.rows, images: [{ image_path: '.umb-managed/evidence.png', image_cell: { row: 0, column: 1 } }, { image_path: '.umb-managed/second.png', image_cell: { row: 0, column: 0 } }] } });
+    assert.equal(multi.structuredContent.data.status, 'dry_run'); assert.equal(multi.structuredContent.data.images.length, 2); assert.notEqual(multi.structuredContent.data.marker, marker);
+    const mixed: any = await client.callTool({ name: 'jira_publish_screenshot_table', arguments: { ...args, images: [{ image_path: '.umb-managed/evidence.png', image_cell: { row: 0, column: 1 } }] } });
+    assert.equal(mixed.isError, true); assert.equal(calls.length, 6);
     assert.equal(attachmentPosts, 1); assert.equal(commentPosts, 1);
     assert.equal(calls.length, 6); assert.ok(calls.some(call => call === 'POST https://example.atlassian.net/rest/api/3/issue/PROJ-12/attachments'));
     assert.ok(calls.every(call => !call.includes('/search')));
