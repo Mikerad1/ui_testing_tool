@@ -105,6 +105,9 @@ export async function publishJiraScreenshotComment(config: Config, root: string,
   const filename = `umb-screenshot-${hash.slice(0, 24)}${extension}`;
   const contentHash = tableData ? createHash('sha256').update(hash).update('\0').update(JSON.stringify(tableData)).digest('hex') : hash;
   const marker = tableData ? `UMB-JIRA-STRUCTURED-TABLE:${contentHash}` : options.table ? `UMB-JIRA-SCREENSHOT-TABLE:${hash}` : `UMB-JIRA-SCREENSHOT:${hash}`;
+  const body = tableData
+    ? `|| ${tableData.headers.join(' || ')} ||\n${tableData.rows.map((row, rowIndex) => `| ${row.map((cell, column) => rowIndex === tableData.imageCell.row && column === tableData.imageCell.column ? `${cell} !${filename}!` : cell).join(' | ')} |`).join('\n')}`
+    : options.table ? `|| Field || Result ||\n| Evidence | !${filename}! |` : `!${filename}!`;
   const issueUrl = `${site}/rest/api/2/issue/${encodeURIComponent(options.issueKey)}`;
   if (!options.write && options.structuredResult) return { status: 'dry_run', issue_key: options.issueKey, marker, filename, destination: `${issueUrl}/comment`, rendering: 'experimental_unverified' };
   if (!options.write) return `DRY RUN: would inspect comments at ${issueUrl}/comment and attachments at ${issueUrl}?fields=attachment, reuse a same-name/size-matched ${filename} attachment if present or upload it otherwise, then post an experimental ${options.table ? 'wiki table' : 'wiki-inline'} comment to ${issueUrl}/comment. No Jira requests were made.`;
@@ -125,9 +128,9 @@ export async function publishJiraScreenshotComment(config: Config, root: string,
     } else if (data.total !== expectedTotal) throw Error('Jira comment count changed during pagination; marker absence cannot be established.');
     const total = expectedTotal;
     if (total === undefined || data.comments.length > commentPageSize || inspected + data.comments.length > total || (data.comments.length === 0 && inspected < total)) throw Error('Jira returned an incomplete comment page; marker absence cannot be established.');
-    const priorComment = data.comments.find((comment: any) => typeof comment?.body === 'string' && comment.body.includes(marker));
+    const priorComment = data.comments.find((comment: any) => typeof comment?.body === 'string' && (comment.body === body || comment.body.includes(marker)));
     if (priorComment) {
-      if (!options.structuredResult) return `Already published: marker ${marker} exists on ${options.issueKey}; no write made.`;
+      if (!options.structuredResult) return `Already published: matching comment exists on ${options.issueKey}; no write made.`;
       const priorIssue = await request(fetcher, `${issueUrl}?fields=attachment`, { headers: { Authorization: auth, Accept: 'application/json' } }, 'Jira attachment inspection');
       if (!priorIssue.response.ok) throw Error(safeResponseError(priorIssue.response.status, priorIssue.text));
       let priorData: any; try { priorData = JSON.parse(priorIssue.text); } catch { throw Error('Jira returned an invalid issue response.'); }
@@ -158,9 +161,6 @@ export async function publishJiraScreenshotComment(config: Config, root: string,
     attachment = Array.isArray(result) ? result.find((item: any) => item?.filename === filename) : undefined;
     if (!attachment?.id) throw Error(`Attachment POST outcome is ambiguous; no confirmed attachment id for ${filename}. Do not retry blindly.`);
   }
-  const body = tableData
-    ? `${marker}\n|| ${tableData.headers.join(' || ')} ||\n${tableData.rows.map((row, rowIndex) => `| ${row.map((cell, column) => rowIndex === tableData.imageCell.row && column === tableData.imageCell.column ? `${cell} !${filename}!` : cell).join(' | ')} |`).join('\n')}`
-    : options.table ? `${marker}\n|| Field || Result ||\n| Evidence | !${filename}! |` : `${marker}\n!${filename}!`;
   let posted: { response: Response; text: string };
   try { posted = await request(fetcher, `${site}/rest/api/2/issue/${encodeURIComponent(options.issueKey)}/comment`, { method: 'POST', headers: { Authorization: auth, Accept: 'application/json', 'Content-Type': 'application/json' }, body: JSON.stringify({ body }) }, 'Comment creation'); }
   catch { throw Error(`Attachment ${attachment.id} (${filename}) is confirmed, but comment outcome is ambiguous; do not retry blindly. Wiki inline rendering remains experimental.`); }
@@ -170,5 +170,5 @@ export async function publishJiraScreenshotComment(config: Config, root: string,
     if (comment?.id == null) throw Error(`Comment POST outcome is ambiguous; attachment ${attachment.id} (${filename}) is confirmed, but no comment id was returned. Do not retry blindly.`);
     return { status: 'published', issue_key: options.issueKey, marker, filename, comment_id: String(comment.id), attachment_id: String(attachment.id), rendering: 'experimental_unverified' };
   }
-  return `Published to ${options.issueKey}: attachment ${attachment.id} (${filename}) and marked comment. Legacy wiki ${options.table ? 'table and inline image' : 'inline image'} rendering is experimental and must be verified in a Jira sandbox.`;
+  return `Published to ${options.issueKey}: attachment ${attachment.id} (${filename}) and comment. Legacy wiki ${options.table ? 'table and inline image' : 'inline image'} rendering is experimental and must be verified in a Jira sandbox.`;
 }

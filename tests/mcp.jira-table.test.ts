@@ -42,7 +42,8 @@ test('MCP structured Jira table tool validates locally, defaults to dry-run, and
     if (url.endsWith('/comment') && init.method === 'POST') {
       commentPosts++;
       const body = JSON.parse(String(init.body)).body;
-      assert.equal(body, `${marker}\n|| Criterion || Result ||\n| Ready | Pass !${filename}! |`);
+      assert.equal(body, `|| Criterion || Result ||\n| Ready | Pass !${filename}! |`);
+      assert.doesNotMatch(body, /UMB-JIRA-/);
       existingComments = [{ id: 'comment-7', body }]; return response(201, { id: 'comment-7' });
     }
     throw Error('Unexpected mocked Jira request.');

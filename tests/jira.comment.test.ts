@@ -62,7 +62,8 @@ test('uploads multipart safely then comments to explicit issue only', async () =
       return response(200, [{ id: '44', filename: (init.body as FormData).get('file') instanceof File ? ((init.body as FormData).get('file') as File).name : '' }]);
     }
     assert.equal(url, 'https://example.atlassian.net/rest/api/2/issue/PROJ-12/comment');
-    assert.match(String(init.body), /UMB-JIRA-SCREENSHOT:/); assert.match(String(init.body), /!umb-screenshot-[a-f0-9]{24}\.png!/);
+    const body = JSON.parse(String(init.body)).body;
+    assert.doesNotMatch(body, /UMB-JIRA-/); assert.match(body, /^!umb-screenshot-[a-f0-9]{24}\.png!$/);
     return response(201, { id: 'comment-1' });
   }) as typeof fetch;
   try {
@@ -73,12 +74,12 @@ test('uploads multipart safely then comments to explicit issue only', async () =
   } finally { delete process.env.JIRA_EMAIL; delete process.env.JIRA_API_TOKEN; await s.clean(); }
 });
 
-test('marker and deterministic filename avoid duplicate writes; attachment match is reused', async () => {
+test('legacy marker and deterministic filename avoid duplicate writes; attachment match is reused', async () => {
   const s = await setup(); process.env.JIRA_EMAIL = 'person@example.invalid'; process.env.JIRA_API_TOKEN = 'SECRET_TOKEN'; let count = 0;
   const hash = createHash('sha256').update(png).digest('hex');
   const fetcher = (async () => { count++; return response(200, commentPage([{ body: `existing UMB-JIRA-SCREENSHOT:${hash}` }])); }) as typeof fetch;
   try {
-    const markerFetch = (async (input: string | URL | Request, init: RequestInit = {}) => { count++; const url = String(input); if (!init.method || init.method === 'GET') return url.includes('/comment?') ? response(200, commentPage([])) : response(200, issue([{ id: 'attachment-9', size: png.length, filename: `umb-screenshot-${hash.slice(0,24)}.png` }])); assert.match(String(init.body), new RegExp(hash)); return response(201, { id: 'comment-1' }); }) as typeof fetch;
+    const markerFetch = (async (input: string | URL | Request, init: RequestInit = {}) => { count++; const url = String(input); if (!init.method || init.method === 'GET') return url.includes('/comment?') ? response(200, commentPage([])) : response(200, issue([{ id: 'attachment-9', size: png.length, filename: `umb-screenshot-${hash.slice(0,24)}.png` }])); const body = JSON.parse(String(init.body)).body; assert.match(body, new RegExp(`!umb-screenshot-${hash.slice(0,24)}\\.png!`)); assert.doesNotMatch(body, /UMB-JIRA-/); return response(201, { id: 'comment-1' }); }) as typeof fetch;
     const unchanged = await publishJiraScreenshotComment(s.config, s.root, { ...base, write: true }, fetcher);
     assert.match(unchanged, /no write made/); assert.equal(count, 1);
     const out = await publishJiraScreenshotComment(s.config, s.root, { ...base, write: true }, markerFetch);
@@ -96,7 +97,8 @@ test('table mode posts the fixed table and reuses a size-matched attachment', as
     if (url.endsWith('?fields=attachment')) return response(200, issue([{ id: 'attachment-table', filename, size: png.length }]));
     if (init.method === 'POST' && url.endsWith('/comment')) {
       const payload = JSON.parse(String(init.body));
-      assert.equal(payload.body, `UMB-JIRA-SCREENSHOT-TABLE:${hash}\n|| Field || Result ||\n| Evidence | !${filename}! |`);
+      assert.equal(payload.body, `|| Field || Result ||\n| Evidence | !${filename}! |`);
+      assert.doesNotMatch(payload.body, /UMB-JIRA-/);
       return response(201, { id: 'table-comment' });
     }
     throw Error(`Unexpected request: ${url}`);
@@ -105,6 +107,17 @@ test('table mode posts the fixed table and reuses a size-matched attachment', as
     const result = await publishJiraScreenshotComment(s.config, s.root, { ...base, write: true, table: true }, fetcher);
     assert.match(result, /table and inline image/); assert.ok(!calls.some(call => call.includes('/attachments')));
     assert.equal(calls.length, 3);
+  } finally { delete process.env.JIRA_EMAIL; delete process.env.JIRA_API_TOKEN; await s.clean(); }
+});
+
+test('an exact marker-free comment body prevents a duplicate write', async () => {
+  const s = await setup(); process.env.JIRA_EMAIL = 'person@example.invalid'; process.env.JIRA_API_TOKEN = 'SECRET_TOKEN'; let calls = 0;
+  const hash = createHash('sha256').update(png).digest('hex');
+  const filename = `umb-screenshot-${hash.slice(0, 24)}.png`;
+  const fetcher = (async () => { calls++; return response(200, commentPage([{ body: `!${filename}!` }])); }) as typeof fetch;
+  try {
+    assert.match(await publishJiraScreenshotComment(s.config, s.root, { ...base, write: true }, fetcher), /matching comment.*no write made/);
+    assert.equal(calls, 1);
   } finally { delete process.env.JIRA_EMAIL; delete process.env.JIRA_API_TOKEN; await s.clean(); }
 });
 
@@ -150,6 +163,25 @@ test('structured markers are stable for identical canonical table data and vary 
     const different = await publishJiraScreenshotComment(s.config, s.root, { ...base, tableData: { ...tableData, rows: [['Ready', 'Fail']] }, structuredResult: true }, noNetwork);
     assert.equal(first.status, 'dry_run'); assert.equal(first.marker, same.marker); assert.notEqual(first.marker, different.marker);
   } finally { await s.clean(); }
+});
+
+test('structured table comments omit the marker while structured results retain it', async () => {
+  const s = await setup(); process.env.JIRA_EMAIL = 'person@example.invalid'; process.env.JIRA_API_TOKEN = 'SECRET_TOKEN';
+  const tableData = { headers: ['Criterion', 'Result'], rows: [['Ready', 'Pass']], imageCell: { row: 0, column: 1 } };
+  let postedBody = '';
+  const fetcher = (async (input: string | URL | Request, init: RequestInit = {}) => {
+    const url = String(input);
+    if (!init.method || init.method === 'GET') return url.includes('/comment?') ? response(200, commentPage([])) : response(200, issue());
+    if (url.endsWith('/attachments')) return response(200, [{ id: 'structured-attachment', filename: `umb-screenshot-${createHash('sha256').update(png).digest('hex').slice(0, 24)}.png` }]);
+    postedBody = JSON.parse(String(init.body)).body;
+    return response(201, { id: 'structured-comment' });
+  }) as typeof fetch;
+  try {
+    const result = await publishJiraScreenshotComment(s.config, s.root, { ...base, write: true, tableData, structuredResult: true }, fetcher);
+    assert.equal(postedBody, `|| Criterion || Result ||\n| Ready | Pass !umb-screenshot-${createHash('sha256').update(png).digest('hex').slice(0, 24)}.png! |`);
+    assert.doesNotMatch(postedBody, /UMB-JIRA-/);
+    assert.equal(result.status, 'published'); assert.match(result.marker, /^UMB-JIRA-STRUCTURED-TABLE:/);
+  } finally { delete process.env.JIRA_EMAIL; delete process.env.JIRA_API_TOKEN; await s.clean(); }
 });
 
 test('ambiguous POSTs are not retried and failures never expose credentials', async () => {
