@@ -23,7 +23,7 @@ const nlp: NlpProcessor = {
   async shutdown() { await appendFile(log, 'shutdown\n'); },
 };
 const writer = withTestEvidence(new LearningWriter(store, nlp, createMemoryRedactor({ sensitive_paths: [], sensitive_values_env: [] }, {})), store);
-const config = { project: { id: 'stdio-drain' } } as Config;
+const config = { project: { id: 'stdio-drain' }, memory: { persistent_learning_writes: true } } as Config;
 const stop = await serve(config, store, { revision: 0 } as any, { stdio: true, knowledgeRoot: root, learningWriter: writer });
 
 process.stdin.once('end', () => {
