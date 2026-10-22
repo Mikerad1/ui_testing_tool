@@ -9,7 +9,7 @@ import { withTestEvidence } from '../helpers/learning.js';
 
 const root = process.argv[2]!;
 const log = process.argv[3]!;
-const store = new Store(path.join(root, 'memory.sqlite'), 'stdio-drain');
+const store = new Store(path.join(root, 'memory.sqlite'), 'stdio-drain','local');
 const nlp: NlpProcessor = {
   async health() {
     return { version: 3, id: 'health', ok: true, op: 'health', health: { protocol: 3, python: 'test', spacy: 'fake', model: 'fake', model_version: '1.0.0', rules: '1',patterns_schema_version:1,patterns_digest:'b'.repeat(64),pattern_count:0,patterns_ready:false,ready: true } };

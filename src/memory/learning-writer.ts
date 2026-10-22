@@ -1,5 +1,5 @@
 import { Buffer } from 'node:buffer';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { NLP_ENTITY_LABELS, NLP_GENERIC_ERROR, NLP_MAX_TEXT_BYTES, NLP_PROTOCOL_VERSION, NLP_RELATION_TYPES, type NlpEntity, type NlpRelation, type NlpResponse } from './nlp-protocol.js';
 import type { MemoryRedactor } from './redactor.js';
 import type { CandidateObservationInput, Store, VerificationApproval } from './store.js';
@@ -162,6 +162,15 @@ export class LearningWriter {
     } catch {
       throw new Error('Learning write failed safely');
     }
+  }
+
+  /** Save an agent-authored reusable note through the same redaction/NLP write boundary. */
+  async save(content:string,title?:string){
+    if(typeof content!=='string'||!content.trim()||Buffer.byteLength(content,'utf8')>NLP_MAX_TEXT_BYTES)throw new Error('Learning write failed safely');
+    if(title!==undefined&&(typeof title!=='string'||!title.trim()||Buffer.byteLength(title,'utf8')>500))throw new Error('Learning write failed safely');
+    const observationId=randomUUID(),stableKey=`agent-note:${observationId}`;
+    const node=await this.propose({observation_id:observationId,type:'note',stable_key:stableKey,display_name:(title??content.trim()).slice(0,500),attributes:{content},evidence_refs:[]}) as any;
+    return{saved:true,immediately_available:true,id:node.id};
   }
 
   async addEdge(input: ProposedEdge) {
