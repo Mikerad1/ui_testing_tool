@@ -89,6 +89,7 @@ function collectValues(db:Database.Database,node:NodeRow,view:0|1):Value[]{
     case'locator':for(const key of ['by','role','name','value'] as const)add(values,`attributes.${key}`,'exact',attrs[key],3);fields(values,'attributes.locator',attrs.locator,3);break;
     case'test':for(const key of ['test_id','issue_key'] as const)add(values,`attributes.${key}`,'exact',attrs[key],3);add(values,'attributes.url','exact',attrs.url,3,safeUrl);add(values,'attributes.route','exact',attrs.route,3,safeRoute);for(const key of ['title','summary','description'] as const)add(values,`attributes.${key}`,'prose',attrs[key],1);break;
     case'acceptance_criterion':for(const key of ['criterion_id','issue_key'] as const)add(values,`attributes.${key}`,'exact',attrs[key],3);for(const key of ['title','description','statement'] as const)add(values,`attributes.${key}`,'prose',attrs[key],1);break;
+    case'note':add(values,'attributes.content','prose',attrs.content,1);break;
   }
   return values;
 }

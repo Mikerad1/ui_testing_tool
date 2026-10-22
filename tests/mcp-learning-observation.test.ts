@@ -192,7 +192,7 @@ test('closed graph registry rejects unsupported node types, relations, and endpo
   const dir=await mkdtemp(path.join(os.tmpdir(),'umb-mcp-registry-'));let store:Store|undefined;
   try{
     store=await Store.open(path.join(dir,'memory.sqlite'),'mcp-registry');const learning=writer(store);
-    await assert.rejects(()=>learning.propose({observation_id:'unsupported-node',type:'note',stable_key:'n',display_name:'Note'}));
+    await assert.rejects(()=>learning.propose({observation_id:'unsupported-node',type:'unsupported_type',stable_key:'n',display_name:'Note'}));
      const from=await learning.propose({observation_id:'screen-a',type:'screen',stable_key:'a',display_name:'A'}) as any;
      const to=await learning.propose({observation_id:'screen-b',type:'screen',stable_key:'b',display_name:'B'}) as any;
      const assertion=store.recordAssertion({session_id:'registry-evidence',subject_node_id:from.id,passed:true,observed_count:1});
@@ -200,7 +200,7 @@ test('closed graph registry rejects unsupported node types, relations, and endpo
      await assert.rejects(()=>learning.addEdge({observation_id:'unsupported-relation',from_id:from.id,to_id:to.id,relation:'links'}));
     await assert.rejects(()=>learning.addEdge({observation_id:'bad-signature',from_id:from.id,to_id:to.id,relation:'HAS_ACTION'}));
     const observation={source_kind:'mcp_node' as const,source_key:'boundary-node',source_revision_hash:'a'.repeat(64),pipeline_fingerprint:'b'.repeat(64),nlp_protocol_version:3,python_version:'3.12',spacy_version:'3.8',model_name:'test',model_version:'1',rules_version:'r1',patterns_schema_version:1,patterns_digest:'b'.repeat(64),redaction_policy_fingerprint:'c'.repeat(64),extraction_ready:false,entities:[],relations:[],links:[],status:'proposed' as const};
-    assert.throws(()=>storeLearningCommit.mcpNode(store!,{observation,type:'note',stable_key:'bad',display_name:'Bad',attributes:withNlpMetadata({},'normalized')}),/Unsupported memory graph node type/);
+     assert.throws(()=>storeLearningCommit.mcpNode(store!,{observation,type:'unsupported_type',stable_key:'bad',display_name:'Bad',attributes:withNlpMetadata({},'normalized')}),/Unsupported memory graph node type/);
      assert.throws(()=>storeLearningCommit.mcpEdge(store!,{observation:{...observation,source_kind:'mcp_edge',source_key:'bad-relation'},evidence_refs:[evidenceRef],from_id:from.id,to_id:to.id,relation:'links',attributes:withNlpMetadata({},'normalized')}),/Unsupported memory graph relation/);
     assert.equal(store.listCandidateObservations().length,2);
   }finally{store?.close();await rm(dir,{recursive:true,force:true});}

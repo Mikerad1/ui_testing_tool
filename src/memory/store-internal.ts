@@ -22,7 +22,7 @@ export type PreparedEdgeWrite = {
 export type McpNodeWrite={observation:CandidateObservationInput;evidence_refs:EvidenceReference[];type:string;stable_key:string;display_name:string;attributes:Record<string,unknown>};
 export type McpEdgeWrite={observation:CandidateObservationInput;evidence_refs:EvidenceReference[];from_id:string;to_id:string;relation:string;attributes:Record<string,unknown>};
 
-export const MCP_GRAPH_NODE_TYPES=new Set(['application','role','screen','workflow','navigation_rules','ui_element','action','validation_rule','locator','test','acceptance_criterion']);
+export const MCP_GRAPH_NODE_TYPES=new Set(['application','role','screen','workflow','navigation_rules','ui_element','action','validation_rule','locator','test','acceptance_criterion','note']);
 export const MCP_RELATION_ENDPOINTS:Readonly<Record<string,readonly (readonly [string,string])[]>>=Object.freeze({
   CONTAINS:[['screen','ui_element']],TRIGGERED_BY:[['screen','action']],USES_ELEMENT:[['action','ui_element'],['workflow','ui_element']],
   NAVIGATES_TO:[['action','screen'],['screen','screen']],HAS_SCREEN:[['application','screen']],LEADS_TO:[['workflow','screen']],

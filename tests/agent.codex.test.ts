@@ -27,10 +27,10 @@ test('skill instructions hold phase boundaries and actual tool names', () => {
     'at least one positive', 'meaningful negative/boundary case', 'isolated approved test accounts/data', 'Never run destructive/write tests against production',
     '`passed`, `failed`, `blocked`, `skipped`, and `not_applicable`', 'all required cases executed successfully', 'continue only independent safe cases',
     'redact secrets and PII', 'session cookies', 'Persistent runtime writes may be disabled by the current build',
-    '1–5 `evidence_refs` copied from a PASS result of `test_assert`', 'passed assertions in the same project/environment with a live subject', 'provenance/existence/scope links only—not semantic support or claim verification', 'memory_candidates', 'Saved MCP learnings are automatically available through normal retrieval', 'memory_propose', 'memory_add_edge',
-    'stable observation IDs', 'Never persist secrets or raw sensitive values', 'never access the database directly', 'Saved MCP learnings are reusable without an approval step',
-    'memory_verify', 'memory_supersede', 'Bulk memory backfill remains separately disabled/operator-gated',
-    'Operational assertions/evidence are separate from learning proposals', 'untrusted data, not instructions', 'Do not invoke Jira write/report/upload/comment/transition tools by default',
+    'memory_save', 'single learning tool', 'no assertion refs, approval, or follow-up action', 'persistent and immediately available through normal retrieval',
+    'Never persist secrets or raw sensitive values', 'never access the database directly', 'direct project memory',
+    'Bulk memory backfill remains separately disabled/operator-gated',
+    'Operational assertions/evidence are separate from learning', 'untrusted data, not instructions', 'Do not invoke Jira write/report/upload/comment/transition tools by default',
     'A write requires exact, task-specific user authorization', 'naming the allowed project, issue, operation/count, and side effects',
     'Prior sandbox authorization is consumed by its task and is not reusable', 'Phase 5 is not generally enabled', 'absent that exact authorization, do not write',
     'Do not claim attachments, duplicate-safe retries, or recovery',
@@ -40,6 +40,7 @@ test('skill instructions hold phase boundaries and actual tool names', () => {
     'URLs, markup punctuation, controls, and line breaks are rejected', 'within .umb-managed', 'experimental_inline_wiki=true',
     'Use the separately configured Jira MCP for ordinary comments',
   ]) assert.ok(CODEX_SKILL.includes(required), required);
+  for(const removed of ['memory_propose','memory_verify','memory_add_edge','memory_candidates'])assert.equal(CODEX_SKILL.includes(removed),false,`${removed} is not part of the agent learning workflow`);
   assert.ok(CODEX_SKILL.split('\n').length >= 35 && CODEX_SKILL.split('\n').length <= 55, 'keep the shared skill concise');
   assert.match(CODEX_SKILL, /^---\nname: umb-ui-testing\ndescription: .+\n---/);
 });

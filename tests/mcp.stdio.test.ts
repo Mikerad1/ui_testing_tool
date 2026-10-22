@@ -9,6 +9,7 @@ import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import Database from 'better-sqlite3';
 import { acquireProjectLock } from '../src/security/project-lock.js';
 import { Store } from '../src/memory/store.js';
 
@@ -30,9 +31,11 @@ test('stdio CLI serves MCP tools over official transport and releases resources 
  try{
   await client.connect(transport);
       const listed=await client.listTools();assert.ok(listed.tools.some(tool=>tool.name==='browser_status'));assert.ok(listed.tools.some(tool=>tool.name==='browser_refresh'));assert.ok(listed.tools.some(tool=>tool.name==='browser_set_viewport'));
-       const proposeSchema=listed.tools.find(tool=>tool.name==='memory_propose')!.inputSchema as any,edgeSchema=listed.tools.find(tool=>tool.name==='memory_add_edge')!.inputSchema as any;
-        assert(proposeSchema.required.includes('observation_id'));assert(proposeSchema.required.includes('evidence_refs'));assert(edgeSchema.required.includes('observation_id'));assert(edgeSchema.required.includes('evidence_refs'));
-        assert.match(listed.tools.find(tool=>tool.name==='memory_propose')!.description!,/automatically available through normal memory retrieval/i);assert.match(listed.tools.find(tool=>tool.name==='memory_get_node')!.description!,/including saved MCP learnings/i);assert.match(listed.tools.find(tool=>tool.name==='memory_path')!.description!,/including saved MCP learnings/i);
+         const saveTool=listed.tools.find(tool=>tool.name==='memory_save')!,saveSchema=saveTool.inputSchema as any;
+         assert.deepEqual(saveSchema.required,['content']);assert.ok(saveSchema.properties.content);assert.ok(saveSchema.properties.title);assert.match(saveTool.description!,/immediately persistent.*available through normal memory retrieval/i);
+         for(const removed of ['memory_propose','memory_verify','memory_add_edge','memory_supersede','memory_candidates'])assert.equal(listed.tools.some(tool=>tool.name===removed),false,`${removed} is not registered`);
+         assert.doesNotMatch(listed.tools.find(tool=>tool.name==='test_assert')!.description!,/proposal|verify/i);
+         assert.match(listed.tools.find(tool=>tool.name==='memory_get_node')!.description!,/including saved MCP learnings/i);assert.match(listed.tools.find(tool=>tool.name==='memory_path')!.description!,/including saved MCP learnings/i);
      const result=await client.callTool({name:'browser_status',arguments:{}});assert.equal((result as any).structuredContent.data.application_ready,false);
     const unavailable=await client.callTool({name:'browser_snapshot',arguments:{}});assert.equal((unavailable as any).structuredContent.error.code,'application_not_ready');assert.match((unavailable as any).structuredContent.error.message,/not ready.*browser_refresh/i);
     const failedRefresh=await client.callTool({name:'browser_refresh',arguments:{}});assert.equal(failedRefresh.isError,true);assert.match((failedRefresh as any).structuredContent.error.message,/start the application.*browser_refresh/i);
@@ -40,16 +43,8 @@ test('stdio CLI serves MCP tools over official transport and releases resources 
       assert.equal((await client.callTool({name:'memory_stats',arguments:{}}) as any).structuredContent.ok,true);
       const search=await client.callTool({name:'memory_search',arguments:{query:'stdio-test'}}) as any;assert.equal(Array.isArray(search.structuredContent.data),true);assert.equal(search.structuredContent.data[0].stable_key,'stdio-test');assert.equal(search.structuredContent.pagination.status,'complete');assert.equal('pagination' in search.structuredContent.data,false);
         const beforeLearningWrite=(await client.callTool({name:'memory_stats',arguments:{}}) as any).structuredContent.data.nodes;
-        const evidenceStore=new Store(path.join(root,'.umb/memory.sqlite'),'stdio-test');
-        let evidenceRef:any;
-        try{const subject=evidenceStore.applicationSubject()!;const assertion=evidenceStore.recordAssertion({session_id:'stdio-contract',subject_node_id:subject.id,passed:true,observed_count:1});evidenceRef={evidence_id:(assertion.evidence as any).id,run_id:assertion.id,subject_node_id:subject.id};}finally{evidenceStore.close();}
-        const missingEvidence=await client.callTool({name:'memory_propose',arguments:{observation_id:'missing-evidence',type:'screen',stable_key:'missing-evidence',display_name:'Missing evidence'}}) as any;assert.equal(missingEvidence.isError,true);assert.equal(missingEvidence.structuredContent.error.code,'invalid_input');
-         const blockedLearningWrite=await client.callTool({name:'memory_propose',arguments:{observation_id:'no-nlp',type:'screen',stable_key:'no-nlp',display_name:'NO_NLP_SECRET_SENTINEL',evidence_refs:[evidenceRef]}}) as any;
-         assert.equal(blockedLearningWrite.isError,true);assert.equal(blockedLearningWrite.structuredContent.ok,false);assert.equal(blockedLearningWrite.structuredContent.error.code,'learning_writes_disabled');assert.match(blockedLearningWrite.structuredContent.error.message,/memory\.persistent_learning_writes: true.*restart UMB/i);assert(!JSON.stringify(blockedLearningWrite).includes('NO_NLP_SECRET_SENTINEL'));
-         const blockedEdge=await client.callTool({name:'memory_add_edge',arguments:{observation_id:'no-nlp-edge',from_id:'source',to_id:'target',relation:'RELATED_TO',evidence_refs:[evidenceRef]}}) as any;assert.equal(blockedEdge.isError,true);assert.equal(blockedEdge.structuredContent.error.code,'learning_writes_disabled');
-        const duplicate=await client.callTool({name:'memory_propose',arguments:{observation_id:'duplicate-ref',type:'screen',stable_key:'duplicate-ref',display_name:'Duplicate',evidence_refs:[evidenceRef,evidenceRef]}}) as any;assert.equal(duplicate.isError,true);
-        const duplicateCase=await client.callTool({name:'memory_propose',arguments:{observation_id:'duplicate-case-ref',type:'screen',stable_key:'duplicate-case-ref',display_name:'Duplicate case',evidence_refs:[evidenceRef,{...evidenceRef,evidence_id:evidenceRef.evidence_id.toUpperCase()}]}}) as any;assert.equal(duplicateCase.isError,true);
-        const oversized=await client.callTool({name:'memory_propose',arguments:{observation_id:'oversized-refs',type:'screen',stable_key:'oversized-refs',display_name:'Oversized',evidence_refs:Array(6).fill(evidenceRef)}}) as any;assert.equal(oversized.isError,true);
+          const blockedLearningWrite=await client.callTool({name:'memory_save',arguments:{content:'NO_NLP_SECRET_SENTINEL'}}) as any;
+          assert.equal(blockedLearningWrite.isError,true);assert.equal(blockedLearningWrite.structuredContent.ok,false);assert.equal(blockedLearningWrite.structuredContent.error.code,'learning_writes_disabled');assert.match(blockedLearningWrite.structuredContent.error.message,/memory\.persistent_learning_writes: true.*restart UMB/i);assert(!JSON.stringify(blockedLearningWrite).includes('NO_NLP_SECRET_SENTINEL'));
      assert.equal((await client.callTool({name:'memory_stats',arguments:{}}) as any).structuredContent.data.nodes,beforeLearningWrite);
     const appReady=new Promise<void>(resolve=>app.listen(port,'127.0.0.1',resolve));await appReady;
     const refreshed=await client.callTool({name:'browser_refresh',arguments:{}});assert.equal((refreshed as any).structuredContent.data.application_ready,true);
@@ -86,8 +81,9 @@ test('stdio shutdown drains an active learning write before sidecar and Store te
   const client=new Client({name:'stdio-drain-test',version:'1'});
   try{
    await client.connect(transport);
-    const evidenceStore=new Store(path.join(root,'memory.sqlite'),'stdio-drain');let evidenceRef:any;try{const subject=evidenceStore.applicationSubject()!;const assertion=evidenceStore.recordAssertion({session_id:'stdio-drain-test',subject_node_id:subject.id,passed:true,observed_count:1});evidenceRef={evidence_id:(assertion.evidence as any).id,run_id:assertion.id,subject_node_id:subject.id};}finally{evidenceStore.close();}
-    const write=client.callTool({name:'memory_propose',arguments:{observation_id:'drain-observation',type:'screen',stable_key:'drain-note',display_name:'Drain note',evidence_refs:[evidenceRef]}});
+     const saved=await client.callTool({name:'memory_save',arguments:{content:'Use the account menu to open project settings.'}}) as any;
+     assert.equal(saved.structuredContent.data.saved,true);assert.equal(saved.structuredContent.data.immediately_available,true);assert.equal('verification_status' in saved.structuredContent.data,false);assert.equal('pending' in saved.structuredContent.data,false);
+     const write=client.callTool({name:'memory_save',arguments:{content:'A pending learning drains before shutdown.',title:'Shutdown drain'}});
    const deadline=Date.now()+10000;
    while(Date.now()<deadline){try{if((await readFile(log,'utf8')).includes('analyze-start'))break;}catch{}await new Promise(resolve=>setTimeout(resolve,10));}
   assert((await readFile(log,'utf8')).includes('analyze-start'),'sidecar analysis began before shutdown');
@@ -95,11 +91,13 @@ test('stdio shutdown drains an active learning write before sidecar and Store te
   const exited=once(child,'exit');
   child.stdin.end();
   await exited;
-  await write.catch(()=>undefined); // The client has disconnected; the assertion is persistence and teardown order.
+   await write.catch(()=>undefined); // The second client call is interrupted; its write must still drain.
   const events=(await readFile(log,'utf8')).trim().split('\n');
-  assert.deepEqual(events,['analyze-start','analyze-done','shutdown']);
-  const store=new Store(path.join(root,'memory.sqlite'),'stdio-drain');
-   try{assert(store.getByTypeKey('screen','drain-note'),'active learning write committed before shutdown');}finally{store.close();}
+   assert.deepEqual(events,['analyze-start','analyze-done','analyze-start','analyze-done','shutdown']);
+    const store=new Store(path.join(root,'memory.sqlite'),'stdio-drain','local');
+     try{const note=store.getTrustedNode(saved.structuredContent.data.id);assert.equal(note.type,'note');assert.equal('verification_status' in note,false);assert.equal(JSON.parse(note.attributes_json).content,'Use the account menu to open project settings.');assert(store.search('settings').some((row:any)=>row.id===note.id),'saved note is normally searchable after reopen');const searched=store.searchPage('settings').data.find((row:any)=>row.id===note.id);assert(searched);assert.equal('verification_status' in searched,false,'search does not expose note lifecycle state');assert.equal(note.project_id,'stdio-drain');assert.equal(note.environment,'local');assert(store.context().trusted_facts.some((row:any)=>row.id===note.id&&!('verification_status' in row)),'context does not present a pending lifecycle state');assert(store.export().nodes.some((row:any)=>row.id===note.id&&!('verification_status' in row)),'exports do not present a pending lifecycle state');
+       const anchor=store.applicationSubject()!,raw=new Database(path.join(root,'memory.sqlite'));raw.prepare('INSERT INTO edges(id,project_id,environment,from_node_id,to_node_id,relation_type,attributes_json,origin,verification_status,stable_key) VALUES(?,?,?,?,?,?,?,?,?,?)').run('test-note-neighbor','stdio-drain','local',anchor.id,note.id,'NOTE_REFERENCE','{}','human','verified','test-note-neighbor');raw.close();const neighbor=store.neighbors(anchor.id).find((item:any)=>item.neighbor.id===note.id)?.neighbor;assert(neighbor);assert.equal('verification_status' in neighbor,false,'neighbors do not expose note lifecycle state');
+     }finally{store.close();}
  }finally{
   await client.close().catch(()=>{});
   await transport.close().catch(()=>{});

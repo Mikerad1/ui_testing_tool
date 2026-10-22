@@ -370,12 +370,12 @@ export class Store {
     const nodes=this.#database.prepare(`SELECT n.*,${this.#nodeTrustBasisSql('n',options.trustYamlSeeds===true)} trust_basis FROM nodes n WHERE n.project_id=? AND n.environment=? AND ${this.#trustedNodeSql('n',options.trustYamlSeeds===true)} ORDER BY n.id LIMIT 500`).all(this.projectId,this.memoryEnvironment);
     const edges=this.#database.prepare(`SELECT e.*,${this.#edgeTrustBasisSql('e',options.trustYamlSeeds===true)} trust_basis FROM edges e JOIN nodes f ON f.project_id=e.project_id AND f.environment=e.environment AND f.id=e.from_node_id JOIN nodes t ON t.project_id=e.project_id AND t.environment=e.environment AND t.id=e.to_node_id WHERE e.project_id=? AND e.environment=? AND ${this.#trustedEdgeSql('e',options.trustYamlSeeds===true)} AND ${this.#trustedNodeSql('f',options.trustYamlSeeds===true)} AND ${this.#trustedNodeSql('t',options.trustYamlSeeds===true)} ORDER BY e.id LIMIT 1000`).all(this.projectId,this.memoryEnvironment);
     const nodeIds=new Set((nodes as Array<{id:string}>).map(node=>node.id));
-    return{nodes,edges:(edges as Array<{from_node_id:string;to_node_id:string}>).filter(edge=>nodeIds.has(edge.from_node_id)&&nodeIds.has(edge.to_node_id))};
+    return{nodes:(nodes as any[]).map(node=>this.#withoutNoteLifecycle(node)),edges:(edges as Array<{from_node_id:string;to_node_id:string}>).filter(edge=>nodeIds.has(edge.from_node_id)&&nodeIds.has(edge.to_node_id))};
   }
   context(options:MemoryReadOptions={}){
     const trusted=this.#database.prepare(`SELECT n.id,n.type,n.canonical_key stable_key,n.display_name,n.origin,n.verification_status,n.conflict_status,${this.#nodeTrustBasisSql('n',options.trustYamlSeeds===true)} trust_basis FROM nodes n WHERE n.project_id=? AND n.environment=? AND ${this.#trustedNodeSql('n',options.trustYamlSeeds===true)} ORDER BY n.type,n.display_name LIMIT 100`).all(this.projectId,this.memoryEnvironment);
     const authored=options.trustYamlSeeds?[]:this.#authoredYamlNodes();
-    return{trusted_facts:trusted,authored_guidance:authored.length?{label:'authored_unverified',warning:'YAML-authored guidance is unverified; revalidate against the current application before acting.',items:authored}:null};
+    return{trusted_facts:(trusted as any[]).map(node=>this.#withoutNoteLifecycle(node)),authored_guidance:authored.length?{label:'authored_unverified',warning:'YAML-authored guidance is unverified; revalidate against the current application before acting.',items:authored}:null};
   }
   search(q:string,options:MemoryReadOptions&{mode?:'auto'|'exact'|'prose';page_size?:number;cursor?:string}={}):any{return options.mode!==undefined||options.page_size!==undefined||options.cursor!==undefined?this.searchPage(q,options):this.searchPage(q,options).data;}
   #searchProvenance(nodeId:string):Record<string,unknown>|undefined{
@@ -458,11 +458,11 @@ export class Store {
      // indexed into that legacy view. Include their public identity fields in
      // the bounded candidate path so they remain searchable without a verify.
      if(!tooBroad&&tokens.length){
-       const learned=this.#database.prepare(`SELECT n.id,n.type,n.canonical_key stable_key,n.display_name,n.verification_status,n.updated_at
+        const learned=this.#database.prepare(`SELECT n.id,n.type,n.canonical_key stable_key,n.display_name,n.verification_status,n.updated_at,CASE WHEN n.type='note' THEN json_extract(n.attributes_json,'$.content') ELSE '' END note_content
          FROM nodes n WHERE n.project_id=? AND n.environment=? AND ${this.#trustedNodeSql('n',view===1)} AND ${this.#mcpNodeSql('n')}
          ORDER BY n.id LIMIT 1000`).all(this.projectId,this.memoryEnvironment) as any[];
        const wanted=[...new Set(tokens)];
-       for(const hit of learned){const text=normalizeSearchText(`${hit.display_name} ${hit.stable_key}`),found:string[]=text.match(/[\p{L}\p{N}\p{M}]+/gu)??[];if(wanted.every(token=>found.includes(token)))add(hit,false,0,'display_name',wanted.length);}
+        for(const hit of learned){const text=normalizeSearchText(`${hit.display_name} ${hit.stable_key} ${hit.note_content??''}`),found:string[]=text.match(/[\p{L}\p{N}\p{M}]+/gu)??[];if(wanted.every(token=>found.includes(token)))add(hit,false,0,hit.type==='note'?'attributes.content':'display_name',wanted.length);}
      }
      if(!tooBroad&&mode!=='exact'&&tokens.length){
        const uniqueTokens=[...new Set(tokens)];
@@ -523,7 +523,8 @@ export class Store {
   getInternal(id:string){return this.#database.prepare('SELECT * FROM nodes WHERE project_id=? AND environment=? AND id=? AND tombstone=0').get(this.projectId,this.memoryEnvironment,id)??null;}
   /** Compatibility for existing internal workflow/assertion consumers; public MCP uses getTrustedNode. */
   get(id:string){return this.getInternal(id);}
-  getTrustedNode(id:string,options:MemoryReadOptions={}){return this.#database.prepare(`SELECT n.*,${this.#nodeTrustBasisSql('n',options.trustYamlSeeds===true)} trust_basis FROM nodes n WHERE n.project_id=? AND n.environment=? AND n.id=? AND ${this.#trustedNodeSql('n',options.trustYamlSeeds===true)}`).get(this.projectId,this.memoryEnvironment,id)??null;}
+  getTrustedNode(id:string,options:MemoryReadOptions={}){const node=this.#database.prepare(`SELECT n.*,${this.#nodeTrustBasisSql('n',options.trustYamlSeeds===true)} trust_basis FROM nodes n WHERE n.project_id=? AND n.environment=? AND n.id=? AND ${this.#trustedNodeSql('n',options.trustYamlSeeds===true)}`).get(this.projectId,this.memoryEnvironment,id)??null;return this.#withoutNoteLifecycle(node);}
+  #withoutNoteLifecycle(node:any){if(!node||node.type!=='note')return node;const{verification_status:_internalLifecycle,...saved}=node;return saved;}
   validateMcpEdgeSignature(fromId:string,toId:string,relation:string):void{
     const endpoints=this.#database.prepare('SELECT id,type FROM nodes WHERE project_id=? AND environment=? AND id IN (?,?) AND tombstone=0').all(this.projectId,this.memoryEnvironment,fromId,toId) as Array<{id:string;type:string}>;
     if(endpoints.length!==(fromId===toId?1:2))throw new Error('Edge endpoints must belong to this project and environment');
@@ -615,10 +616,11 @@ export class Store {
      }
     else currentStatus='not_linked';
      const {redacted_source_text,...safe}=observation;
-     const mcpSource=observation.source_kind==='mcp_node'||observation.source_kind==='mcp_edge';
-     const evidenceRefs=mcpSource?this.listCandidateEvidenceReferences(String(row.id)):[];
-     return{...safe,stored_status:observation.status,current_status:currentStatus,source_current:sourceCurrent,
-       evidence_link_status:mcpSource?(evidenceRefs.length?'provenance_only':'missing'):'not_required',evidence_refs:evidenceRefs,
+      const mcpSource=observation.source_kind==='mcp_node'||observation.source_kind==='mcp_edge';
+      const evidenceRefs=mcpSource?this.listCandidateEvidenceReferences(String(row.id)):[];
+      const noteSource=observation.source_kind==='mcp_node'&&Array.isArray(links)&&links.some((link:any)=>link?.kind==='node'&&typeof link.id==='string'&&this.#database.prepare("SELECT 1 FROM nodes WHERE project_id=? AND environment=? AND id=? AND type='note'").get(this.projectId,this.memoryEnvironment,link.id));
+      return{...safe,stored_status:observation.status,current_status:currentStatus,source_current:sourceCurrent,
+        evidence_link_status:mcpSource?(evidenceRefs.length?'provenance_only':noteSource?'not_required':'missing'):'not_required',evidence_refs:evidenceRefs,
        ...(includeRedacted?{redacted_source:{label:'redacted_untrusted',text:redacted_source_text??null}}:{})};
   }
   #decodeCandidateObservation(row:Record<string,unknown>):CandidateObservation{
@@ -633,8 +635,8 @@ export class Store {
     if(!row)return undefined;
     try{const links=JSON.parse(row.links_json);return Array.isArray(links)&&typeof links[0]?.id==='string'?links[0].id:undefined;}catch{return undefined;}
   }
-  #canonicalEvidenceRefs(value:unknown):EvidenceReference[]{
-    if(!Array.isArray(value)||value.length<1||value.length>5)throw new Error('Evidence references must contain 1 to 5 items');
+  #canonicalEvidenceRefs(value:unknown,allowEmpty=false):EvidenceReference[]{
+     if(!Array.isArray(value)||value.length<(allowEmpty?0:1)||value.length>5)throw new Error('Evidence references must contain 1 to 5 items');
     const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
     const seen=new Set<string>();
     const refs=value.map(item=>{
@@ -660,11 +662,11 @@ export class Store {
         AND n.verification_status NOT IN ('stale','superseded') AND n.conflict_status='none'`);
     for(const ref of refs)if(!check.get(this.memoryEnvironment,this.projectId,ref.evidence_id,ref.run_id,ref.subject_node_id,this.memoryEnvironment))throw new Error('Evidence reference is not a passed assertion for a live subject in this project and environment');
   }
-  #priorEvidenceRefs(input:CandidateObservationInput):{observationIds:Set<string>;refs:EvidenceReference[]}|undefined{
+  #priorEvidenceRefs(input:CandidateObservationInput,allowEmpty=false):{observationIds:Set<string>;refs:EvidenceReference[]}|undefined{
     const rows=this.#database.prepare('SELECT id FROM memory_candidate_observations WHERE project_id=? AND environment=? AND source_kind=? AND source_key=? ORDER BY id').all(this.projectId,this.memoryEnvironment,input.source_kind,input.source_key) as Array<{id:string}>;
     if(!rows.length)return undefined;
     const refsByObservation=rows.map(row=>this.#database.prepare('SELECT evidence_id,run_id,subject_node_id FROM memory_candidate_evidence_refs WHERE project_id=? AND environment=? AND observation_id=? ORDER BY evidence_id').all(this.projectId,this.memoryEnvironment,row.id) as EvidenceReference[]);
-    if(refsByObservation.some(refs=>!refs.length))throw new Error('Legacy candidate observations cannot be linked retroactively; use a fresh observation_id');
+     if(refsByObservation.some(refs=>!refs.length)&&!allowEmpty)throw new Error('Legacy candidate observations cannot be linked retroactively; use a fresh observation_id');
     const canonical=canonicalJson(refsByObservation[0]);
     if(refsByObservation.some(refs=>canonicalJson(refs)!==canonical))throw new Error('Candidate observation has inconsistent evidence references across pipeline versions');
     return{observationIds:new Set(rows.map(row=>row.id)),refs:refsByObservation[0]!};
@@ -673,11 +675,11 @@ export class Store {
     const insert=this.#database.prepare('INSERT INTO memory_candidate_evidence_refs(project_id,environment,observation_id,evidence_id,run_id,subject_node_id,created_at) VALUES(?,?,?,?,?,?,?)');
     for(const ref of refs)insert.run(this.projectId,this.memoryEnvironment,observationId,ref.evidence_id,ref.run_id,ref.subject_node_id,new Date().toISOString());
   }
-  #exactMcpReplay(input:CandidateObservationInput,refs:EvidenceReference[],kind:'node'|'edge'){
+  #exactMcpReplay(input:CandidateObservationInput,refs:EvidenceReference[],kind:'node'|'edge',allowEmpty=false){
     const row=this.#database.prepare('SELECT id,links_json FROM memory_candidate_observations WHERE project_id=? AND environment=? AND source_kind=? AND source_key=? AND source_revision_hash=? AND pipeline_fingerprint=?').get(this.projectId,this.memoryEnvironment,input.source_kind,input.source_key,input.source_revision_hash,input.pipeline_fingerprint) as {id:string;links_json:string}|undefined;
     if(!row)return undefined;
     const stored=this.#database.prepare('SELECT evidence_id,run_id,subject_node_id FROM memory_candidate_evidence_refs WHERE project_id=? AND environment=? AND observation_id=? ORDER BY evidence_id').all(this.projectId,this.memoryEnvironment,row.id) as EvidenceReference[];
-    if(!stored.length)throw new Error('Legacy candidate observations cannot be linked retroactively; use a fresh observation_id');
+     if(!stored.length&&!allowEmpty)throw new Error('Legacy candidate observations cannot be linked retroactively; use a fresh observation_id');
     if(canonicalJson(stored)!==canonicalJson(refs))throw new Error('Candidate observation already exists with different evidence references');
     try{
       const links=JSON.parse(row.links_json);
@@ -697,13 +699,13 @@ export class Store {
     assertMcpGraphNodeType(input.type);
     if(!hasNlpMetadata(input.attributes))throw Error('NLP ingestion is required');
     if(!input.stable_key||input.stable_key.length>200||!input.display_name||input.display_name.length>500)throw Error('Knowledge field too long');
-    const refs=this.#canonicalEvidenceRefs(input.evidence_refs);
+     const noteWrite=input.type==='note',refs=this.#canonicalEvidenceRefs(input.evidence_refs,noteWrite);
     return this.#withGraphMutation(()=>this.#database.transaction(()=>{
        const observationId=this.#candidateGraphIdentity(input.observation),deterministicNodeId=createHash('sha256').update(`mcp-node:${observationId}`).digest('hex');
        this.#assertMcpSourceRevision(input.observation);
-       const replay=this.#exactMcpReplay(input.observation,refs,'node');if(replay)return replay;
+        const replay=this.#exactMcpReplay(input.observation,refs,'node',noteWrite);if(replay)return replay;
        this.#validateEvidenceRefs(refs);
-      const priorEvidence=this.#priorEvidenceRefs(input.observation);
+       const priorEvidence=this.#priorEvidenceRefs(input.observation,noteWrite);
       if(priorEvidence&&canonicalJson(priorEvidence.refs)!==canonicalJson(refs))throw new Error('Candidate observation already exists with different evidence references');
       const priorLink=this.#priorMcpGraphLink(input.observation);
       const existingByIdentity=this.#database.prepare('SELECT * FROM nodes WHERE project_id=? AND environment=? AND id=?').get(this.projectId,this.memoryEnvironment,priorLink??deterministicNodeId) as any;
@@ -942,7 +944,7 @@ export class Store {
       JOIN nodes n ON n.project_id=e.project_id AND n.environment=e.environment AND n.id=CASE WHEN e.from_node_id=? THEN e.to_node_id ELSE e.from_node_id END
       WHERE e.project_id=? AND e.environment=? AND (e.from_node_id=? OR e.to_node_id=?) AND ${this.#trustedEdgeSql('e',trust)}
       AND ${this.#trustedNodeSql('f',trust)} AND ${this.#trustedNodeSql('t',trust)} ORDER BY e.id LIMIT ?`).all(nodeId,nodeId,this.projectId,this.memoryEnvironment,nodeId,nodeId,Math.max(0,Math.min(200,limit))) as Array<Record<string,any>>;
-    return rows.map(row=>({neighbor:{id:row.id,type:row.type,stable_key:row.stable_key,display_name:row.display_name,origin:row.origin,verification_status:row.verification_status,conflict_status:row.conflict_status,trust_basis:row.neighbor_trust_basis},edge:{id:row.edge_id,relation:row.relation,from_id:row.from_node_id,to_id:row.to_node_id,direction:row.direction,origin:row.edge_origin,verification_status:row.edge_verification_status,conflict_status:row.edge_conflict_status,trust_basis:row.edge_trust_basis}}));
+     return rows.map(row=>({neighbor:this.#withoutNoteLifecycle({id:row.id,type:row.type,stable_key:row.stable_key,display_name:row.display_name,origin:row.origin,verification_status:row.verification_status,conflict_status:row.conflict_status,trust_basis:row.neighbor_trust_basis}),edge:{id:row.edge_id,relation:row.relation,from_id:row.from_node_id,to_id:row.to_node_id,direction:row.direction,origin:row.edge_origin,verification_status:row.edge_verification_status,conflict_status:row.edge_conflict_status,trust_basis:row.edge_trust_basis}}));
   }
   listConflicts(){return this.#database.prepare(`SELECT 'node' kind,id,canonical_key entity_key,conflict_status FROM nodes WHERE project_id=? AND environment=? AND conflict_status<>'none' UNION ALL SELECT 'edge',id,relation_type,conflict_status FROM edges WHERE project_id=? AND environment=? AND conflict_status<>'none' UNION ALL SELECT 'yaml',entity_id,entity_key,conflict_status FROM yaml_ownership WHERE project_id=? AND environment=? AND conflict_status<>'none'`).all(this.projectId,this.memoryEnvironment,this.projectId,this.memoryEnvironment,this.projectId,this.memoryEnvironment);}
    tombstoneEdge(id:string){return this.#withGraphMutation(()=>this.#database.prepare('UPDATE edges SET tombstone=1,updated_at=? WHERE project_id=? AND environment=? AND id=?').run(new Date().toISOString(),this.projectId,this.memoryEnvironment,id).changes>0);}
