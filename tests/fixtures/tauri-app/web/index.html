@@ -28,6 +28,14 @@
     </main>
     <script>
       const count = document.getElementById('count');
+      window.emitDiagnosticsProbe = () => {
+        let observed;
+        const observe = event => { observed = { type: event.type, targetIsWindow: event.target === window }; };
+        window.addEventListener('error', observe, { once: true });
+        window.dispatchEvent(new ErrorEvent('error', { message: 'NATIVE_DIAGNOSTIC_SENTINEL_MESSAGE', filename: 'https://NATIVE_DIAGNOSTIC_SENTINEL_URL.invalid/secret.js' }));
+        Promise.reject({ message: 'NATIVE_DIAGNOSTIC_SENTINEL_REJECTION' });
+        return observed;
+      };
       document.querySelector('button').addEventListener('click', () => {
         count.textContent = String(Number(count.textContent) + 1);
       });

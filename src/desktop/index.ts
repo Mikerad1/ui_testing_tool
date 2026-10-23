@@ -35,7 +35,10 @@ export interface DesktopConfig {
   maxArtifactCount?: number;
   maxArtifactAgeDays?: number;
   maskSelectors?: string[];
+  diagnostics?: { unhandledRejections?: boolean; capacity?: number };
 }
+export interface DesktopUnhandledRejectionEvent { cursor: number; kind: 'unhandled_rejection'; at: number }
+export interface DesktopUnhandledRejectionEvents { events: DesktopUnhandledRejectionEvent[]; next_cursor: number; oldest_cursor: number }
 export interface DesktopBuildCommand { command: string; args: string[]; cwd?: string }
 export type CaptureKind = 'webview' | 'window';
 export interface DesktopCapability { available: boolean; reason?: string }
@@ -81,6 +84,8 @@ export interface DesktopAdapters {
 }
 
 const SNAPSHOT_SCRIPT = `const max=arguments[0],out=[],nodes=document.querySelectorAll('body *'),roles={A:'link',BUTTON:'button',INPUT:'textbox',TEXTAREA:'textbox',SELECT:'combobox',IMG:'img'};for(let i=0;i<nodes.length&&out.length<max&&i<max*20;i++){const e=nodes[i],s=getComputedStyle(e),r=e.getBoundingClientRect();if(s.display==='none'||s.visibility==='hidden'||Number(s.opacity)===0||r.width<=0||r.height<=0)continue;const role=e.getAttribute('role')||roles[e.tagName]||'',name=(e.getAttribute('aria-label')||e.getAttribute('alt')||e.innerText||'').trim().replace(/\\s+/g,' ').slice(0,200),text=(e.innerText||'').trim().replace(/\\s+/g,' ').slice(0,300);if(!role&&!name&&!text)continue;out.push({role:role||e.tagName.toLowerCase(),accessibleName:name,text,enabled:!e.disabled,visible:true,rect:{x:Math.round(r.x),y:Math.round(r.y),width:Math.round(r.width),height:Math.round(r.height)}})}return out;`;
+const UNHANDLED_REJECTIONS_INSTALL_SCRIPT = `const capacity=arguments[0],key='__umbUnhandledRejectionCollector';if(window[key])throw new Error('collector already exists');let cursor=0;const events=[];const record=()=>{cursor++;events.push({cursor,kind:'unhandled_rejection',at:Date.now()});if(events.length>capacity)events.shift()};window.addEventListener('unhandledrejection',()=>record());Object.defineProperty(window,key,{value:Object.freeze({read(after,limit){return {events:events.filter(event=>event.cursor>after).slice(0,limit),next_cursor:cursor,oldest_cursor:events[0]?.cursor??cursor+1}}}),configurable:false,writable:false});return true;`;
+const UNHANDLED_REJECTIONS_READ_SCRIPT = `const collector=window.__umbUnhandledRejectionCollector;if(!collector||typeof collector.read!=='function')return null;return collector.read(arguments[0],arguments[1]);`;
 const MASK_INSTALL_SCRIPT = `const selectors=arguments[0],id=arguments[1],secret=arguments[2];let dlg,host,stage='top-layer preflight';try{
 if(typeof HTMLDialogElement==='undefined'||!HTMLDialogElement.prototype.showModal)throw new Error('protected top layer unavailable');
 stage='dialog creation';dlg=document.createElement('dialog');dlg.dataset.umbCaptureMask=id;for(const [k,v] of [['all','initial'],['display','block'],['position','fixed'],['inset','0'],['width','100vw'],['height','100vh'],['max-width','none'],['max-height','none'],['margin','0'],['padding','0'],['border','0'],['background','transparent'],['pointer-events','none'],['visibility','visible'],['opacity','1'],['z-index','2147483647'],['transform','none'],['clip-path','none'],['filter','none'],['animation','none'],['transition','none'],['contain','none'],['content-visibility','visible'],['overflow','visible'],['box-sizing','border-box']])dlg.style.setProperty(k,v,'important');
@@ -283,6 +288,14 @@ export class DesktopService {
       if (typeof id !== 'string' || !id) throw Error(`WebDriver did not create a W3C session: ${JSON.stringify(response).slice(0, 500)}`);
       this.sessionId = id;
       this.startedAt = new Date().toISOString();
+      if (this.config.diagnostics?.unhandledRejections === true) {
+        const capacity = this.config.diagnostics.capacity ?? 100;
+        bounded(capacity, 1, 1000, 'diagnostics.capacity');
+        try {
+          const installed = await this.request('POST', '/execute/sync', { script: UNHANDLED_REJECTIONS_INSTALL_SCRIPT, args: [capacity] }, readinessTimeoutMs);
+          if (installed.value !== true) throw Error('not confirmed');
+        } catch { throw Error('Could not install unhandled rejection diagnostics; the managed session was stopped.'); }
+      }
       await this.rememberOwnedTree();
       return this.status();
     } catch (error) { await this.killDriver(); throw error; }
@@ -291,6 +304,28 @@ export class DesktopService {
   async status(): Promise<DesktopSession> {
     if (!this.sessionId || !this.driver) throw Error('No managed desktop session is running.');
     return { id: this.sessionId, state: 'running', endpoint: this.endpoint(), startedAt: this.startedAt! };
+  }
+
+  async unhandledRejections(after = 0, limit = 100): Promise<DesktopUnhandledRejectionEvents> {
+    if (this.config.diagnostics?.unhandledRejections !== true) throw Error('Unhandled rejection diagnostics are disabled; configure desktop.diagnostics.unhandled_rejections: true.');
+    bounded(after, 0, Number.MAX_SAFE_INTEGER, 'after');
+    bounded(limit, 1, 100, 'limit');
+    this.requireSession();
+    let result: any;
+    try { result = await this.request('POST', '/execute/sync', { script: UNHANDLED_REJECTIONS_READ_SCRIPT, args: [after, limit] }); }
+    catch { throw Error('Unhandled rejection diagnostics collector is unavailable; continuity cannot be guaranteed.'); }
+    const value = result?.value;
+    if (!value || !Array.isArray(value.events) || !Number.isSafeInteger(value.next_cursor) || !Number.isSafeInteger(value.oldest_cursor)) {
+      throw Error('Unhandled rejection diagnostics collector is unavailable; continuity cannot be guaranteed.');
+    }
+    const events: DesktopUnhandledRejectionEvent[] = [];
+    for (const event of value.events) {
+      if (!Number.isSafeInteger(event?.cursor) || !Number.isFinite(event?.at) || event?.kind !== 'unhandled_rejection') {
+        throw Error('Unhandled rejection diagnostics collector is unavailable; continuity cannot be guaranteed.');
+      }
+      events.push({ cursor: event.cursor, kind: event.kind, at: event.at });
+    }
+    return { events, next_cursor: value.next_cursor, oldest_cursor: value.oldest_cursor };
   }
 
   async stop(): Promise<{ stopped: boolean }> {

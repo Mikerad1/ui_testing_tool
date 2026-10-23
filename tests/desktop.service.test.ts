@@ -450,6 +450,96 @@ test('inspection discovers Tauri without executing commands', async () => {
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test('unhandled rejection diagnostics install only when enabled and expose sanitized bounded metadata', async () => {
+  const root = await project(), child = fakeChild();
+  const calls: { script: string; args: unknown[] }[] = [];
+  let capacity = 0;
+  const stored: Array<{ cursor: number; kind: string; at: number }> = [];
+  const makeService = (enabled: boolean, cap = 3) => new DesktopService({ ...config(root), diagnostics: { unhandledRejections: enabled, capacity: cap } }, {
+    ...driverFakes, spawn: (() => fakeChild()) as typeof import('node:child_process').spawn,
+    processTree: async pid => new Set([pid]), killProcess: () => undefined,
+    fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input), body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      if (url.endsWith('/status')) return response(200, { value: {} });
+      if (url.endsWith('/session')) return response(200, { value: { sessionId: 'diagnostics-session' } });
+      if (url.endsWith('/execute/sync')) {
+        calls.push({ script: body.script, args: body.args });
+        if (body.script.includes("const capacity=arguments[0]")) { capacity = body.args[0]; return response(200, { value: true }); }
+        if (body.script.includes('window.__umbUnhandledRejectionCollector')) {
+          const [after, limit] = body.args;
+          const events = stored.filter(event => event.cursor > after).slice(0, limit);
+          return response(200, { value: { events, next_cursor: stored.at(-1)?.cursor ?? 0, oldest_cursor: stored[0]?.cursor ?? (stored.at(-1)?.cursor ?? 0) + 1 } });
+        }
+      }
+      if (init?.method === 'DELETE') return response(200, { value: null });
+      return response(200, { value: null });
+    }) as typeof fetch,
+  });
+  try {
+    const disabled = makeService(false);
+    await disabled.start();
+    assert.equal(calls.length, 0, 'disabled configuration does not install or invoke a collector');
+    await assert.rejects(disabled.unhandledRejections(), /configure desktop\.diagnostics\.unhandled_rejections: true/);
+    await disabled.stop();
+
+    const service = makeService(true);
+    await service.start();
+    assert.equal(capacity, 3);
+    assert.equal(calls[0]?.args[0], 3);
+    assert.match(calls[0]!.script, /window\.addEventListener\('unhandledrejection',\(\)=>record\(\)\)/);
+    assert.doesNotMatch(calls[0]!.script, /addEventListener\('error'|instanceof ErrorEvent|event\.(reason|message|stack|filename)|\.reason|\.message|\.stack|\.filename/);
+    for (const secret of ['message', 'filename', 'stack', 'reason', 'console', 'fetch']) assert.doesNotMatch(calls[0]!.script, new RegExp(secret, 'i'));
+    // Page-side ring behavior: only metadata enters the service result.
+    stored.push({ cursor: 1, kind: 'unhandled_rejection', at: 10 }, { cursor: 2, kind: 'unhandled_rejection', at: 20 }, { cursor: 3, kind: 'unhandled_rejection', at: 30 }, { cursor: 4, kind: 'unhandled_rejection', at: 40 });
+    stored.shift(); stored.shift();
+    const result = await service.unhandledRejections(1, 2);
+    assert.deepEqual(result, {
+      events: [{ cursor: 3, kind: 'unhandled_rejection', at: 30 }, { cursor: 4, kind: 'unhandled_rejection', at: 40 }],
+      next_cursor: 4, oldest_cursor: 3,
+    });
+    assert.deepEqual(Object.keys(result.events[0]!).sort(), ['at', 'cursor', 'kind']);
+    assert.deepEqual(calls.at(-1)?.args, [1, 2]);
+    assert.equal(calls.at(-1)?.script.includes('sentinel'), false);
+    await assert.rejects(service.unhandledRejections(-1), /after must be between/);
+    await assert.rejects(service.unhandledRejections(0, 0), /limit must be between/);
+    await assert.rejects(service.unhandledRejections(0, 101), /limit must be between/);
+    await assert.rejects(service.unhandledRejections(1.5), /after must be between/);
+    await service.stop();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('unhandled rejection diagnostics fail closed on missing collector and startup installation failure', async () => {
+  const root = await project();
+  try {
+    const service = new DesktopService({ ...config(root), diagnostics: { unhandledRejections: true } }, {
+      ...driverFakes, spawn: (() => fakeChild()) as typeof import('node:child_process').spawn,
+      fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input).endsWith('/status')) return response(200, { value: {} });
+        if (String(input).endsWith('/session')) return response(200, { value: { sessionId: 'gone' } });
+        const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+        if (body?.script?.includes("const capacity=arguments[0]")) return response(200, { value: true });
+        return response(200, { value: null });
+      }) as typeof fetch,
+    });
+    await service.start();
+    await assert.rejects(service.unhandledRejections(), error => {
+      assert.equal(String(error), 'Error: Unhandled rejection diagnostics collector is unavailable; continuity cannot be guaranteed.');
+      assert.doesNotMatch(String(error), /sentinel|secret|message|http/i);
+      return true;
+    });
+    await service.stop();
+
+    const failed = new DesktopService({ ...config(root), diagnostics: { unhandledRejections: true } }, {
+      ...driverFakes, spawn: (() => fakeChild()) as typeof import('node:child_process').spawn,
+      fetch: (async (input: RequestInfo | URL) => String(input).endsWith('/status') ? response(200, { value: {} })
+        : String(input).endsWith('/session') ? response(200, { value: { sessionId: 'install-fail' } })
+          : response(200, { value: null })) as typeof fetch,
+    });
+    await assert.rejects(failed.start(), /Could not install unhandled rejection diagnostics; the managed session was stopped/);
+    await assert.rejects(failed.status(), /No managed desktop session/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('managed start creates W3C session using configured binary and cleanup deletes only owned session', async () => {
   const root = await project(); const calls: { url: string; method: string; body?: string }[] = [];
   const child = fakeChild();

@@ -130,6 +130,7 @@ export async function serve(config: Config, store: Store, browser: BrowserContro
          maxArtifactCount: config.artifacts?.max_count,
          maxArtifactAgeDays: desktop?.visual.retain_artifacts_max_age_days,
          maskSelectors: desktop?.visual.mask_selectors,
+         diagnostics: { unhandledRejections: desktop?.diagnostics?.unhandled_rejections ?? false, capacity: desktop?.diagnostics?.capacity ?? 100 },
       };
       desktopService = options.desktopServiceFactory?.(serviceConfig) ?? new DesktopService(serviceConfig);
       return desktopService;
@@ -272,8 +273,9 @@ export async function serve(config: Config, store: Store, browser: BrowserContro
       desktopTool('desktop_capabilities', 'Report OS, display server, driver, binary, WebView, and real-window capture availability. Does not launch processes.', noArgs, (_a, service) => service.capabilities(), false);
       desktopTool('desktop_project_inspect', 'Read-only detection of Tauri/Angular project files and configured build/binary paths. Never executes project commands.', noArgs, (_a, service) => service.inspectProject(), false);
       desktopTool('desktop_session_start', 'Launch a real configured Tauri binary through a managed local tauri-driver WebDriver session. Requires desktop.enabled, an absolute driver path, and a prebuilt binary; does not attach to arbitrary apps.', noArgs, (_a, service) => service.start());
-      desktopTool('desktop_session_status', 'Report the managed Tauri WebDriver session started by this MCP session.', noArgs, (_a, service) => service.status());
-      desktopTool('desktop_session_stop', 'Stop only this MCP session’s managed Tauri WebDriver session and its owned app process tree.', noArgs, (_a, service) => service.stop());
+       desktopTool('desktop_session_status', 'Report the managed Tauri WebDriver session started by this MCP session.', noArgs, (_a, service) => service.status());
+       desktopTool('desktop_unhandled_rejections', 'Read bounded in-memory unhandled promise rejection occurrence metadata from the current instrumented managed document. Returns only event kind, cursor, and timestamp; it never returns rejection reasons, messages, or payloads. Window ErrorEvents are not collected on the tested driver. Collection is opt-in, may miss earlier events, and ends on full document navigation/reload until the session is restarted.', z.object({ after: z.number().int().nonnegative().default(0), limit: z.number().int().min(1).max(100).default(100) }).strict(), (a, service) => service.unhandledRejections(a.after, a.limit));
+       desktopTool('desktop_session_stop', 'Stop only this MCP session’s managed Tauri WebDriver session and its owned app process tree.', noArgs, (_a, service) => service.stop());
       desktopTool('desktop_session_restart', 'Stop and relaunch the configured Tauri binary in a fresh managed WebDriver session; an explicitly configured build_command runs on start.', noArgs, async (_a, service) => { await service.stop(); return service.start(); });
       desktopTool('desktop_get_ui_tree', 'Return a bounded semantic summary of visible WebView elements; does not expose raw HTML or form values.', z.object({ max_nodes: z.number().int().min(1).max(300).optional() }).strict(), (a, service) => service.tree(a.max_nodes));
          desktopTool('desktop_find_element', 'Find bounded CSS, exact text, label, role/name-approximation, test_id, or placeholder candidates and return approximate name, text, visibility, enabled state, and geometry.', z.object({ selector: desktopSelector, limit: z.number().int().min(1).max(50).optional() }).strict(), (a, service) => service.find(a.selector, a.limit));

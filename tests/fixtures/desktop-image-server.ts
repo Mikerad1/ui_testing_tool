@@ -15,15 +15,27 @@ const png = createRgbaPng();
 const config = {
   project: { id: 'desktop-image', name: 'desktop-image', base_url: 'http://127.0.0.1:3000' },
   server: { host: '127.0.0.1', port: 7317, auth: { mode: 'token', token_env: 'UMB_MCP_TOKEN' } },
-  desktop: { enabled: true, framework: 'tauri', root: '.', automation: { provider: 'tauri-driver', ready_timeout_seconds: 1 }, window: { title: 'Fixture Window', screenshot_mode: 'window' }, visual: { return_mcp_images: true, ...(fixtureMode === 'mask-policy' ? { mask_selectors: ['.private'] } : {}), ...(['retention','retention-query-failure'].includes(fixtureMode ?? '') ? { retain_artifacts_max_age_days: 1 } : {}), ...(['assert-capture','assert-capture-failure','assert-rollback-failure','assert-service-cleanup-failure','assert-partial-cleanup-failure'].includes(fixtureMode ?? '') ? { capture_on_failure: true } : {}) } },
+  desktop: { enabled: true, framework: 'tauri', root: '.', automation: { provider: 'tauri-driver', ready_timeout_seconds: 1 }, window: { title: 'Fixture Window', screenshot_mode: 'window' }, visual: { return_mcp_images: true, ...(fixtureMode === 'mask-policy' ? { mask_selectors: ['.private'] } : {}), ...(['retention','retention-query-failure'].includes(fixtureMode ?? '') ? { retain_artifacts_max_age_days: 1 } : {}), ...(['assert-capture','assert-capture-failure','assert-rollback-failure','assert-service-cleanup-failure','assert-partial-cleanup-failure'].includes(fixtureMode ?? '') ? { capture_on_failure: true } : {}) }, ...(fixtureMode === 'unhandled-rejections' ? { diagnostics: { unhandled_rejections: true, capacity: 2 } } : {}) },
   artifacts: { directory: './.umb/artifacts', redact_sensitive: true, max_file_bytes: 100000, max_total_bytes: 1000000, max_count: 10, max_age_days: 30 },
   memory: { database: './memory.sqlite', environment: 'local', persistent_learning_writes: fixtureMode === 'memory-learning', trust_yaml_seeds: false, sensitive_paths: [], sensitive_values_env: fixtureMode === 'memory-learning' ? ['DESKTOP_MEMORY_SECRET'] : [] },
   knowledge: { path: root },
 } as unknown as Config;
 
 class FakeDesktopService extends DesktopService {
+  private readonly fixtureDiagnostics: { unhandledRejections?: boolean; capacity?: number };
+  constructor(settings: DesktopConfig) { super(settings); this.fixtureDiagnostics = (settings as DesktopConfig & { diagnostics?: { unhandledRejections?: boolean; capacity?: number } }).diagnostics; }
   private captureIndex = 0;
   private windowSize?: { width: number; height: number };
+  async unhandledRejections(after = 0, limit = 100) {
+    if (fixtureMode === 'unhandled-rejections') return {
+      events: after < 1 && limit > 0 ? [{ cursor: 1, kind: 'unhandled_rejection' as const, at: 1761000000000 }] : [],
+      next_cursor: 1,
+      oldest_cursor: 1,
+      fixture_diagnostics: { unhandledRejections: this.fixtureDiagnostics?.unhandledRejections, capacity: this.fixtureDiagnostics?.capacity },
+      received: { after, limit },
+    };
+    throw Error('Unhandled rejection diagnostics are disabled in this fixture.');
+  }
   override async withWindowSize<T>(width: number, height: number, callback: () => Promise<T>): Promise<T> {
     this.windowSize = { width, height };
     try {

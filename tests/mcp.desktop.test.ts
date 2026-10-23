@@ -11,6 +11,61 @@ import { createRgbaPng } from './png-fixture.js';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
+test('desktop_unhandled_rejections is a direct bounded read-only tool and is disabled by default', { timeout: 30000 }, async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'umb-desktop-unhandled-rejections-'));
+  const transport = new StdioClientTransport({ command: process.execPath, args: ['--import', 'tsx/esm', path.join(repo, 'tests/fixtures/desktop-image-server.ts'), root], cwd: repo, stderr: 'pipe' });
+  const client = new Client({ name: 'desktop-unhandled-rejections-test', version: '1.0.0' });
+  try {
+    await client.connect(transport);
+    const listed = await client.listTools();
+    const definition = listed.tools.find(tool => tool.name === 'desktop_unhandled_rejections');
+    assert.ok(definition, 'direct desktop diagnostics tool is registered');
+    assert.match(definition!.description ?? '', /unhandled promise rejection/);
+    assert.match(definition!.description ?? '', /Window ErrorEvents are not collected/);
+    assert.match(definition!.description ?? '', /never returns rejection reasons/);
+    const input = definition!.inputSchema as any;
+    assert.deepEqual(input.required ?? [], []);
+    assert.deepEqual(input.properties.after, { type: 'integer', minimum: 0, default: 0 });
+    assert.deepEqual(input.properties.limit, { type: 'integer', minimum: 1, maximum: 100, default: 100 });
+    const defaults = await client.callTool({ name: 'desktop_unhandled_rejections', arguments: {} }) as any;
+    assert.equal(defaults.structuredContent.ok, false);
+    assert.match(defaults.structuredContent.error.message, /disabled/);
+    for (const args of [{ after: -1 }, { after: 1.5 }, { limit: 0 }, { limit: 101 }, { unexpected: true }]) {
+      const invalid = await client.callTool({ name: 'desktop_unhandled_rejections', arguments: args }) as any;
+      assert.equal(invalid.structuredContent.ok, false);
+      assert.equal(invalid.structuredContent.error.code, 'invalid_input');
+    }
+  } finally {
+    await client.close().catch(() => undefined);
+    await transport.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('desktop_unhandled_rejections passes configured diagnostics and pagination to DesktopService', { timeout: 30000 }, async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'umb-desktop-unhandled-rejections-on-'));
+  const transport = new StdioClientTransport({ command: process.execPath, args: ['--import', 'tsx/esm', path.join(repo, 'tests/fixtures/desktop-image-server.ts'), root, 'unhandled-rejections'], cwd: repo, stderr: 'pipe' });
+  const client = new Client({ name: 'desktop-unhandled-rejections-pass-through-test', version: '1.0.0' });
+  try {
+    await client.connect(transport);
+    const first = await client.callTool({ name: 'desktop_unhandled_rejections', arguments: { after: 0, limit: 1 } }) as any;
+    assert.deepEqual(first.structuredContent.data, {
+      events: [{ cursor: 1, kind: 'unhandled_rejection', at: 1761000000000 }],
+      next_cursor: 1,
+      oldest_cursor: 1,
+      fixture_diagnostics: { unhandledRejections: true, capacity: 2 },
+      received: { after: 0, limit: 1 },
+    });
+    const next = await client.callTool({ name: 'desktop_unhandled_rejections', arguments: { after: 1, limit: 7 } }) as any;
+    assert.deepEqual(next.structuredContent.data.received, { after: 1, limit: 7 });
+    assert.deepEqual(next.structuredContent.data.fixture_diagnostics, { unhandledRejections: true, capacity: 2 });
+  } finally {
+    await client.close().catch(() => undefined);
+    await transport.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('desktop screenshot removes a captured artifact when post-capture status fails', { timeout: 30000 }, async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'umb-desktop-cleanup-'));
   const transport = new StdioClientTransport({ command: process.execPath, args: ['--import', 'tsx/esm', path.join(repo, 'tests/fixtures/desktop-image-server.ts'), root, 'fail-status'], cwd: repo, stderr: 'pipe' });

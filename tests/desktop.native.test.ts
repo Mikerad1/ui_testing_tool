@@ -58,6 +58,7 @@ test('real Tauri app works through DesktopService and produces a WebView PNG', {
       projectRoot, tauriBinary: binary, driverExecutable,
       windowTitle: 'Tauri Acceptance Fixture', artifactDirectory: 'artifacts',
       maskSelectors: ['.phase6a-mask-target'],
+      diagnostics: { unhandledRejections: true, capacity: 2 },
       readinessTimeoutMs: 60_000,
     }, {
       fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -115,6 +116,19 @@ test('real Tauri app works through DesktopService and produces a WebView PNG', {
       if (!response.ok || json.value?.error) throw Error(`Native DOM probe failed: ${json.value?.message ?? response.statusText}`);
       return json.value;
     };
+    const windowErrorProbes = await rawExecute(`return [window.emitDiagnosticsProbe(),window.emitDiagnosticsProbe(),window.emitDiagnosticsProbe()]`);
+    assert.deepEqual(windowErrorProbes, [
+      { type: 'error', targetIsWindow: true }, { type: 'error', targetIsWindow: true }, { type: 'error', targetIsWindow: true },
+    ], 'fixture dispatches synthetic window error events');
+    await new Promise(resolve => setTimeout(resolve, 50));
+    const diagnostics = await service.unhandledRejections();
+    assert.deepEqual(diagnostics.events.map(({ cursor, kind }) => ({ cursor, kind })), [
+      { cursor: 2, kind: 'unhandled_rejection' }, { cursor: 3, kind: 'unhandled_rejection' },
+    ], 'the configured ring records only the newest unhandled rejection occurrences in cursor order');
+    assert.ok(diagnostics.events.every(event => Object.keys(event).sort().join(',') === 'at,cursor,kind'));
+    assert.equal(diagnostics.oldest_cursor, 2);
+    assert.equal(diagnostics.next_cursor, 3);
+    assert.doesNotMatch(JSON.stringify(diagnostics), /NATIVE_DIAGNOSTIC_SENTINEL|secret\.js|https?:/);
     await service.click({ by: 'label', value: 'Native placeholder acceptance' });
     assert.deepEqual(await rawExecute(`const e=document.activeElement;return {tag:e?.tagName,placeholder:e?.getAttribute('placeholder')}`), {
       tag: 'INPUT', placeholder: 'Native placeholder acceptance',
