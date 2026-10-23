@@ -32,7 +32,7 @@ test('v13 candidate ledger is scoped, append-only by identity, and exact retries
   let store:Store|undefined,other:Store|undefined,otherProject:Store|undefined;
   try{
     store=await Store.open(filename,'ledger-project','local');
-     assert.equal((store.db.prepare('SELECT max(version) version FROM schema_migrations').get() as {version:number}).version,18);
+     assert.equal((store.db.prepare('SELECT max(version) version FROM schema_migrations').get() as {version:number}).version,19);
     assert.equal('appendCandidateObservation' in store,false,'raw candidate writes are not exposed on Store');
     const original=observation(),inserted=appendObservation(store,filename,original),replayed=appendObservation(store,filename,{...original,created_at:'2026-01-01T00:00:00.000Z'});
     assert.equal(inserted.id,replayed.id);
@@ -126,7 +126,7 @@ test('v13 migration failure is atomic and can be retried',async()=>{
   try{
     store=await Store.open(filename,'migration-project');store.close();store=undefined;
     const native=new Database(filename);
-      native.exec("DROP TABLE desktop_finding_events; DROP TABLE desktop_comparison_findings; DROP TABLE desktop_visual_comparisons; DROP TABLE desktop_visual_findings; DROP TABLE desktop_baseline_revisions; DROP INDEX memory_audit_verify_subject_latest; DROP INDEX evidence_assertion_provenance_lookup; DROP INDEX memory_search_edges_from_bounded; DROP INDEX memory_search_edges_to_bounded; DROP TABLE memory_candidate_evidence_refs; DROP TABLE memory_lifecycle_events; DROP TABLE memory_candidate_observations; DROP TABLE memory_search_tokens; DROP TABLE memory_search_values; DROP TABLE memory_search_df; DROP TABLE memory_search_state; DELETE FROM schema_migrations WHERE version IN (13,14,15,16,17,18); CREATE TRIGGER fail_v13 BEFORE INSERT ON schema_migrations WHEN NEW.version=13 BEGIN SELECT RAISE(ABORT,'forced v13 failure'); END");native.close();
+       native.exec("DROP TABLE desktop_finding_events; DROP TABLE desktop_comparison_findings; DROP TABLE desktop_visual_comparisons; DROP TABLE desktop_visual_findings; DROP TABLE desktop_baseline_revisions; DROP INDEX memory_audit_verify_subject_latest; DROP INDEX evidence_assertion_provenance_lookup; DROP INDEX memory_search_edges_from_bounded; DROP INDEX memory_search_edges_to_bounded; DROP TABLE memory_candidate_evidence_refs; DROP TABLE memory_lifecycle_events; DROP TABLE memory_candidate_observations; DROP TABLE memory_search_tokens; DROP TABLE memory_search_values; DROP TABLE memory_search_df; DROP TABLE memory_search_state; DELETE FROM schema_migrations WHERE version IN (13,14,15,16,17,18,19); CREATE TRIGGER fail_v13 BEFORE INSERT ON schema_migrations WHEN NEW.version=13 BEGIN SELECT RAISE(ABORT,'forced v13 failure'); END");native.close();
     await assert.rejects(Store.open(filename,'migration-project'),/forced v13 failure/);
     const inspect=new Database(filename);try{
       assert.equal((inspect.prepare('SELECT max(version) version FROM schema_migrations').get() as {version:number}).version,12);
@@ -134,6 +134,6 @@ test('v13 migration failure is atomic and can be retried',async()=>{
     }finally{inspect.close();}
     const retry=new Database(filename);retry.exec('DROP TRIGGER fail_v13');retry.close();
     store=await Store.open(filename,'migration-project');
-      assert.equal((store.db.prepare('SELECT max(version) version FROM schema_migrations').get() as {version:number}).version,18);
+       assert.equal((store.db.prepare('SELECT max(version) version FROM schema_migrations').get() as {version:number}).version,19);
   }finally{store?.close();await rm(dir,{recursive:true,force:true});}
 });

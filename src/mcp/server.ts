@@ -13,7 +13,8 @@ import { safePath } from '../config/config.js';
 import type { Store } from '../memory/store.js';
 import type { LearningWriter } from '../memory/learning-writer.js';
 import type { BrowserController } from '../browser/controller.js';
-import { runWorkflow } from '../workflow/runner.js';
+import { runWorkflow, runWorkflowWithDriver } from '../workflow/runner.js';
+import { createDesktopWorkflowDriver } from '../workflow/desktop-driver.js';
 import { reconcile } from '../knowledge/reconcile.js';
 import { startKnowledgeWatcher, type KnowledgeWatchEvent, type KnowledgeWatchHandle } from '../knowledge/watcher.js';
 import { publishJiraScreenshotComment } from '../jira/comment.js';
@@ -161,10 +162,10 @@ export async function serve(config: Config, store: Store, browser: BrowserContro
         if (schema !== CallToolRequestSchema || !result?.isError || result.structuredContent) return result;
         const text = result.content?.find((item: any) => item.type === 'text')?.text ?? 'Invalid tool input';
         if (!/input validation error/i.test(text)) return result;
-        const envelope = { ok: false, project_id: config.project.id, session_id: session.id, error: { code: 'invalid_input', message: text }, state_revision: browser.revision };
+        const envelope = { ok: false, project_id: config.project.id, session_id: session.id, error: { code: 'invalid_input', message: text }, ...(request.params?.name === 'desktop_run_workflow' ? {} : { state_revision: browser.revision }) };
         return { ...result, isError: true, structuredContent: envelope, content: [{ type: 'text', text: JSON.stringify(envelope) }] };
       });
-       const invokeTool = (fn: (args: any) => unknown | Promise<unknown>, memorySearch=false, includeImage=false) => async (args: any) => {
+       const invokeTool = (fn: (args: any) => unknown | Promise<unknown>, memorySearch=false, includeImage=false, omitStateRevision=false) => async (args: any) => {
          activeToolCalls++;
          session.activeToolCalls++;
          if (session.timer) clearTimeout(session.timer);
@@ -174,7 +175,7 @@ export async function serve(config: Config, store: Store, browser: BrowserContro
             let value:any=await fn(args);
              if (includeImage && value && typeof value === 'object' && Array.isArray(value.imageBundle)) {
                const { imageBundle, ...metadata } = value;
-               result = { ok: true, project_id: config.project.id, session_id: session.id, data: metadata, state_revision: browser.revision };
+                result = { ok: true, project_id: config.project.id, session_id: session.id, data: metadata, ...(omitStateRevision ? {} : { state_revision: browser.revision }) };
                imageBytes = undefined;
                const images = imageBundle as Array<{ name: string; bytes: Uint8Array }>;
                return imageBundleToolCallResult(result, images, { enabled: config.desktop?.visual.return_mcp_images !== false, maxBytes: MAX_MCP_IMAGE_BUNDLE_BYTES });
@@ -184,12 +185,12 @@ export async function serve(config: Config, store: Store, browser: BrowserContro
               const { bytes: _bytes, ...metadata } = value;
               value = metadata;
             }
-            result={ok:true,project_id:config.project.id,session_id:session.id,...(value&&Array.isArray(value.data)&&value.pagination?{data:value.data,pagination:value.pagination}:{data:value}),state_revision:browser.revision};
+             result={ok:true,project_id:config.project.id,session_id:session.id,...(value&&Array.isArray(value.data)&&value.pagination?{data:value.data,pagination:value.pagination}:{data:value}),...(omitStateRevision?{}:{state_revision:browser.revision})};
           }
         catch (error) {
           const message = sanitizeErrorMessage(error instanceof Error ? error.message : 'Operation failed');
            const code = /Wayland|permission|capture denied/i.test(message)?'permission_denied':/desktop testing is disabled/i.test(message)?'desktop_disabled':/no managed desktop session/i.test(message)?'desktop_session_not_running':/application is not ready|application is not reachable/i.test(message)?'application_not_ready':/revision_conflict/i.test(message)?'revision_conflict':/approval_denied/i.test(message)?'approval_denied':/unsupported|unavailable/i.test(message)?'capability_unavailable':/persistent learning writes are disabled/i.test(message)?'learning_writes_disabled':/revision conflict/i.test(message) ? 'revision_conflict' : /expired snapshot reference|stale ref/i.test(message) ? 'stale_ref' : /ambiguous|matches: 0|no match/i.test(message) ? 'ambiguous_or_missing_target' : /origin not allowed|navigation.*denied/i.test(message) ? 'navigation_denied' : /timeout|timed out/i.test(message) ? 'timeout' : /invalid|must be|requires/i.test(message) ? 'invalid_input' : 'internal';
-          result = { ok: false, project_id: config.project.id, session_id: session.id, error: { code, message }, state_revision: browser.revision };
+           result = { ok: false, project_id: config.project.id, session_id: session.id, error: { code, message }, ...(omitStateRevision ? {} : { state_revision: browser.revision }) };
            return { isError: true, structuredContent: result, content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
         } finally {
            activeToolCalls--;
@@ -202,7 +203,7 @@ export async function serve(config: Config, store: Store, browser: BrowserContro
           return { structuredContent: result, content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
         };
       const tool = (name: string, description: string, schema: any, fn: (args: any) => unknown | Promise<unknown>) => mcp.tool(name, description, schema, invokeTool(fn,name==='memory_search'));
-      const strictTool = (name: string, description: string, schema: z.ZodTypeAny, fn: (args: any) => unknown | Promise<unknown>) => mcp.registerTool(name, { description, inputSchema: schema }, invokeTool(fn));
+       const strictTool = (name: string, description: string, schema: z.ZodTypeAny, fn: (args: any) => unknown | Promise<unknown>, omitStateRevision = false) => mcp.registerTool(name, { description, inputSchema: schema }, invokeTool(fn, false, false, omitStateRevision));
       const beforeDesktopOperation = async (service: DesktopService) => {
         const maxAgeDays = config.desktop?.visual.retain_artifacts_max_age_days;
         if (config.desktop?.enabled && maxAgeDays !== undefined) {
@@ -430,7 +431,27 @@ export async function serve(config: Config, store: Store, browser: BrowserContro
     });
     browserTool('browser_keyboard','Press a keyboard key',{key:z.string().min(1).max(100),target:target.optional(),expected_revision:z.number().int().nonnegative().optional()},async a=>{if(a.expected_revision!==undefined&&a.expected_revision!==browser.revision)throw Error('State revision conflict');const approval=await authorize('keyboard',a.target,a.expected_revision,session);try{return approval?await browser.performCaptured('keyboard',approval.handle,a.key):browser.keyboard(a.key,a.target);}finally{await approval?.release();}});
     browserTool('browser_upload','Upload a project file to a target',{target,project_relative_path:z.string().min(1).max(1024),expected_revision:z.number().int().nonnegative().optional()},async a=>{if(a.expected_revision!==undefined&&a.expected_revision!==browser.revision)throw Error('State revision conflict');const approval=await authorize('upload',a.target,a.expected_revision,session);try{return approval?await browser.uploadCaptured(approval.handle,a.project_relative_path):browser.upload(a.target,a.project_relative_path);}finally{await approval?.release();}});
-     const configuredAuthId=config.application_auth?.mode==='workflow'?config.application_auth.workflow_id:undefined;
+      const configuredAuthId=config.application_auth?.mode==='workflow'?config.application_auth.workflow_id:undefined;
+      strictTool('desktop_run_workflow','Run a supported CSS-only YAML workflow against this MCP session’s already-running managed Tauri session. Requires the exact desktop session ID and never starts a service.',z.object({workflow_id:z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$/),role:z.string().max(125).optional(),environment:z.string().max(100).optional(),expected_session_id:z.string().min(1).max(200)}).strict(),a=>runDesktop(async()=>{
+        if(config.desktop?.enabled!==true)throw Error('Desktop testing is disabled.');
+        const service=desktopService;
+        if(!service)throw Error('No managed desktop session is running.');
+        let status;
+        try{status=await service.status();}catch{throw Error('No managed desktop session is running.');}
+        if(status.state!=='running'||status.id!==a.expected_session_id)throw Error('Desktop session identity mismatch.');
+        const auth=a.workflow_id===configuredAuthId;
+        const driver=createDesktopWorkflowDriver({service,role:a.role,environment:a.environment,highRiskRules:config.security?.high_risk});
+        return runWorkflowWithDriver({store,session,workflowId:a.workflow_id,backend:'tauri',role:a.role,environment:a.environment,knowledgeRoot,...(auth?{safeOutcome:true,disableFailureCapture:true}:{}),captureDesktopFailure:async()=>{
+          if(config.desktop?.enabled!==true||config.desktop.visual.capture_on_failure!==true)return{status:'disabled' as const};
+          try{
+            await beforeDesktopOperation(service);
+            const capture=await captureDesktop(service,'webview');
+            if(typeof capture.artifact_ref!=='string')return{status:'capture_failed' as const};
+            const redaction=capture.redaction??{};
+            return{status:'captured' as const,artifactRef:capture.artifact_ref,redaction:{applied:redaction.applied===true,method:typeof redaction.method==='string'?redaction.method.slice(0,80):'unknown',scope:typeof redaction.scope==='string'?redaction.scope.slice(0,240):'unknown',warning:typeof redaction.warning==='string'?redaction.warning.slice(0,400):'No general PII-redaction guarantee.'}};
+          }catch(error){return{status:hasArtifactCleanupFailure(error)?'cleanup_failed' as const:'capture_failed' as const};}
+        },removeDesktopFailureArtifact:async ref=>{try{await service.removeArtifact(ref);return'removed';}catch{return'failed';}}},driver);
+      }),true);
        const safeAuthWorkflow=(workflowId:string,expectedRevision:number|undefined)=>{if(expectedRevision===undefined)return Promise.resolve({status:'failed',errorCode:'revision_conflict'});const current=store.currentYamlWorkflow(workflowId),snapshot=store.workflowSnapshotHash(workflowId);if(!current||!snapshot)return Promise.resolve({status:'failed',errorCode:'precondition_failed'});return runBrowser(()=>{assertApplicationReady();return runWorkflow({store,browser,session,workflowId,expectedRevision,knowledgeRoot,disableFailureCapture:true,safeOutcome:true,authorize:(action,target,revision)=>authorize(action,target,revision,session)});});};
        const applicationAuth=config.application_auth;if(applicationAuth){strictTool('application_sign_in','Sign in manually or run the configured YAML sign-in workflow',z.object({expected_revision:z.number().int().nonnegative().optional()}).strict(),a=>{assertApplicationReady();if(applicationAuth.mode==='interactive')return{status:'manual_required'};return safeAuthWorkflow(applicationAuth.workflow_id,a.expected_revision);});}
        tool('test_run_workflow','Run a YAML-authored deterministic workflow',{workflow_id:z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$/),role:z.string().max(125).optional(),environment:z.string().max(100).optional(),expected_revision:z.number().int().nonnegative()},a=>{const auth=a.workflow_id===configuredAuthId;return runBrowser(()=>{assertApplicationReady();return runWorkflow({store,browser,session,workflowId:a.workflow_id,role:a.role,environment:a.environment,expectedRevision:a.expected_revision,knowledgeRoot,...(auth?{disableFailureCapture:true,safeOutcome:true}:{}),captureDesktopFailure:async()=>{if(config.desktop?.enabled!==true||config.desktop.visual.capture_on_failure!==true)return{status:'disabled' as const};if(!desktopService)return{status:'unavailable' as const};try{return await runDesktop(async()=>{await beforeDesktopOperation(desktopService!);const result=await captureDesktop(desktopService!,'webview');if(typeof result.artifact_ref!=='string')return{status:'capture_failed' as const};const redaction=result.redaction??{};return{status:'captured' as const,artifactRef:result.artifact_ref,redaction:{applied:redaction.applied===true,method:typeof redaction.method==='string'?redaction.method.slice(0,80):'unknown',scope:typeof redaction.scope==='string'?redaction.scope.slice(0,240):'unknown',warning:typeof redaction.warning==='string'?redaction.warning.slice(0,400):'No general PII-redaction guarantee.'}};});}catch(error){return{status:hasArtifactCleanupFailure(error)?'cleanup_failed' as const:'capture_failed' as const};}},removeDesktopFailureArtifact:async(ref)=>{if(!desktopService)return'unavailable';try{await runDesktop(()=>desktopService!.removeArtifact(ref));return'removed';}catch{return'failed';}},authorize:(action,target,revision)=>authorize(action,target,revision,session)});});});

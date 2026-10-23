@@ -96,6 +96,72 @@ function createV3Fixture(filename: string, projectId: string, corruptEdge = fals
   db.close();
 }
 
+function demoteWorkflowAttemptsToV18(database:Database.Database){
+  database.exec(`CREATE TABLE workflow_step_attempts_v18(
+    project_id TEXT NOT NULL,run_id TEXT NOT NULL,step_id TEXT NOT NULL CHECK(length(step_id) BETWEEN 1 AND 100),
+    ordinal INTEGER NOT NULL CHECK(ordinal BETWEEN 0 AND 101),attempt INTEGER NOT NULL CHECK(attempt BETWEEN 1 AND 3),
+    action TEXT NOT NULL CHECK(action IN ('navigate','click','fill','press','select','type','keyboard','upload','wait','assert','screenshot')),
+    status TEXT NOT NULL CHECK(status IN ('running','passed','failed','interrupted')),
+    started_at TEXT NOT NULL CHECK(length(started_at) BETWEEN 1 AND 100),finished_at TEXT,
+    duration_ms INTEGER CHECK(duration_ms IS NULL OR duration_ms BETWEEN 0 AND 10000000),
+    error_code TEXT CHECK(error_code IS NULL OR error_code IN ('precondition_failed','missing_variable','timeout','approval_denied','revision_conflict','navigation_denied','target_invalid','assertion_failed','action_failed','interrupted')),
+    assertion_passed INTEGER CHECK(assertion_passed IS NULL OR assertion_passed IN (0,1)),
+    observed_count INTEGER CHECK(observed_count IS NULL OR observed_count BETWEEN 0 AND 100000),
+    artifact_ref TEXT CHECK(artifact_ref IS NULL OR length(artifact_ref)<=1000),
+    PRIMARY KEY(project_id,run_id,step_id,attempt),UNIQUE(project_id,run_id,ordinal,attempt),FOREIGN KEY(project_id,run_id) REFERENCES runs(project_id,id)
+  );
+  INSERT INTO workflow_step_attempts_v18 SELECT * FROM workflow_step_attempts;
+  DROP TABLE workflow_step_attempts;
+  ALTER TABLE workflow_step_attempts_v18 RENAME TO workflow_step_attempts;
+  CREATE INDEX workflow_step_attempts_run_order ON workflow_step_attempts(project_id,run_id,ordinal,attempt);
+  CREATE INDEX workflow_step_attempts_test_lookup ON workflow_step_attempts(project_id,action,status);
+  CREATE TRIGGER workflow_step_attempts_test_guard BEFORE UPDATE ON workflow_step_attempts WHEN NEW.artifact_ref='blocked' BEGIN SELECT RAISE(ABORT,'blocked artifact'); END;
+  DELETE FROM schema_migrations WHERE version=19;`);
+}
+
+test('v19 workflow scroll migration preserves populated attempts and rolls back atomically before retry',async()=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),'umb-v19-scroll-migrate-')),filename=path.join(dir,'memory.sqlite');let store:Store|undefined;
+  try{
+    store=await Store.open(filename,'v19-project');const run=store.createRun('session','workflow',{backend:'browser'});
+    store.createWorkflowStepAttempt({runId:run,stepId:'scroll-step',ordinal:1,attempt:1,action:'click',startedAt:'2026-01-01T00:00:01.000Z'});
+    store.finishWorkflowStepAttempt({runId:run,stepId:'scroll-step',attempt:1,status:'failed',finishedAt:'2026-01-01T00:00:02.000Z',durationMs:123,errorCode:'action_failed',assertionPassed:false,observedCount:2,artifactRef:'.umb-managed/scroll-failure.png'});
+    store.createWorkflowStepAttempt({runId:run,stepId:'scroll-step',ordinal:1,attempt:2,action:'assert',startedAt:'2026-01-01T00:00:03.000Z'});
+    store.finishWorkflowStepAttempt({runId:run,stepId:'scroll-step',attempt:2,status:'passed',finishedAt:'2026-01-01T00:00:04.000Z',durationMs:45,assertionPassed:true,observedCount:1,artifactRef:'.umb-managed/scroll-success.png'});
+    store.close();store=undefined;
+    const setup=new Database(filename);demoteWorkflowAttemptsToV18(setup);setup.exec("CREATE TRIGGER fail_v19 BEFORE INSERT ON schema_migrations WHEN NEW.version=19 BEGIN SELECT RAISE(ABORT,'forced v19 migration failure'); END");setup.close();
+    const expectedRows=[
+      ['v19-project',run,'scroll-step',1,1,'click','failed','2026-01-01T00:00:01.000Z','2026-01-01T00:00:02.000Z',123,'action_failed',0,2,'.umb-managed/scroll-failure.png'],
+      ['v19-project',run,'scroll-step',1,2,'assert','passed','2026-01-01T00:00:03.000Z','2026-01-01T00:00:04.000Z',45,null,1,1,'.umb-managed/scroll-success.png'],
+    ];
+    await assert.rejects(Store.open(filename,'v19-project'),/forced v19 migration failure/);
+    const failed=new Database(filename);try{
+      assert.equal((failed.prepare('SELECT max(version) version FROM schema_migrations').get() as any).version,18);
+      assert.deepEqual(failed.prepare('SELECT * FROM workflow_step_attempts ORDER BY attempt').all().map((row:any)=>Object.values(row)),expectedRows);
+      assert.equal(failed.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workflow_step_attempts_v19'").get(),undefined);
+      assert.ok(failed.prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name='workflow_step_attempts_run_order'").get());
+      assert.ok(failed.prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name='workflow_step_attempts_test_lookup'").get());
+      assert.ok(failed.prepare("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='workflow_step_attempts_test_guard'").get());
+      assert.deepEqual(failed.pragma('foreign_key_check'),[]);
+    }finally{failed.close();}
+    const backups=(await readdir(dir)).filter(name=>name.startsWith('memory.sqlite.pre-v19-')&&name.endsWith('.sqlite'));assert.ok(backups.length);
+    const backup=new Database(path.join(dir,backups[0]),{readonly:true,fileMustExist:true});try{
+      assert.equal((backup.prepare('SELECT max(version) version FROM schema_migrations').get() as any).version,18);
+      assert.equal((backup.prepare('SELECT count(*) count FROM workflow_step_attempts').get() as any).count,2);
+      assert.match((backup.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='workflow_step_attempts'").get() as any).sql,/action IN \([^)]*screenshot[^)]*\)/);
+      assert.doesNotMatch((backup.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='workflow_step_attempts'").get() as any).sql,/scroll/);
+    }finally{backup.close();}
+    const retry=new Database(filename);retry.exec('DROP TRIGGER fail_v19');retry.close();
+    store=await Store.open(filename,'v19-project');
+    assert.equal((store.db.prepare('SELECT max(version) version FROM schema_migrations').get() as any).version,19);
+    assert.deepEqual(store.db.prepare('SELECT * FROM workflow_step_attempts ORDER BY attempt').all().map((row:any)=>Object.values(row)),expectedRows);
+    assert.ok(store.db.prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name='workflow_step_attempts_run_order'").get());
+    assert.ok(store.db.prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name='workflow_step_attempts_test_lookup'").get());
+    assert.ok(store.db.prepare("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='workflow_step_attempts_test_guard'").get());
+    assert.deepEqual(store.db.pragma('foreign_key_check'),[]);
+    assert.deepEqual((store.getRunReport(run)!.stepAttempts as any[]).map(row=>[row.action,row.artifactRef]),[['click','.umb-managed/scroll-failure.png'],['assert','.umb-managed/scroll-success.png']]);
+  }finally{store?.close();await rm(dir,{recursive:true,force:true});}
+});
+
 test('populated v1 database upgrades without losing graph or YAML source data', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'umb-v1-migrate-'));
   const filename = path.join(dir, 'memory.sqlite');
@@ -107,9 +173,9 @@ test('populated v1 database upgrades without losing graph or YAML source data', 
     assert.equal((store.get('v1-screen') as any).content_hash, 'screen-hash');
     assert.equal((store.listEdges() as any[]).find(e => e.id === 'v1-edge').relation_type, 'HAS_SCREEN');
     assert.equal((store.db.prepare('SELECT hash FROM yaml_sources WHERE path=?').get('screens/home.yaml') as any).hash, 'source-hash');
-      assert.equal((store.db.prepare('SELECT max(version) version FROM schema_migrations').get() as any).version, 18);
+      assert.equal((store.db.prepare('SELECT max(version) version FROM schema_migrations').get() as any).version, 19);
     assert.deepEqual(store.db.pragma('foreign_key_check'), []);
-      const backupName=(await readdir(dir)).find(name=>name.startsWith('memory.sqlite.pre-v18-')&&name.endsWith('.sqlite'));
+      const backupName=(await readdir(dir)).find(name=>name.startsWith('memory.sqlite.pre-v19-')&&name.endsWith('.sqlite'));
     assert(backupName,'legacy migration creates a pre-upgrade backup');
     const backup=new Database(path.join(dir,backupName),{readonly:true,fileMustExist:true});
     try{
@@ -134,7 +200,7 @@ test('populated v3 database upgrades preserving runs, evidence, ownership and ed
     assert.equal((store.listEdges() as any[]).find(e => e.id === 'v3-edge').relation_type, 'HAS_SCREEN');
     assert.equal((store.readEvidence('v3-screen', 'v3-run') as any[])[0].id, 'v3-evidence');
     assert.equal((store.db.prepare('SELECT hash FROM yaml_ownership WHERE entity_id=?').get('v3-screen') as any).hash, 'v3-source-hash');
-      assert.equal((store.db.prepare('SELECT max(version) version FROM schema_migrations').get() as any).version, 18);
+       assert.equal((store.db.prepare('SELECT max(version) version FROM schema_migrations').get() as any).version, 19);
     assert.deepEqual(store.db.pragma('foreign_key_check'), []);
   } finally {
     store?.close();
@@ -203,7 +269,7 @@ test('v12 backfill and fingerprint tables migrate atomically behind a validated 
   const dir=await mkdtemp(path.join(os.tmpdir(),'umb-v12-migrate-')),filename=path.join(dir,'memory.sqlite');let store:Store|undefined;
   try{
     store=await Store.open(filename,'v12-project');store.close();store=undefined;
-       const database=new Database(filename);database.exec("DROP TABLE desktop_finding_events; DROP TABLE desktop_comparison_findings; DROP TABLE desktop_visual_comparisons; DROP TABLE desktop_visual_findings; DROP TABLE desktop_baseline_revisions; DROP INDEX memory_audit_verify_subject_latest; DROP INDEX evidence_assertion_provenance_lookup; DROP INDEX memory_search_edges_from_bounded; DROP INDEX memory_search_edges_to_bounded; DROP TABLE memory_candidate_evidence_refs; DROP TABLE memory_lifecycle_events; DROP TABLE memory_search_tokens; DROP TABLE memory_search_values; DROP TABLE memory_search_df; DROP TABLE memory_search_state; DROP TABLE memory_candidate_observations; DROP TABLE yaml_record_fingerprints; DROP TABLE memory_backfill_items; DROP TABLE memory_backfill_jobs; DELETE FROM schema_migrations WHERE version IN (12,13,14,15,16,17,18); CREATE TRIGGER fail_v12 BEFORE INSERT ON schema_migrations WHEN NEW.version=12 BEGIN SELECT RAISE(ABORT,'forced v12 migration failure'); END");database.close();
+        const database=new Database(filename);database.exec("DROP TABLE desktop_finding_events; DROP TABLE desktop_comparison_findings; DROP TABLE desktop_visual_comparisons; DROP TABLE desktop_visual_findings; DROP TABLE desktop_baseline_revisions; DROP INDEX memory_audit_verify_subject_latest; DROP INDEX evidence_assertion_provenance_lookup; DROP INDEX memory_search_edges_from_bounded; DROP INDEX memory_search_edges_to_bounded; DROP TABLE memory_candidate_evidence_refs; DROP TABLE memory_lifecycle_events; DROP TABLE memory_search_tokens; DROP TABLE memory_search_values; DROP TABLE memory_search_df; DROP TABLE memory_search_state; DROP TABLE memory_candidate_observations; DROP TABLE yaml_record_fingerprints; DROP TABLE memory_backfill_items; DROP TABLE memory_backfill_jobs; DELETE FROM schema_migrations WHERE version IN (12,13,14,15,16,17,18,19); CREATE TRIGGER fail_v12 BEFORE INSERT ON schema_migrations WHEN NEW.version=12 BEGIN SELECT RAISE(ABORT,'forced v12 migration failure'); END");database.close();
     await assert.rejects(Store.open(filename,'v12-project'),/forced v12 migration failure/);
     const failed=new Database(filename);try{
       assert.equal((failed.prepare('SELECT max(version) version FROM schema_migrations').get() as any).version,11);
@@ -212,7 +278,7 @@ test('v12 backfill and fingerprint tables migrate atomically behind a validated 
     }finally{failed.close();}
     const retry=new Database(filename);retry.exec('DROP TRIGGER fail_v12');retry.close();
     store=await Store.open(filename,'v12-project');
-      assert.equal((store.db.prepare('SELECT max(version) version FROM schema_migrations').get() as any).version,18);
+       assert.equal((store.db.prepare('SELECT max(version) version FROM schema_migrations').get() as any).version,19);
     assert.deepEqual(store.db.pragma('foreign_key_check'),[]);
   }finally{store?.close();await rm(dir,{recursive:true,force:true});}
 });
@@ -222,7 +288,7 @@ test('v15 lifecycle history backfills stale and legacy supersede state; failed m
   try{
     store=await Store.open(filename,'v15-project');const node=store.applicationSubject()!;store.close();store=undefined;
     const setup=new Database(filename);
-     setup.exec('DROP TABLE desktop_finding_events; DROP TABLE desktop_comparison_findings; DROP TABLE desktop_visual_comparisons; DROP TABLE desktop_visual_findings; DROP TABLE desktop_baseline_revisions; DROP INDEX memory_audit_verify_subject_latest; DROP INDEX evidence_assertion_provenance_lookup; DROP INDEX memory_search_edges_from_bounded; DROP INDEX memory_search_edges_to_bounded; DROP TABLE memory_candidate_evidence_refs; DROP TABLE memory_lifecycle_events; DELETE FROM schema_migrations WHERE version IN (15,16,17,18)');
+     setup.exec('DROP TABLE desktop_finding_events; DROP TABLE desktop_comparison_findings; DROP TABLE desktop_visual_comparisons; DROP TABLE desktop_visual_findings; DROP TABLE desktop_baseline_revisions; DROP INDEX memory_audit_verify_subject_latest; DROP INDEX evidence_assertion_provenance_lookup; DROP INDEX memory_search_edges_from_bounded; DROP INDEX memory_search_edges_to_bounded; DROP TABLE memory_candidate_evidence_refs; DROP TABLE memory_lifecycle_events; DELETE FROM schema_migrations WHERE version IN (15,16,17,18,19)');
     setup.prepare("UPDATE nodes SET verification_status='stale' WHERE project_id=? AND id=?").run('v15-project',node.id);
     setup.prepare('INSERT INTO memory_audit VALUES(?,?,?,?,?,?)').run('legacy-supersede-audit','v15-project',node.id,'supersede','{"newId":"legacy-replacement"}','legacy-time');
     setup.exec("CREATE TRIGGER fail_v15 BEFORE INSERT ON schema_migrations WHEN NEW.version=15 BEGIN SELECT RAISE(ABORT,'forced v15 migration failure'); END");setup.close();

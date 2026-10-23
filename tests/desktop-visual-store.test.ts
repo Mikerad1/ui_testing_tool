@@ -38,7 +38,7 @@ test('v18 visual records are scoped, immutable and use baseline CAS plus finding
     store=await Store.open(filename,'visual-project','local');
     otherEnvironment=await Store.open(filename,'visual-project','staging');
     otherProject=await Store.open(filename,'other-visual-project','local');
-    assert.equal((store.db.prepare('SELECT max(version) version FROM schema_migrations').get() as {version:number}).version,18);
+    assert.equal((store.db.prepare('SELECT max(version) version FROM schema_migrations').get() as {version:number}).version,19);
     assert.throws(()=>store!.saveDesktopBaseline({...baseline(),approval_attestation:'pending'} as any),/caller approval attestation/);
     assert.throws(()=>store!.saveDesktopBaseline({...baseline(),artifact:{...artifact('bad'),'ref':'../escape.png'}}),/project-root-relative/);
     assert.throws(()=>store!.saveDesktopBaseline({...baseline(),artifact:{...artifact('bad'),'ref':'desktop/bad.png'}}),/project-root-relative/);

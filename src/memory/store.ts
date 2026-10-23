@@ -26,7 +26,7 @@ export class BackfillRecordReadError extends Error { constructor(){super('Stored
 export type WorkflowRecallContext={goal:string;currentUrl:string;role?:string;environment?:string;limit?:number;trustYamlSeeds?:boolean};
 export type MemoryReadOptions={trustYamlSeeds?:boolean};
 type RecallNode={id:string;stable_key:string;canonical_key:string;display_name:string;attributes_json:string;origin:string;verification_status:string;confidence:number;conflict_status:string;tombstone:number;updated_at:string};
-const WORKFLOW_ACTIONS=new Set(['navigate','click','fill','press','select','type','keyboard','upload','wait','assert','screenshot']);
+const WORKFLOW_ACTIONS=new Set(['navigate','click','fill','press','select','type','keyboard','upload','wait','assert','screenshot','scroll']);
 const WORKFLOW_ERROR_CODES=new Set(['precondition_failed','missing_variable','timeout','approval_denied','revision_conflict','navigation_denied','target_invalid','assertion_failed','action_failed','interrupted']);
 const ASSERTION_CAPTURE_CODES=new Set(['quota_exceeded','capture_failed']);
 const BROWSER_WORKFLOW_RUN_SQL=(alias:string)=>`CASE WHEN json_valid(${alias}.environment_json)=1 THEN CASE WHEN json_type(${alias}.environment_json)='object' THEN CASE WHEN json_type(${alias}.environment_json,'$.backend') IS NULL THEN 1 WHEN json_type(${alias}.environment_json,'$.backend')='text' AND json_extract(${alias}.environment_json,'$.backend')='browser' THEN 1 ELSE 0 END ELSE 0 END ELSE 0 END=1`;
@@ -140,7 +140,37 @@ function semanticAttributesJson(value:string|Record<string,unknown>):string{
   }
 }
 
-export const CURRENT_SCHEMA_VERSION=18;
+export const CURRENT_SCHEMA_VERSION=19;
+
+function migrateWorkflowScrollV19(database:Database.Database):void{
+  database.transaction(()=>{
+    const schemaObjects=database.prepare("SELECT type,sql FROM sqlite_master WHERE tbl_name='workflow_step_attempts' AND type IN ('index','trigger') AND sql IS NOT NULL ORDER BY type,name").all() as Array<{type:string;sql:string}>;
+    const before=(database.prepare('SELECT count(*) count FROM workflow_step_attempts').get() as {count:number}).count;
+    database.exec(`CREATE TABLE workflow_step_attempts_v19(
+      project_id TEXT NOT NULL,run_id TEXT NOT NULL,step_id TEXT NOT NULL CHECK(length(step_id) BETWEEN 1 AND 100),
+      ordinal INTEGER NOT NULL CHECK(ordinal BETWEEN 0 AND 101),attempt INTEGER NOT NULL CHECK(attempt BETWEEN 1 AND 3),
+      action TEXT NOT NULL CHECK(action IN ('navigate','click','fill','press','select','type','keyboard','upload','wait','assert','screenshot','scroll')),
+      status TEXT NOT NULL CHECK(status IN ('running','passed','failed','interrupted')),
+      started_at TEXT NOT NULL CHECK(length(started_at) BETWEEN 1 AND 100),finished_at TEXT,
+      duration_ms INTEGER CHECK(duration_ms IS NULL OR duration_ms BETWEEN 0 AND 10000000),
+      error_code TEXT CHECK(error_code IS NULL OR error_code IN ('precondition_failed','missing_variable','timeout','approval_denied','revision_conflict','navigation_denied','target_invalid','assertion_failed','action_failed','interrupted')),
+      assertion_passed INTEGER CHECK(assertion_passed IS NULL OR assertion_passed IN (0,1)),
+      observed_count INTEGER CHECK(observed_count IS NULL OR observed_count BETWEEN 0 AND 100000),
+      artifact_ref TEXT CHECK(artifact_ref IS NULL OR length(artifact_ref)<=1000),
+      PRIMARY KEY(project_id,run_id,step_id,attempt),UNIQUE(project_id,run_id,ordinal,attempt),FOREIGN KEY(project_id,run_id) REFERENCES runs(project_id,id)
+    );
+    INSERT INTO workflow_step_attempts_v19(project_id,run_id,step_id,ordinal,attempt,action,status,started_at,finished_at,duration_ms,error_code,assertion_passed,observed_count,artifact_ref)
+      SELECT project_id,run_id,step_id,ordinal,attempt,action,status,started_at,finished_at,duration_ms,error_code,assertion_passed,observed_count,artifact_ref FROM workflow_step_attempts;
+    DROP TABLE workflow_step_attempts;
+    ALTER TABLE workflow_step_attempts_v19 RENAME TO workflow_step_attempts;
+    `);
+    for(const object of schemaObjects)database.exec(object.sql);
+    const after=(database.prepare('SELECT count(*) count FROM workflow_step_attempts').get() as {count:number}).count;
+    if(after!==before)throw Error(`Cannot migrate v19: workflow step attempt row count changed from ${before} to ${after}`);
+    if((database.pragma('foreign_key_check') as unknown[]).length)throw Error('Cannot migrate v19: workflow step attempt foreign-key validation failed');
+    database.prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(19,?)').run(new Date().toISOString());
+  })();
+}
 
 export type CandidateObservationSourceKind='mcp_node'|'mcp_edge'|'yaml_document'|'backfill_node'|'backfill_edge';
 export type CandidateObservationStatus='proposed'|'conflict'|'stale'|'superseded'|'rejected';
@@ -412,7 +442,8 @@ export class Store {
      if(!has(15))migrateLifecycleEventsV15(this.#database);
       if(!has(16))migrateEvidenceAssociationsV16(this.#database);
        if(!has(17))migrateProvenanceIndexesV17(this.#database);
-       if(!has(18))migrateDesktopVisualLoopV18(this.#database);
+        if(!has(18))migrateDesktopVisualLoopV18(this.#database);
+        if(!has(19))migrateWorkflowScrollV19(this.#database);
    }
   close(){this.#database.close();}
   saveDesktopBaseline(input:DesktopBaselineRecord):Record<string,unknown>{

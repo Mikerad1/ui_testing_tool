@@ -9,9 +9,13 @@ type SessionLike={id:string;closed:boolean};
 type Approval={handle:ElementHandle<HTMLElement>;release:()=>Promise<void>};
 type DesktopRedaction={applied:boolean;method:string;scope:string;warning:string};
 type DesktopFailureCapture={status:'captured';artifactRef:string;redaction:DesktopRedaction}|{status:'disabled'|'unavailable'|'capture_failed'|'cleanup_failed'};
-export type WorkflowRunnerOptions={store:Store;session:SessionLike;workflowId:string;role?:string;environment?:string;knowledgeRoot?:string;env?:NodeJS.ProcessEnv;disableFailureCapture?:boolean;safeOutcome?:boolean;captureDesktopFailure?:()=>Promise<DesktopFailureCapture>;removeDesktopFailureArtifact?:(ref:string)=>Promise<'removed'|'unavailable'|'failed'>};
+export type WorkflowRunnerOptions={store:Store;session:SessionLike;workflowId:string;backend?:'browser'|'tauri';role?:string;environment?:string;knowledgeRoot?:string;env?:NodeJS.ProcessEnv;disableFailureCapture?:boolean;safeOutcome?:boolean;captureDesktopFailure?:()=>Promise<DesktopFailureCapture>;removeDesktopFailureArtifact?:(ref:string)=>Promise<'removed'|'unavailable'|'failed'>};
 type RunnerOptions=WorkflowRunnerOptions&{browser:BrowserController;expectedRevision:number;authorize:(action:string,target:any,revision:number)=>Promise<Approval|undefined>};
 type SafeCode='precondition_failed'|'missing_variable'|'timeout'|'approval_denied'|'revision_conflict'|'navigation_denied'|'target_invalid'|'assertion_failed'|'action_failed'|'interrupted';
+export type WorkflowPreflightErrorCode='precondition_failed'|'approval_denied';
+export class WorkflowPreflightError extends Error {
+  constructor(readonly code:WorkflowPreflightErrorCode){super(code);this.name='WorkflowPreflightError';}
+}
 type Outcome={status:'passed'|'failed'|'interrupted';errorCode?:SafeCode;assertionPassed?:boolean;observedCount?:number;artifactRef?:string};
 const screenId=(value:string)=>value.replace(/^(screen:|role:)/,'');
 
@@ -29,11 +33,12 @@ async function runWorkflowInner(options:WorkflowRunnerOptions,driver:WorkflowDri
   if(!workflowNode||workflowNode.origin!=='yaml')return earlyFailure('precondition_failed');
   let workflow:WorkflowDocument;
   try{workflow=parseStoredWorkflowDocument(JSON.parse(workflowNode.attributes_json));}catch{return earlyFailure('precondition_failed');}
-  const metadata:Record<string,unknown>={...(options.role?{role:options.role}:{}),...(options.environment?{environment:options.environment}:{})};const boundedNames:string[]=[];for(const name of Object.keys(workflow.variables??{})){const candidate=[...boundedNames,name];if(JSON.stringify({...metadata,variable_names:candidate}).length>900)break;boundedNames.push(name);}if(boundedNames.length)metadata.variable_names=boundedNames;
+  const metadata:Record<string,unknown>={...(options.backend?{backend:options.backend}:{}),...(options.role?{role:options.role}:{}),...(options.environment?{environment:options.environment}:{})};const boundedNames:string[]=[];for(const name of Object.keys(workflow.variables??{})){const candidate=[...boundedNames,name];if(JSON.stringify({...metadata,variable_names:candidate}).length>900)break;boundedNames.push(name);}if(boundedNames.length)metadata.variable_names=boundedNames;
      const workflowSnapshotHash=store.workflowSnapshotHash(workflowId);if(!workflowSnapshotHash)return earlyFailure('precondition_failed');
      if(options.safeOutcome){for(const step of workflow.steps){if(step.action==='fill'||step.action==='type'||step.action==='select'){const match=step.value.match(/^\$\{\{\s*variables\.([A-Z_][A-Z0-9_]*)\s*\}\}$/),declaration=match&&workflow.variables?.[match[1]!];if(!declaration?.from_env||declaration.sensitive!==true)return earlyFailure('precondition_failed');}}}
-     try{await driver.validateWorkflow(workflow);}catch{return earlyFailure('precondition_failed');}
-      const runId=store.createRun(session.id,workflowNode.id,options.safeOutcome?{}:metadata,workflowSnapshotHash),started=Date.now();driver.beginRun({workflow,workflowNodeId:workflowNode.id,workflowId:workflow.id,runId,knowledgeRoot:options.knowledgeRoot});let active:{stepId:string;attempt:number;ordinal:number;action:string;started:number}|undefined,attemptCount=0,evidenceAttempted=false;const proposalIds:string[]=[];
+     try{await driver.validateWorkflow(workflow);}catch(error){return earlyFailure(error instanceof WorkflowPreflightError?error.code:'precondition_failed');}
+      const runMetadata=options.safeOutcome?(options.backend?{backend:options.backend}:{}):metadata;
+      const runId=store.createRun(session.id,workflowNode.id,runMetadata,workflowSnapshotHash),started=Date.now();driver.beginRun({workflow,workflowNodeId:workflowNode.id,workflowId:workflow.id,runId,knowledgeRoot:options.knowledgeRoot});let active:{stepId:string;attempt:number;ordinal:number;action:string;started:number}|undefined,attemptCount=0,evidenceAttempted=false;const proposalIds:string[]=[];
   const startAttempt=(stepId:string,ordinal:number,attempt:number,action:string)=>{const at=Date.now();store.createWorkflowStepAttempt({runId,stepId,ordinal,attempt,action,startedAt:new Date(at).toISOString()});attemptCount++;active={stepId,attempt,ordinal,action,started:at};};
   const finishAttempt=(outcome:Outcome)=>{if(!active)return;store.finishWorkflowStepAttempt({runId,stepId:active.stepId,attempt:active.attempt,status:outcome.status,finishedAt:new Date().toISOString(),durationMs:Math.min(10_000_000,Math.max(0,Date.now()-active.started)),errorCode:outcome.errorCode,assertionPassed:outcome.assertionPassed,observedCount:outcome.observedCount,artifactRef:outcome.artifactRef??null});active=undefined;};
    let failure:SafeCode|undefined,capture:{snapshot?:Record<string,number>;console_errors?:number;screenshot?:string|null;desktop_screenshot?:string|null;desktop_screenshot_status?:DesktopFailureCapture['status']|'persistence_failed';desktop_screenshot_redaction?:DesktopRedaction}={};

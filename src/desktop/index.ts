@@ -179,12 +179,20 @@ export class DesktopService {
   private readonly host: string;
   private port: number;
   private readonly adapters: DesktopAdapters;
+  private actionRequestTimeoutMs?: number;
 
   constructor(private readonly config: DesktopConfig, adapters: Partial<DesktopAdapters> = {}) {
     this.root = path.resolve(config.projectRoot);
     this.host = '127.0.0.1';
     this.port = config.driverPort ?? 0;
     this.adapters = { ...defaults, ...adapters };
+  }
+
+  /** Set the bound for ordinary WebDriver requests made by the current workflow action. */
+  setActionRequestTimeout(timeoutMs: number | undefined): void {
+    if (timeoutMs === undefined) { this.actionRequestTimeoutMs = undefined; return; }
+    bounded(timeoutMs, 1, WEBDRIVER_REQUEST_TIMEOUT_MS, 'action request timeout');
+    this.actionRequestTimeoutMs = timeoutMs;
   }
 
   async capabilities(): Promise<DesktopCapabilities> {
@@ -658,7 +666,7 @@ export class DesktopService {
     if (!this.config.tauriBinary) throw Error('Configure tauriBinary as an absolute or project-relative Tauri executable path.');
     return path.resolve(this.root, this.config.tauriBinary);
   }
-  private async request(method: string, resource: string, body?: unknown, timeoutMs = WEBDRIVER_REQUEST_TIMEOUT_MS): Promise<any> {
+  private async request(method: string, resource: string, body?: unknown, timeoutMs = this.actionRequestTimeoutMs ?? WEBDRIVER_REQUEST_TIMEOUT_MS): Promise<any> {
     const sessionResource = resource === '/session' || resource.startsWith('/session/')
       ? resource
       : this.sessionId ? `/session/${encodeURIComponent(this.sessionId)}${resource.startsWith('/') ? resource : `/${resource}`}` : resource;
