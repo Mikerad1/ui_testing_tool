@@ -15,7 +15,7 @@ const png = createRgbaPng();
 const config = {
   project: { id: 'desktop-image', name: 'desktop-image', base_url: 'http://127.0.0.1:3000' },
   server: { host: '127.0.0.1', port: 7317, auth: { mode: 'token', token_env: 'UMB_MCP_TOKEN' } },
-  desktop: { enabled: true, framework: 'tauri', root: '.', automation: { provider: 'tauri-driver', ready_timeout_seconds: 1 }, window: { title: 'Fixture Window', screenshot_mode: 'window' }, visual: { return_mcp_images: true, ...(fixtureMode === 'mask-policy' ? { mask_selectors: ['.private'] } : {}), ...(['retention','retention-query-failure'].includes(fixtureMode ?? '') ? { retain_artifacts_max_age_days: 1 } : {}), ...(['assert-capture','assert-capture-failure','assert-rollback-failure','assert-service-cleanup-failure','assert-partial-cleanup-failure'].includes(fixtureMode ?? '') ? { capture_on_failure: true } : {}) }, ...(fixtureMode === 'unhandled-rejections' ? { diagnostics: { unhandled_rejections: true, capacity: 2 } } : {}) },
+  desktop: { enabled: true, framework: 'tauri', root: '.', automation: { provider: 'tauri-driver', ready_timeout_seconds: 1 }, window: { title: 'Fixture Window', screenshot_mode: 'window' }, visual: { return_mcp_images: true, ...(fixtureMode === 'mask-policy' ? { mask_selectors: ['.private'] } : {}), ...(['retention','retention-query-failure'].includes(fixtureMode ?? '') ? { retain_artifacts_max_age_days: 1 } : {}), ...(['assert-capture','assert-capture-failure','assert-rollback-failure','assert-service-cleanup-failure','assert-partial-cleanup-failure'].includes(fixtureMode ?? '') ? { capture_on_failure: true } : {}) }, navigation: { allowed_origins: fixtureMode === 'navigation' ? ['https://allowed.example', 'tauri://localhost'] : [] }, ...(fixtureMode === 'unhandled-rejections' ? { diagnostics: { unhandled_rejections: true, capacity: 2 } } : {}) },
   artifacts: { directory: './.umb/artifacts', redact_sensitive: true, max_file_bytes: 100000, max_total_bytes: 1000000, max_count: 10, max_age_days: 30 },
   memory: { database: './memory.sqlite', environment: 'local', persistent_learning_writes: fixtureMode === 'memory-learning', trust_yaml_seeds: false, sensitive_paths: [], sensitive_values_env: fixtureMode === 'memory-learning' ? ['DESKTOP_MEMORY_SECRET'] : [] },
   knowledge: { path: root },
@@ -23,7 +23,8 @@ const config = {
 
 class FakeDesktopService extends DesktopService {
   private readonly fixtureDiagnostics: { unhandledRejections?: boolean; capacity?: number };
-  constructor(settings: DesktopConfig) { super(settings); this.fixtureDiagnostics = (settings as DesktopConfig & { diagnostics?: { unhandledRejections?: boolean; capacity?: number } }).diagnostics; }
+  private readonly fixtureAllowedOrigins: string[];
+  constructor(settings: DesktopConfig) { super(settings); this.fixtureDiagnostics = (settings as DesktopConfig & { diagnostics?: { unhandledRejections?: boolean; capacity?: number } }).diagnostics; this.fixtureAllowedOrigins = (settings as DesktopConfig & { navigation?: { allowedOrigins?: string[] } }).navigation?.allowedOrigins ?? []; }
   private captureIndex = 0;
   private windowSize?: { width: number; height: number };
   async unhandledRejections(after = 0, limit = 100) {
@@ -36,6 +37,14 @@ class FakeDesktopService extends DesktopService {
     };
     throw Error('Unhandled rejection diagnostics are disabled in this fixture.');
   }
+  async navigate(url: string) {
+    if (!this.fixtureAllowedOrigins.length) throw Error('Desktop navigation is disabled; configure desktop.navigation.allowed_origins.');
+    const parsed = new URL(url), origin = parsed.protocol === 'tauri:' ? `tauri://${parsed.host}` : parsed.origin;
+    if (!this.fixtureAllowedOrigins.includes(origin)) throw Error('Navigation target origin is not in desktop.navigation.allowed_origins.');
+    return { origin, fixture_navigation: { receivedOrigin: origin, allowedOrigins: this.fixtureAllowedOrigins } };
+  }
+  async historyBack() { if (!this.fixtureAllowedOrigins.length) throw Error('Desktop navigation is disabled; configure desktop.navigation.allowed_origins.'); return { action: 'back', origin: 'https://allowed.example' }; }
+  async historyForward() { if (!this.fixtureAllowedOrigins.length) throw Error('Desktop navigation is disabled; configure desktop.navigation.allowed_origins.'); return { action: 'forward', origin: 'https://allowed.example' }; }
   override async withWindowSize<T>(width: number, height: number, callback: () => Promise<T>): Promise<T> {
     this.windowSize = { width, height };
     try {

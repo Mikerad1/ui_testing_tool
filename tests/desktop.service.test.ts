@@ -46,6 +46,37 @@ function response(status: number, value: unknown) {
 const config = (projectRoot: string) => ({ projectRoot, tauriBinary: 'app', driverExecutable: '/fake/tauri-driver', windowTitle: 'Demo Window', artifactDirectory: 'artifacts', readinessTimeoutMs: 50 });
 const driverFakes = { reservePort: async () => 23456, killProcess: () => undefined };
 
+async function navigationHarness(root: string, options: { origins?: string[]; initialUrl?: string; redirectedUrl?: string; navigationError?: string } = {}) {
+  const calls: { url: string; method: string; body?: any }[] = [];
+  const entries = [options.initialUrl ?? 'https://allowed.example/start'];
+  let historyIndex = 0, deleted = 0;
+  const service = new DesktopService({ ...config(root), navigation: { allowedOrigins: options.origins ?? ['https://allowed.example'] } }, {
+    ...driverFakes,
+    spawn: (() => fakeChild()) as typeof import('node:child_process').spawn,
+    processTree: async () => new Set<number>(), isProcessAlive: () => false, isProcessGroupAlive: () => false, killProcessGroup: () => undefined,
+    fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input), method = init?.method ?? 'GET', body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      calls.push({ url, method, body });
+      if (url.endsWith('/status')) return response(200, { value: {} });
+      if (url.endsWith('/session') && method === 'POST') return response(200, { value: { sessionId: 'navigation-session' } });
+      if (url.endsWith('/url') && method === 'GET') return response(200, { value: entries[historyIndex] });
+      if (url.endsWith('/url') && method === 'POST') {
+        if (options.navigationError) return response(500, { value: { error: 'unknown error', message: options.navigationError } });
+        const next = options.redirectedUrl ?? body.url;
+        entries.splice(historyIndex + 1, entries.length, next);
+        historyIndex++;
+        return response(200, { value: null });
+      }
+      if (url.endsWith('/back') && method === 'POST') { historyIndex = Math.max(0, historyIndex - 1); return response(200, { value: null }); }
+      if (url.endsWith('/forward') && method === 'POST') { historyIndex = Math.min(entries.length - 1, historyIndex + 1); return response(200, { value: null }); }
+      if (url.endsWith('/session/navigation-session') && method === 'DELETE') { deleted++; return response(200, { value: null }); }
+      return response(200, { value: null });
+    }) as typeof fetch,
+  });
+  await service.start();
+  return { service, calls, get deleted() { return deleted; } };
+}
+
 async function uploadHarness(root: string, options: { matches?: number; tagName?: unknown; type?: unknown; enabled?: unknown } = {}) {
   const calls: { url: string; method: string; body?: any }[] = [];
   const service = new DesktopService(config(root), {
@@ -537,6 +568,80 @@ test('unhandled rejection diagnostics fail closed on missing collector and start
     });
     await assert.rejects(failed.start(), /Could not install unhandled rejection diagnostics; the managed session was stopped/);
     await assert.rejects(failed.status(), /No managed desktop session/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('desktop navigation uses allowlisted W3C navigation and history and returns origin metadata only', async () => {
+  const root = await project();
+  try {
+    const { service, calls } = await navigationHarness(root);
+    const navigated = await service.navigate('https://allowed.example/next?token=secret#section');
+    assert.deepEqual(navigated, { action: 'navigate', origin: 'https://allowed.example' });
+    assert.deepEqual(await service.historyBack(), { action: 'back', origin: 'https://allowed.example' });
+    assert.deepEqual(await service.historyForward(), { action: 'forward', origin: 'https://allowed.example' });
+    const actions = calls.filter(call => ['/url', '/back', '/forward'].some(route => call.url.endsWith(route)) && call.method === 'POST');
+    assert.deepEqual(actions.map(({ url, body }) => ({ route: new URL(url).pathname.split('/').at(-1), body })), [
+      { route: 'url', body: { url: 'https://allowed.example/next?token=secret#section' } },
+      { route: 'back', body: {} },
+      { route: 'forward', body: {} },
+    ]);
+    assert.doesNotMatch(JSON.stringify([navigated]), /next|token|secret|section/);
+    await service.stop();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('desktop navigation rejects disabled, unsafe, credentialed, and unlisted targets before movement', async () => {
+  const root = await project();
+  try {
+    const disabled = new DesktopService({ ...config(root), navigation: { allowedOrigins: [] } });
+    await assert.rejects(disabled.navigate('https://allowed.example/'), /desktop\.navigation\.allowed_origins/);
+    await assert.rejects(disabled.historyBack(), /desktop\.navigation\.allowed_origins/);
+
+    const { service, calls } = await navigationHarness(root);
+    const before = calls.length;
+    for (const target of [
+      'file:///tmp/private.html', 'javascript:alert(1)', 'data:text/html,secret', 'blob:https://allowed.example/id',
+      'about:blank', 'https://user:password@allowed.example/private', 'https://outside.example/private',
+      `https://allowed.example/${'x'.repeat(4097)}`,
+    ]) await assert.rejects(service.navigate(target), /Navigation URL|origin/);
+    const after = calls.slice(before);
+    assert.equal(after.some(call => call.method === 'POST' && call.url.endsWith('/url')), false);
+    await service.stop();
+
+    const wrongCurrent = await navigationHarness(root, { initialUrl: 'file:///tmp/private.html' });
+    await assert.rejects(wrongCurrent.service.historyBack(), /Could not verify the current desktop origin/);
+    assert.equal(wrongCurrent.calls.some(call => call.method === 'POST' && call.url.endsWith('/back')), false);
+    await wrongCurrent.service.stop();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('desktop navigation stops the owned session when post-action origin verification fails', async () => {
+  const root = await project();
+  try {
+    const harness = await navigationHarness(root, { redirectedUrl: 'https://outside.example/private?secret=1' });
+    const { service, calls } = harness;
+    await assert.rejects(service.navigate('https://allowed.example/start'), error => {
+      assert.equal((error as Error).message, 'Navigation denied: final origin is outside desktop.navigation.allowed_origins; managed session shutdown was attempted.');
+      assert.doesNotMatch((error as Error).message, /outside\.example|private|secret/);
+      return true;
+    });
+    assert.equal(harness.deleted, 1, 'the owned WebDriver session is deleted after detecting an out-of-policy final origin');
+    assert.equal(calls.some(call => call.method === 'DELETE' && call.url.endsWith('/session/navigation-session')), true);
+    await assert.rejects(service.status(), /No managed desktop session/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('desktop navigation hides driver errors and stops when the final URL is uncertain', async () => {
+  const root = await project();
+  try {
+    const harness = await navigationHarness(root, { navigationError: 'driver echoed https://allowed.example/private?secret=1' });
+    await assert.rejects(harness.service.navigate('https://allowed.example/start'), error => {
+      assert.equal((error as Error).message, 'Desktop navigation command failed; managed session shutdown was attempted because its final origin could not be verified.');
+      assert.doesNotMatch((error as Error).message, /private|secret|allowed\.example/);
+      return true;
+    });
+    assert.equal(harness.deleted, 1);
+    await assert.rejects(harness.service.status(), /No managed desktop session/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

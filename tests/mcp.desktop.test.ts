@@ -11,6 +11,48 @@ import { createRgbaPng } from './png-fixture.js';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
+test('direct desktop navigation and W3C history tools pass configured origins to the managed service', { timeout: 30000 }, async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'umb-desktop-navigation-'));
+  const transport = new StdioClientTransport({ command: process.execPath, args: ['--import', 'tsx/esm', path.join(repo, 'tests/fixtures/desktop-image-server.ts'), root, 'navigation'], cwd: repo, stderr: 'pipe' });
+  const client = new Client({ name: 'desktop-navigation-test', version: '1.0.0' });
+  try {
+    await client.connect(transport);
+    const listed = await client.listTools();
+    for (const name of ['desktop_navigate', 'desktop_history_back', 'desktop_history_forward']) assert.ok(listed.tools.some(tool => tool.name === name), `${name} is registered directly`);
+    const definition = listed.tools.find(tool => tool.name === 'desktop_navigate')!;
+    assert.deepEqual((definition.inputSchema as any).required, ['url']);
+    assert.deepEqual((definition.inputSchema as any).properties.url, { type: 'string', minLength: 1, maxLength: 4096 });
+    const navigated = await client.callTool({ name: 'desktop_navigate', arguments: { url: 'https://allowed.example/path?secret=1' } }) as any;
+    assert.equal(navigated.structuredContent.ok, true);
+    assert.deepEqual(navigated.structuredContent.data.fixture_navigation, { receivedOrigin: 'https://allowed.example', allowedOrigins: ['https://allowed.example', 'tauri://localhost'] });
+    assert.equal(navigated.structuredContent.data.origin, 'https://allowed.example');
+    for (const args of [{}, { url: '' }, { url: 'x'.repeat(4097) }, { url: 'https://allowed.example', extra: true }]) {
+      const invalid = await client.callTool({ name: 'desktop_navigate', arguments: args }) as any;
+      assert.equal(invalid.structuredContent.ok, false);
+      assert.equal(invalid.structuredContent.error.code, 'invalid_input');
+    }
+    for (const [name, action] of [['desktop_history_back', 'back'], ['desktop_history_forward', 'forward']]) {
+      const result = await client.callTool({ name, arguments: {} }) as any;
+      assert.equal(result.structuredContent.ok, true);
+      assert.equal(result.structuredContent.data.action, action);
+    }
+  } finally { await client.close().catch(() => undefined); await transport.close().catch(() => undefined); await rm(root, { recursive: true, force: true }); }
+});
+
+test('desktop navigation remains disabled with the default empty origin allowlist', { timeout: 30000 }, async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'umb-desktop-navigation-disabled-'));
+  const transport = new StdioClientTransport({ command: process.execPath, args: ['--import', 'tsx/esm', path.join(repo, 'tests/fixtures/desktop-image-server.ts'), root, 'navigation-disabled'], cwd: repo, stderr: 'pipe' });
+  const client = new Client({ name: 'desktop-navigation-disabled-test', version: '1.0.0' });
+  try {
+    await client.connect(transport);
+    for (const [name, args] of [['desktop_navigate', { url: 'https://allowed.example' }], ['desktop_history_back', {}], ['desktop_history_forward', {}]]) {
+      const result = await client.callTool({ name, arguments: args }) as any;
+      assert.equal(result.structuredContent.ok, false);
+      assert.match(result.structuredContent.error.message, /desktop\.navigation\.allowed_origins/);
+    }
+  } finally { await client.close().catch(() => undefined); await transport.close().catch(() => undefined); await rm(root, { recursive: true, force: true }); }
+});
+
 test('desktop_unhandled_rejections is a direct bounded read-only tool and is disabled by default', { timeout: 30000 }, async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'umb-desktop-unhandled-rejections-'));
   const transport = new StdioClientTransport({ command: process.execPath, args: ['--import', 'tsx/esm', path.join(repo, 'tests/fixtures/desktop-image-server.ts'), root], cwd: repo, stderr: 'pipe' });

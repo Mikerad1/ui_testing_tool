@@ -36,9 +36,12 @@ export interface DesktopConfig {
   maxArtifactAgeDays?: number;
   maskSelectors?: string[];
   diagnostics?: { unhandledRejections?: boolean; capacity?: number };
+  /** Exact canonical origin allowlist for direct navigation; absent/empty disables it. */
+  navigation?: { allowedOrigins?: string[] };
 }
 export interface DesktopUnhandledRejectionEvent { cursor: number; kind: 'unhandled_rejection'; at: number }
 export interface DesktopUnhandledRejectionEvents { events: DesktopUnhandledRejectionEvent[]; next_cursor: number; oldest_cursor: number }
+export interface DesktopNavigationResult { action: 'navigate' | 'back' | 'forward'; origin: string }
 export interface DesktopBuildCommand { command: string; args: string[]; cwd?: string }
 export type CaptureKind = 'webview' | 'window';
 export interface DesktopCapability { available: boolean; reason?: string }
@@ -326,6 +329,69 @@ export class DesktopService {
       events.push({ cursor: event.cursor, kind: event.kind, at: event.at });
     }
     return { events, next_cursor: value.next_cursor, oldest_cursor: value.oldest_cursor };
+  }
+
+  async navigate(target: string): Promise<DesktopNavigationResult> {
+    const allowedOrigins = this.navigationOrigins();
+    const targetOrigin = desktopNavigationOrigin(target);
+    if (!allowedOrigins.has(targetOrigin)) throw Error('Navigation denied: target origin is not in desktop.navigation.allowed_origins.');
+    this.requireSession();
+    await this.verifyNavigationOrigin(allowedOrigins, false);
+    try { await this.request('POST', '/url', { url: target }); }
+    catch {
+      await this.stop().catch(() => undefined);
+      throw Error('Desktop navigation command failed; managed session shutdown was attempted because its final origin could not be verified.');
+    }
+    const origin = await this.verifyNavigationOrigin(allowedOrigins, true);
+    return { action: 'navigate', origin };
+  }
+
+  async historyBack(): Promise<DesktopNavigationResult> { return this.traverseHistory('back'); }
+  async historyForward(): Promise<DesktopNavigationResult> { return this.traverseHistory('forward'); }
+
+  private async traverseHistory(direction: 'back' | 'forward'): Promise<DesktopNavigationResult> {
+    const allowedOrigins = this.navigationOrigins();
+    this.requireSession();
+    await this.verifyNavigationOrigin(allowedOrigins, false);
+    try { await this.request('POST', `/${direction}`, {}); }
+    catch {
+      await this.stop().catch(() => undefined);
+      throw Error('Desktop history command failed; managed session shutdown was attempted because its final origin could not be verified.');
+    }
+    const origin = await this.verifyNavigationOrigin(allowedOrigins, true);
+    return { action: direction, origin };
+  }
+
+  private navigationOrigins(): Set<string> {
+    const configured = this.config.navigation?.allowedOrigins;
+    if (!configured?.length) throw Error('Desktop navigation is disabled; configure desktop.navigation.allowed_origins with exact origins.');
+    if (configured.length > 50) throw Error('Desktop navigation origin policy is invalid.');
+    const origins = configured.map(value => desktopNavigationOrigin(value, true));
+    if (origins.some((origin, index) => origin !== configured[index])) throw Error('Desktop navigation origins must be canonical origin-only URLs.');
+    return new Set(origins);
+  }
+
+  private async verifyNavigationOrigin(allowedOrigins: Set<string>, afterAction: boolean): Promise<string> {
+    let origin: string;
+    try {
+      const result = await this.request('GET', '/url');
+      if (typeof result?.value !== 'string') throw Error('invalid current URL');
+      origin = desktopNavigationOrigin(result.value);
+    } catch {
+      if (afterAction) {
+        await this.stop().catch(() => undefined);
+        throw Error('Could not verify the final desktop origin; managed session shutdown was attempted.');
+      }
+      throw Error('Could not verify the current desktop origin; navigation was not performed.');
+    }
+    if (!allowedOrigins.has(origin)) {
+      if (afterAction) {
+        await this.stop().catch(() => undefined);
+        throw Error('Navigation denied: final origin is outside desktop.navigation.allowed_origins; managed session shutdown was attempted.');
+      }
+      throw Error('Navigation denied: current desktop origin is not in desktop.navigation.allowed_origins.');
+    }
+    return origin;
   }
 
   async stop(): Promise<{ stopped: boolean }> {
@@ -947,6 +1013,15 @@ export class DesktopService {
 }
 
 function bounded(value: number, min: number, max: number, name: string): void { if (!Number.isInteger(value) || value < min || value > max) throw Error(`${name} must be between ${min} and ${max}.`); }
+function desktopNavigationOrigin(value: string, originOnly = false): string {
+  if (typeof value !== 'string' || value.length < 1 || value.length > 4096 || /[\u0000-\u0020\u007f]/.test(value)) throw Error('Navigation URL is invalid.');
+  let url: URL;
+  try { url = new URL(value); } catch { throw Error('Navigation URL must be an absolute HTTP, HTTPS, or Tauri URL.'); }
+  if (!['http:', 'https:', 'tauri:'].includes(url.protocol) || !url.hostname || url.hostname.includes('*') || url.username || url.password) throw Error('Navigation URL must use an allowlisted HTTP, HTTPS, or Tauri origin without credentials.');
+  const origin = url.protocol === 'tauri:' ? `tauri://${url.host}` : url.origin;
+  if (originOnly && (!['', '/'].includes(url.pathname) || url.search || url.hash || value !== origin)) throw Error('Desktop navigation origins must be canonical origin-only URLs.');
+  return origin;
+}
 function validatePng(bytes: Buffer): void {
   try { inspectPng(bytes); }
   catch (error) { throw Error(`Capture backend did not produce a supported bounded PNG image: ${message(error)}`); }

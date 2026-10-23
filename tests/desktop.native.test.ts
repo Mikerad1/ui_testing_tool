@@ -59,6 +59,7 @@ test('real Tauri app works through DesktopService and produces a WebView PNG', {
       windowTitle: 'Tauri Acceptance Fixture', artifactDirectory: 'artifacts',
       maskSelectors: ['.phase6a-mask-target'],
       diagnostics: { unhandledRejections: true, capacity: 2 },
+      navigation: { allowedOrigins: ['tauri://localhost'] },
       readinessTimeoutMs: 60_000,
     }, {
       fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -129,6 +130,11 @@ test('real Tauri app works through DesktopService and produces a WebView PNG', {
     assert.equal(diagnostics.oldest_cursor, 2);
     assert.equal(diagnostics.next_cursor, 3);
     assert.doesNotMatch(JSON.stringify(diagnostics), /NATIVE_DIAGNOSTIC_SENTINEL|secret\.js|https?:/);
+    const currentUrl = await rawExecute('return location.href');
+    assert.equal(new URL(currentUrl).protocol, 'tauri:', 'the native acceptance fixture uses the configured Tauri origin');
+    assert.deepEqual(await service.navigate('tauri://localhost/#native-navigation'), { action: 'navigate', origin: 'tauri://localhost' });
+    assert.deepEqual(await service.historyBack(), { action: 'back', origin: 'tauri://localhost' });
+    assert.deepEqual(await service.historyForward(), { action: 'forward', origin: 'tauri://localhost' });
     await service.click({ by: 'label', value: 'Native placeholder acceptance' });
     assert.deepEqual(await rawExecute(`const e=document.activeElement;return {tag:e?.tagName,placeholder:e?.getAttribute('placeholder')}`), {
       tag: 'INPUT', placeholder: 'Native placeholder acceptance',
