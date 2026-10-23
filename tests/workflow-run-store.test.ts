@@ -4,6 +4,7 @@ import {mkdtemp,rm} from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
+import {runFixtureSql} from './helpers/learning.js';
 import {CURRENT_SCHEMA_VERSION,Store} from '../src/memory/store.js';
 
 async function fixture(){const dir=await mkdtemp(path.join(os.tmpdir(),'umb-workflow-store-'));const filename=path.join(dir,'memory.sqlite');return{dir,filename};}
@@ -17,3 +18,5 @@ test('workflow attempts are project/run scoped, bounded, allowlisted, and transi
   }finally{one?.close();two?.close();await rm(f.dir,{recursive:true,force:true});}});
 
 test('run report includes all 100 steps, three attempts, and both reserved rows',async()=>{const f=await fixture();let store:Store|undefined;try{store=new Store(f.filename,'maximum');const run=store.createRun();const add= (stepId:string,ordinal:number,attempt:number)=>{store!.createWorkflowStepAttempt({runId:run,stepId,ordinal,attempt,action:'assert'});store!.finishWorkflowStepAttempt({runId:run,stepId,attempt,status:'passed',durationMs:0});};add('__preflight__',0,1);for(let index=0;index<100;index++)for(let attempt=1;attempt<=3;attempt++)add(`step-${index}`,index+1,attempt);add('__postflight__',101,1);const rows=store.getRunReport(run)!.stepAttempts as any[];assert.equal(rows.length,302);assert.equal(rows[0].stepId,'__preflight__');assert.equal(rows.at(-1).stepId,'__postflight__');assert.equal(rows.filter(row=>row.stepId.startsWith('step-')).length,300);}finally{store?.close();await rm(f.dir,{recursive:true,force:true});}});
+
+test('run report exposes only validated backend provenance and never environment metadata',async()=>{const f=await fixture();let store:Store|undefined;try{store=new Store(f.filename,'report');const cases:Array<[string,string,string|undefined]>=[['legacy','{"region":"secret"}','browser'],['browser','{"backend":"browser","secret":"sentinel"}','browser'],['tauri','{"backend":"tauri","secret":"sentinel"}','tauri'],['unknown','{"backend":"other","secret":"sentinel"}',undefined],['malformed','{bad',undefined],['scalar','42',undefined],['array','[]',undefined]];for(const [name,json,expected] of cases){const run=store.createRun('',null,{});runFixtureSql(f.filename,'UPDATE runs SET environment_json=? WHERE project_id=? AND id=?',json,store.projectId,run);const report=store.getRunReport(run)!;assert.equal((report.run as any).backend,expected,name);assert.equal(Object.hasOwn(report.run,'environment_json'),false,name);assert.equal(JSON.stringify(report).includes('sentinel'),false,name);}}finally{store?.close();await rm(f.dir,{recursive:true,force:true});}});

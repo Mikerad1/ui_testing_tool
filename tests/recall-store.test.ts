@@ -69,6 +69,19 @@ test('safe goal ranking, bounded stable top-three, and recent outcome citations'
     const again=f.store.recallWorkflowCandidates({trustYamlSeeds:true,goal:'direct submit account',currentUrl:'http://127.0.0.1:3000/login',limit:99});assert.deepEqual(result.map((x:any)=>x.workflow_id),again.map((x:any)=>x.workflow_id));
   }finally{await f.close();}
 });
+test('recall filters backend provenance in SQL before the recent-run limit',async()=>{
+ const f=await fixture();try{
+  const workflow=f.store.getByTypeKey('workflow','direct-flow') as any;
+  const browser=f.store.createRun('browser',workflow.id,{});f.store.addEvidence({run_id:browser,subject_node_id:workflow.id,kind:'workflow',outcome:'passed'});f.store.finishRun(browser,'passed');
+  runFixtureSql(f.databaseFilename,'UPDATE runs SET created_at=?,finished_at=? WHERE project_id=? AND id=?','2020-01-01T00:00:00.000Z','2020-01-01T00:00:00.000Z',f.store.projectId,browser);
+  for(let index=0;index<25;index++){
+   const run=f.store.createRun(`tauri-${index}`,workflow.id,{backend:'tauri'});f.store.addEvidence({run_id:run,subject_node_id:workflow.id,kind:'workflow',outcome:'passed'});f.store.finishRun(run,'passed');
+   const date=new Date(Date.UTC(2025,0,1,0,0,index)).toISOString();runFixtureSql(f.databaseFilename,'UPDATE runs SET created_at=?,finished_at=? WHERE project_id=? AND id=?',date,date,f.store.projectId,run);
+  }
+  for(const [label,raw] of [['unknown','{"backend":"future"}'],['malformed','{bad'],['scalar','3'],['array','[]']] as const){const run=f.store.createRun(label,workflow.id,{});f.store.addEvidence({run_id:run,subject_node_id:workflow.id,kind:'workflow',outcome:'failed'});f.store.finishRun(run,'failed');runFixtureSql(f.databaseFilename,'UPDATE runs SET environment_json=?,created_at=?,finished_at=? WHERE project_id=? AND id=?',raw,'2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z',f.store.projectId,run);}
+  const candidate=f.store.recallWorkflowCandidates({trustYamlSeeds:true,goal:'direct-flow',currentUrl:'http://127.0.0.1:3000/login'}).find((item:any)=>item.workflow_id==='direct-flow');assert.ok(candidate);assert.equal(candidate.outcome_counts.passed,1);assert.equal(candidate.outcome_counts.failed,0);assert.equal(candidate.citations.length,1);assert.equal(candidate.citations[0].run_id,browser);
+ }finally{await f.close();}
+});
 test('low uncertainty requires verified success and current-screen path evidence',async()=>{
   const f=await fixture();try{
     const workflow=f.store.getByTypeKey('workflow','direct-flow') as any,run=f.store.createRun('session',workflow.id);

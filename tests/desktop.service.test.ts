@@ -92,14 +92,14 @@ test('managed start creates W3C session using configured binary and cleanup dele
 });
 
 test('stop bounds a hung remote session DELETE and still terminates the owned driver tree', async () => {
-  const root = await project(); const child = fakeChild(); const killed: number[] = []; let deleteStarted = false;
+  const root = await project(); const child = fakeChild(); const killed: number[] = []; let deleteStarted = false, deleteAborted = false;
   const service = new DesktopService(config(root), {
     ...driverFakes,
     processTree: async pid => new Set([pid, 4322]),
     killProcess: pid => { killed.push(pid); },
     spawn: (() => child) as typeof import('node:child_process').spawn,
     fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
-      if (init?.method === 'DELETE') { deleteStarted = true; return new Promise<Response>(() => {}); }
+      if (init?.method === 'DELETE') { deleteStarted = true; init.signal?.addEventListener('abort', () => { deleteAborted = true; }); return new Promise<Response>(() => {}); }
       return String(input).endsWith('/status') ? response(200, { value: {} }) : response(200, { value: { sessionId: 'hung-delete' } });
     }) as typeof fetch,
   });
@@ -109,11 +109,184 @@ test('stop bounds a hung remote session DELETE and still terminates the owned dr
     await assert.rejects(service.stop(), /Timed out waiting for WebDriver session deletion/);
     assert.ok(Date.now() - started < 2500, 'stop must finish within a bounded interval');
     assert.equal(deleteStarted, true);
+    assert.equal(deleteAborted, true, 'the injected fetch receives and observes the abort signal');
     assert.equal(child.exitCode, 0, 'the owned driver is terminated after DELETE times out');
     assert.deepEqual(killed, [4322], 'only the owned descendant is signaled');
     assert.equal((await readdir(root)).includes('app'), true, 'project cleanup remains reachable after stop settles');
   } finally { await rm(root, { recursive: true, force: true }); }
   await assert.rejects(readdir(root), { code: 'ENOENT' }, 'caller cleanup can remove the temporary project after stop settles');
+});
+
+test('stalled WebDriver fetch is aborted with a stable sanitized timeout error', { timeout: 10_000 }, async () => {
+  const root = await project(); const child = fakeChild(); let aborted = false;
+  const service = new DesktopService({ ...config(root), readinessTimeoutMs: 6_000 }, {
+    ...driverFakes, spawn: (() => child) as typeof import('node:child_process').spawn,
+    fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/status')) return response(200, { value: {} });
+      if (String(input).endsWith('/session')) return response(200, { value: { sessionId: 'fetch-stall' } });
+      if (init?.method === 'DELETE') return response(200, { value: null });
+      init?.signal?.addEventListener('abort', () => { aborted = true; });
+      return new Promise<Response>(() => {});
+    }) as typeof fetch,
+  });
+  try {
+    await service.start();
+    await assert.rejects(service.click('button'), error => {
+      assert.equal((error as { code?: string }).code, 'WEBDRIVER_REQUEST_TIMEOUT');
+      assert.match(String(error), /WebDriver request timed out after 5000ms/);
+      assert.doesNotMatch(String(error), /127\.0\.0\.1|secret|sentinel|\?/);
+      return true;
+    });
+    assert.equal(aborted, true);
+    await service.stop();
+    assert.equal(child.exitCode, 0, 'driver teardown remains reachable after request timeout');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('a stalled direct readiness fetch is aborted within the startup deadline', { timeout: 3_000 }, async () => {
+  const root = await project(); const child = fakeChild(); let statusAborted = false;
+  const service = new DesktopService(config(root), {
+    ...driverFakes, spawn: (() => child) as typeof import('node:child_process').spawn,
+    fetch: (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      init?.signal?.addEventListener('abort', () => { statusAborted = true; });
+      return new Promise<Response>(() => {});
+    }) as typeof fetch,
+  });
+  try {
+    const started = Date.now();
+    await assert.rejects(service.start(), /did not become ready/);
+    assert.ok(Date.now() - started < 500, 'readiness polling cannot outlive its configured startup deadline');
+    assert.equal(statusAborted, true);
+    assert.equal(child.exitCode, 0);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('stalled WebDriver JSON body read is bounded by the same abort signal', { timeout: 10_000 }, async () => {
+  const root = await project(); const child = fakeChild(); let aborted = false;
+  const service = new DesktopService(config(root), {
+    ...driverFakes, spawn: (() => child) as typeof import('node:child_process').spawn,
+    fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/status')) return response(200, { value: {} });
+      if (String(input).endsWith('/session')) return response(200, { value: { sessionId: 'json-stall' } });
+      if (init?.method === 'DELETE') return response(200, { value: null });
+      init?.signal?.addEventListener('abort', () => { aborted = true; });
+      return { ok: true, status: 200, statusText: 'sentinel-body', json: async () => new Promise(() => {}) } as Response;
+    }) as typeof fetch,
+  });
+  try {
+    await service.start();
+    await assert.rejects(service.click('button'), error => {
+      assert.equal((error as { code?: string }).code, 'WEBDRIVER_REQUEST_TIMEOUT');
+      assert.match(String(error), /WebDriver request timed out after 5000ms/);
+      assert.doesNotMatch(String(error), /sentinel-body|127\.0\.0\.1|\?/);
+      return true;
+    });
+    assert.equal(aborted, true);
+    await service.stop();
+    assert.equal(child.exitCode, 0);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('session creation may exceed the ordinary request timeout within its readiness bound', { timeout: 10_000 }, async () => {
+  const root = await project(); const child = fakeChild();
+  const service = new DesktopService({ ...config(root), readinessTimeoutMs: 6_000 }, {
+    ...driverFakes, spawn: (() => child) as typeof import('node:child_process').spawn,
+    fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/status')) return response(200, { value: {} });
+      if (init?.method === 'DELETE') return response(200, { value: null });
+      await new Promise(resolve => setTimeout(resolve, 5_150));
+      return response(200, { value: { sessionId: 'delayed-session' } });
+    }) as typeof fetch,
+  });
+  try {
+    const started = Date.now();
+    const session = await service.start();
+    assert.equal(session.id, 'delayed-session');
+    assert.ok(Date.now() - started > 5_000, 'session creation exceeded the ordinary request limit');
+    await service.stop();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('stalled session creation aborts at its readiness bound and tears down the driver', { timeout: 3_000 }, async () => {
+  const root = await project(); const child = fakeChild(); let sessionAborted = false, treeCalls = 0;
+  const service = new DesktopService({ ...config(root), readinessTimeoutMs: 100 }, {
+    ...driverFakes, spawn: (() => child) as typeof import('node:child_process').spawn,
+    processTree: async pid => { treeCalls++; return new Set([pid]); },
+    fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/status')) return response(200, { value: {} });
+      init?.signal?.addEventListener('abort', () => { sessionAborted = true; });
+      return new Promise<Response>(() => {});
+    }) as typeof fetch,
+  });
+  try {
+    const started = Date.now();
+    await assert.rejects(service.start(), error => {
+      assert.equal((error as { code?: string }).code, 'WEBDRIVER_REQUEST_TIMEOUT');
+      assert.match(String(error), /timed out after 100ms/);
+      return true;
+    });
+    assert.ok(Date.now() - started < 500);
+    assert.equal(sessionAborted, true);
+    assert.equal(child.exitCode, 0);
+    assert.equal(treeCalls, 2, 'failed-start cleanup runs one driver-tree teardown');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('capture request timeout tears down the driver once and publishes no artifact', { timeout: 8_000 }, async () => {
+  const root = await project(); const child = fakeChild(); let screenshotAborted = false, treeCalls = 0;
+  const service = new DesktopService({ ...config(root), readinessTimeoutMs: 6_000 }, {
+    ...driverFakes, spawn: (() => child) as typeof import('node:child_process').spawn,
+    processTree: async pid => { treeCalls++; return new Set([pid]); },
+    fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/status')) return response(200, { value: {} });
+      if (url.endsWith('/session')) return response(200, { value: { sessionId: 'capture-timeout' } });
+      if (url.endsWith('/screenshot')) {
+        init?.signal?.addEventListener('abort', () => { screenshotAborted = true; });
+        return new Promise<Response>(() => {});
+      }
+      if (init?.method === 'DELETE') return response(200, { value: null });
+      return response(200, { value: null });
+    }) as typeof fetch,
+  });
+  try {
+    await service.start();
+    await assert.rejects(service.capture('webview'), error => {
+      assert.equal((error as { code?: string }).code, 'WEBDRIVER_REQUEST_TIMEOUT');
+      assert.match(String(error), /timed out after 3000ms/);
+      return true;
+    });
+    assert.equal(screenshotAborted, true);
+    assert.equal(treeCalls, 3, 'capture timeout invokes exactly one managed teardown');
+    assert.equal(child.exitCode, 0);
+    assert.deepEqual(await readdir(path.join(root, 'artifacts', '.umb-managed', 'desktop')), []);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('ordinary interaction timeout is bounded and the managed session remains stoppable', { timeout: 12_000 }, async () => {
+  const root = await project(); const child = fakeChild(); let interactionAborted = false;
+  const service = new DesktopService({ ...config(root), readinessTimeoutMs: 6_000 }, {
+    ...driverFakes, spawn: (() => child) as typeof import('node:child_process').spawn,
+    fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/status')) return response(200, { value: {} });
+      if (url.endsWith('/session')) return response(200, { value: { sessionId: 'ordinary-timeout' } });
+      if (init?.method === 'DELETE') return response(200, { value: null });
+      init?.signal?.addEventListener('abort', () => { interactionAborted = true; });
+      return new Promise<Response>(() => {});
+    }) as typeof fetch,
+  });
+  try {
+    await service.start();
+    await assert.rejects(service.click('button'), error => {
+      assert.equal((error as { code?: string }).code, 'WEBDRIVER_REQUEST_TIMEOUT');
+      assert.doesNotMatch(String(error), /127\.0\.0\.1|sentinel|\?/);
+      return true;
+    });
+    assert.equal(interactionAborted, true);
+    assert.deepEqual(await service.stop(), { stopped: true });
+    assert.equal(child.exitCode, 0, 'process-tree teardown remains reachable after an interaction timeout');
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test('non-Tauri adapter contract covers managed startup, request, capture, ownership, and failed-start cleanup', async () => {

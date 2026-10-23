@@ -30,7 +30,7 @@ export function originAllowed(origin: string | undefined, tokenMode: boolean, po
   } catch { return false; }
 }
 
-type Session = { id: string; server: McpServer; transport: any; timer?: NodeJS.Timeout; closed: boolean; cleanup?: () => Promise<void> };
+type Session = { id: string; server: McpServer; transport: any; timer?: NodeJS.Timeout; closed: boolean; activeToolCalls: number; cleanupPromise?: Promise<void>; serverClosePromise?: Promise<void>; closePromise?: Promise<void>; cleanup?: () => Promise<void> };
 const MAX_BODY = 1024 * 1024;
 const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60_000;
 const MAX_MEMORY_SEARCH_CALL_RESULT_BYTES=48*1024;
@@ -87,22 +87,28 @@ export async function serve(config: Config, store: Store, browser: BrowserContro
     return next;
   };
   const armIdle = (session: Session) => {
+    if (session.closed || session.activeToolCalls > 0) return;
     if (session.timer) clearTimeout(session.timer);
     session.timer = setTimeout(() => { void closeSession(session); }, idleTimeoutMs);
     session.timer.unref();
   };
   const closeSession = async (session: Session) => {
-    if (session.closed) return;
+    if (session.closePromise) return session.closePromise;
     session.closed = true;
     if (session.timer) clearTimeout(session.timer);
+    session.timer = undefined;
     sessions.delete(session.id);
-    try { await session.transport.close(); } finally { try { await session.cleanup?.(); } finally { await session.server.close(); } }
+    session.closePromise = (async () => {
+      try { await session.transport.close(); } finally { try { await session.cleanup?.(); } finally { await (session.serverClosePromise ??= session.server.close()); } }
+    })();
+    return session.closePromise;
   };
 
   function createSession(): Session {
     const mcp = new McpServer({ name: 'ui-memory-browser', version: '0.1.0' });
     let desktopService: DesktopService | undefined;
-    const session: Session = { id: '', server: mcp, transport: undefined as unknown as StreamableHTTPServerTransport, closed: false, cleanup: async () => { await desktopService?.stop(); } };
+    const session: Session = { id: '', server: mcp, transport: undefined as unknown as StreamableHTTPServerTransport, closed: false, activeToolCalls: 0 };
+    session.cleanup = () => session.cleanupPromise ??= runDesktop(async () => { await desktopService?.stop(); });
     const getDesktopService = async (requireEnabled = false) => {
       if (requireEnabled && !config.desktop?.enabled) throw Error('Desktop testing is disabled. Set desktop.enabled: true explicitly in umb.config.yaml before starting or controlling an app.');
       if (desktopService) return desktopService;
@@ -160,6 +166,9 @@ export async function serve(config: Config, store: Store, browser: BrowserContro
       });
        const invokeTool = (fn: (args: any) => unknown | Promise<unknown>, memorySearch=false, includeImage=false) => async (args: any) => {
          activeToolCalls++;
+         session.activeToolCalls++;
+         if (session.timer) clearTimeout(session.timer);
+         session.timer = undefined;
          let result: any, imageBytes: Uint8Array | undefined;
           try {
             let value:any=await fn(args);
@@ -183,8 +192,10 @@ export async function serve(config: Config, store: Store, browser: BrowserContro
           result = { ok: false, project_id: config.project.id, session_id: session.id, error: { code, message }, state_revision: browser.revision };
            return { isError: true, structuredContent: result, content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
         } finally {
-          activeToolCalls--;
-          if (activeToolCalls === 0) { toolDrain?.(); toolDrain = undefined; }
+           activeToolCalls--;
+           if (activeToolCalls === 0) { toolDrain?.(); toolDrain = undefined; }
+           session.activeToolCalls--;
+           if (session.activeToolCalls === 0 && !session.closed) armIdle(session);
         }
           if (memorySearch) return memorySearchCallToolResult(result,args.page_size??50);
            if (imageBytes) return imageToolCallResult(result, imageBytes, { enabled: config.desktop?.visual.return_mcp_images !== false, maxBytes: Math.min(MAX_MCP_IMAGE_BYTES, config.artifacts?.max_file_bytes ?? MAX_MCP_IMAGE_BYTES) });
@@ -444,7 +455,13 @@ export async function serve(config: Config, store: Store, browser: BrowserContro
     session.transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: randomUUID,
       onsessioninitialized: id => { session.id = id; sessions.set(id, session); armIdle(session); },
-      onsessionclosed: async id => { if (session.timer) clearTimeout(session.timer); session.closed = true; sessions.delete(id); try { await session.cleanup?.(); } finally { await mcp.close(); } }
+       onsessionclosed: async id => {
+         session.closed = true;
+         if (session.timer) clearTimeout(session.timer);
+         session.timer = undefined;
+         sessions.delete(id);
+         try { await session.cleanup?.(); } finally { await (session.serverClosePromise ??= mcp.close()); }
+       }
     });
     return session;
   }
@@ -461,12 +478,14 @@ export async function serve(config: Config, store: Store, browser: BrowserContro
       if (stopped) return;
       stopped = true;
       closing = true;
+      session.closed = true;
+      if (session.timer) clearTimeout(session.timer);
+      session.timer = undefined;
       await transport.close();
       if (activeToolCalls > 0) await new Promise<void>(resolve => { toolDrain = resolve; });
       for (;;) { const queued = browserQueue; await queued; if (queued === browserQueue) break; }
       for (;;) { const queued = desktopQueue; await queued; if (queued === desktopQueue) break; }
       sessions.delete(session.id);
-      session.closed = true;
       try { await session.cleanup?.(); } finally { await session.server.close(); }
     };
   }

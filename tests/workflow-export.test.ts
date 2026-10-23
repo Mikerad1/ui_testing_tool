@@ -85,8 +85,8 @@ route_patterns:
   const workflow=store.getByTypeKey('workflow','review-flow') as any;
   return{root,knowledge,databaseFilename,store,workflow};
 }
-function addRun(store:Store,node:any,status:'passed'|'failed'='passed',hash=store.workflowSnapshotHash(JSON.parse(node.attributes_json).id),workflowId=node.id){
- const run=store.createRun('test-session',workflowId,{},hash);store.addEvidence({run_id:run,subject_node_id:node.id,kind:'workflow',outcome:status,metadata:{}});store.finishRun(run,status);return run;
+function addRun(store:Store,node:any,status:'passed'|'failed'='passed',hash=store.workflowSnapshotHash(JSON.parse(node.attributes_json).id),workflowId=node.id,environment:unknown={}){
+ const run=store.createRun('test-session',workflowId,environment,hash);store.addEvidence({run_id:run,subject_node_id:node.id,kind:'workflow',outcome:status,metadata:{}});store.finishRun(run,status);return run;
 }
 
 test('v9 to v10 migration preserves run/evidence and rolls back failed additive migration',async()=>{
@@ -113,6 +113,18 @@ test('workflow export verification requires current successful matching evidence
     const run=addRun(f.store,f.workflow);assert.equal(f.store.verifyWorkflowExport('review-flow',run),true);assert.equal(f.store.hasWorkflowExportVerification('review-flow'),true);f.store.finishRun(run,'failed');assert.equal(f.store.hasWorkflowExportVerification('review-flow'),false,'verification must stop qualifying if its evidence run is no longer passed');const replacement=addRun(f.store,f.workflow);assert.equal(f.store.verifyWorkflowExport('review-flow',replacement),true);assert.equal(f.store.hasWorkflowExportVerification('review-flow'),true);runFixtureSql(f.databaseFilename,"DELETE FROM evidence WHERE project_id=? AND run_id=? AND kind='workflow' AND outcome='passed'",f.store.projectId,replacement);assert.equal(f.store.hasWorkflowExportVerification('review-flow'),false,'verification must stop qualifying if passed workflow evidence is missing');
   await writeFile(path.join(f.knowledge,'workflow.yaml'),source('Edited flow'));await reconcile(f.knowledge, f.store, testWriter(f.store));assert.equal(f.store.hasWorkflowExportVerification('review-flow'),false);
  }finally{other?.close();f.store.close();await rm(f.root,{recursive:true,force:true});}
+});
+
+test('workflow export eligibility and stored verification fail closed on backend provenance',async()=>{
+ const f=await setup();try{
+  for(const [label,environment,eligible] of [
+   ['legacy',{},true],['browser',{backend:'browser'},true],['tauri',{backend:'tauri'},false],['unknown',{backend:'other'},false],['malformed','{bad',false],['scalar','42',false],['array','[]',false],
+  ] as Array<[string,unknown,boolean]>){
+   const run=addRun(f.store,f.workflow,'passed',undefined,undefined,label==='malformed'?{}:environment);if(label==='malformed')runFixtureSql(f.databaseFilename,'UPDATE runs SET environment_json=? WHERE project_id=? AND id=?','{bad',f.store.projectId,run);assert.equal(f.store.workflowExportEligibility('review-flow',run)!==null,eligible,label);
+   assert.equal(f.store.verifyWorkflowExport('review-flow',run),eligible,label);
+   if(eligible){assert.equal(f.store.hasWorkflowExportVerification('review-flow'),true);runFixtureSql(f.databaseFilename,'UPDATE runs SET environment_json=? WHERE project_id=? AND id=?',JSON.stringify({backend:'tauri'}),f.store.projectId,run);assert.equal(f.store.hasWorkflowExportVerification('review-flow'),false,'verification must be revoked when its run becomes Tauri');}
+  }
+ }finally{f.store.close();await rm(f.root,{recursive:true,force:true});}
 });
 
 test('screen locator YAML edits invalidate snapshot-bound export verification until a new run is verified',async()=>{

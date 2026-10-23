@@ -148,6 +148,20 @@ const defaults: DesktopAdapters = {
   isProcessGroupAlive(pgid) { try { process.kill(-pgid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM'; } },
 };
 
+const WEBDRIVER_REQUEST_TIMEOUT_MS = 5_000;
+const WEBDRIVER_CAPTURE_TIMEOUT_MS = 3_000;
+const WEBDRIVER_DELETE_TIMEOUT_MS = 1_000;
+const DEFAULT_READINESS_TIMEOUT_MS = 120_000;
+const MAX_READINESS_TIMEOUT_MS = 600_000;
+
+class WebDriverTimeoutError extends Error {
+  readonly code = 'WEBDRIVER_REQUEST_TIMEOUT' as const;
+  constructor(timeoutMs: number) {
+    super(`WebDriver request timed out after ${timeoutMs}ms.`);
+    this.name = 'WebDriverTimeoutError';
+  }
+}
+
 /**
  * Managed native Tauri/WebDriver P0 service. `tauri-driver` and a real Tauri binary are required;
  * the WebdriverIO tauri-service is not used/wired here. No command is run during inspection.
@@ -237,17 +251,23 @@ export class DesktopService {
     let driverError: Error | undefined;
     driver.once('error', error => { driverError = error; });
     driver.once('exit', () => { if (this.driver === driver) { this.sessionId = undefined; void this.killDriver().catch(() => undefined); } });
-    const deadline = Date.now() + (this.config.readinessTimeoutMs ?? 5000);
+    const readinessTimeoutMs = this.config.readinessTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS;
+    bounded(readinessTimeoutMs, 1, MAX_READINESS_TIMEOUT_MS, 'readinessTimeoutMs');
+    const deadline = Date.now() + readinessTimeoutMs;
     try {
       let ready = false;
       while (Date.now() < deadline) {
         if (driverError) throw Error(`Could not spawn configured tauri-driver: ${message(driverError)}. Verify the executable path and Linux dependencies.`);
         if (driver.exitCode !== null) throw Error('tauri-driver exited before becoming ready. Install/configure native tauri-driver and its Linux WebKitGTK/WebDriver dependencies; this direct adapter is limited versus the separate @wdio/tauri-service and does not attach to existing processes.');
-        try { const r = await this.adapters.fetch(`${this.endpoint()}/status`); if (r.ok) { ready = true; break; } } catch { /* poll */ }
+        try {
+          const remaining = deadline - Date.now();
+          const r = await this.fetchBounded(`${this.endpoint()}/status`, { method: 'GET' }, Math.min(500, remaining));
+          if (r.ok) { ready = true; break; }
+        } catch { /* poll */ }
         await new Promise(resolve => setTimeout(resolve, 100));
       }
       if (!ready) throw Error(`tauri-driver did not become ready at ${this.endpoint()}; verify its executable, Linux dependencies, and port binding. This service uses native tauri-driver, not the separate @wdio/tauri-service; it will not attach to an existing driver.`);
-      const response = await this.request('POST', '/session', { capabilities: { alwaysMatch: { browserName: 'wry', 'tauri:options': { application: binary } } } });
+      const response = await this.request('POST', '/session', { capabilities: { alwaysMatch: { browserName: 'wry', 'tauri:options': { application: binary } } } }, readinessTimeoutMs);
       const id = response.value?.sessionId ?? response.sessionId;
       if (typeof id !== 'string' || !id) throw Error(`WebDriver did not create a W3C session: ${JSON.stringify(response).slice(0, 500)}`);
       this.sessionId = id;
@@ -272,11 +292,14 @@ export class DesktopService {
         let timeout: NodeJS.Timeout | undefined;
         try {
           await Promise.race([
-            this.request('DELETE', `/session/${encodeURIComponent(this.sessionId)}`),
+            this.request('DELETE', `/session/${encodeURIComponent(this.sessionId)}`, undefined, WEBDRIVER_DELETE_TIMEOUT_MS),
             new Promise<never>((_resolve, reject) => {
-              timeout = setTimeout(() => reject(Error('Timed out waiting for WebDriver session deletion.')), 1000);
+              timeout = setTimeout(() => reject(Error('Timed out waiting for WebDriver session deletion.')), WEBDRIVER_DELETE_TIMEOUT_MS);
             }),
           ]);
+        } catch (error) {
+          if (error instanceof WebDriverTimeoutError) throw Error('Timed out waiting for WebDriver session deletion.');
+          throw error;
         } finally { if (timeout) clearTimeout(timeout); }
       }
     }
@@ -458,9 +481,9 @@ export class DesktopService {
   }
 
   private async captureRequest(method: string, resource: string, body?: unknown): Promise<any> {
-    try { return await this.withTimeout(this.request(method, resource, body), 3000, `WebDriver capture operation ${method} ${resource}`); }
+    try { return await this.request(method, resource, body, WEBDRIVER_CAPTURE_TIMEOUT_MS); }
     catch (error) {
-      if (/timed out/.test(message(error))) {
+      if (error instanceof WebDriverTimeoutError) {
         try { await this.killDriver(); } catch (stopError) { throw new AggregateError([error, stopError], `WebDriver capture failed and managed session stop failed: ${message(stopError)}`); }
       }
       throw error;
@@ -473,10 +496,20 @@ export class DesktopService {
   private async boundedCommand(executable: string, args: string[]): Promise<DesktopCommandResult> {
     return this.adapters.command(executable, args, 5000);
   }
-  private async withTimeout<T>(operation: Promise<T>, ms: number, label: string): Promise<T> {
+  private async fetchBounded(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+    const controller = new AbortController();
     let timer: NodeJS.Timeout | undefined;
-    try { return await Promise.race([operation, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(Error(`${label} timed out after ${ms}ms.`)), ms); })]); }
-    finally { if (timer) clearTimeout(timer); }
+    try {
+      return await Promise.race([
+        this.adapters.fetch(url, { ...init, signal: controller.signal }),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => {
+            controller.abort();
+            reject(new WebDriverTimeoutError(timeoutMs));
+          }, timeoutMs);
+        }),
+      ]);
+    } finally { if (timer) clearTimeout(timer); }
   }
 
   /** Read a canonical project-root-relative desktop artifact ref after bounded integrity verification. */
@@ -625,16 +658,26 @@ export class DesktopService {
     if (!this.config.tauriBinary) throw Error('Configure tauriBinary as an absolute or project-relative Tauri executable path.');
     return path.resolve(this.root, this.config.tauriBinary);
   }
-  private async request(method: string, resource: string, body?: unknown): Promise<any> {
+  private async request(method: string, resource: string, body?: unknown, timeoutMs = WEBDRIVER_REQUEST_TIMEOUT_MS): Promise<any> {
     const sessionResource = resource === '/session' || resource.startsWith('/session/')
       ? resource
       : this.sessionId ? `/session/${encodeURIComponent(this.sessionId)}${resource.startsWith('/') ? resource : `/${resource}`}` : resource;
-    const response = await this.adapters.fetch(`${this.endpoint()}${sessionResource.startsWith('/') ? sessionResource : `/${sessionResource}`}`, {
-      method, headers: body === undefined ? undefined : { 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body),
+    const controller = new AbortController();
+    let timer: NodeJS.Timeout | undefined;
+    const timedOut = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => { controller.abort(); reject(new WebDriverTimeoutError(timeoutMs)); }, timeoutMs);
     });
-    const json = await response.json().catch(() => ({})) as any;
-    if (!response.ok || json.value?.error) throw Error(`WebDriver ${method} ${resource} failed: ${json.value?.message ?? json.message ?? response.statusText}`);
-    return json;
+    try {
+      const result = await Promise.race([
+        this.adapters.fetch(`${this.endpoint()}${sessionResource.startsWith('/') ? sessionResource : `/${sessionResource}`}`, {
+          method, headers: body === undefined ? undefined : { 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body), signal: controller.signal,
+        }).then(async response => ({ response, json: await response.json().catch(() => ({})) as any })),
+        timedOut,
+      ]);
+      const { response, json } = result;
+      if (!response.ok || json.value?.error) throw Error(`WebDriver ${method} ${resource} failed: ${json.value?.message ?? json.message ?? response.statusText}`);
+      return json;
+    } finally { if (timer) clearTimeout(timer); }
   }
   private validateSelector(selector: string): void { if (!selector || selector.length > 2000) throw Error('Selector must contain 1–2000 characters.'); }
   private async findElement(selector: string): Promise<string> {
