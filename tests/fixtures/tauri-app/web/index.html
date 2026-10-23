@@ -19,11 +19,23 @@
       <h1>Counter</h1>
       <output id="count" aria-live="polite">0</output>
       <button type="button" aria-label="Increment counter">Increment</button>
+      <label for="native-upload">Upload fixture</label>
+      <input id="native-upload" type="file">
+      <output id="upload-status" aria-live="polite"></output>
     </main>
     <script>
       const count = document.getElementById('count');
       document.querySelector('button').addEventListener('click', () => {
         count.textContent = String(Number(count.textContent) + 1);
+      });
+      const uploadStatus = document.getElementById('upload-status');
+      document.getElementById('native-upload').addEventListener('change', async event => {
+        const file = event.currentTarget.files?.[0];
+        if (!file) {
+          uploadStatus.textContent = '';
+          return;
+        }
+        uploadStatus.textContent = `${file.name} | ${file.size} bytes | ${await file.text()}`;
       });
     </script>
   </body>

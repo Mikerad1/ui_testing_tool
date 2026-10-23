@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, readdir } from 'node:fs/promises';
+import { mkdtemp, rm, readdir, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
@@ -98,6 +98,16 @@ test('real Tauri app works through DesktopService and produces a WebView PNG', {
       }) as typeof fetch,
     });
     await service.start();
+    const uploadName = 'native-upload-fixture.txt';
+    const uploadContents = 'Tauri native upload acceptance fixture';
+    const uploadPath = path.join(projectRoot, uploadName);
+    await writeFile(uploadPath, uploadContents, { flag: 'wx' });
+    await service.upload('#native-upload', uploadName);
+    assert.equal(
+      await service.text('#upload-status'),
+      `${uploadName} | ${Buffer.byteLength(uploadContents)} bytes | ${uploadContents}`,
+      'the native file input change event exposes the uploaded fixture filename, size, and contents',
+    );
     rawExecute = async script => {
       const session = await service!.status();
       const response = await fetch(`${session.endpoint}/session/${encodeURIComponent(session.id)}/execute/sync`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ script, args: [] }) });

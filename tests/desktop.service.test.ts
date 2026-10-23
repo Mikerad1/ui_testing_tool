@@ -46,6 +46,82 @@ function response(status: number, value: unknown) {
 const config = (projectRoot: string) => ({ projectRoot, tauriBinary: 'app', driverExecutable: '/fake/tauri-driver', windowTitle: 'Demo Window', artifactDirectory: 'artifacts', readinessTimeoutMs: 50 });
 const driverFakes = { reservePort: async () => 23456, killProcess: () => undefined };
 
+async function uploadHarness(root: string, options: { matches?: number; tagName?: unknown; type?: unknown; enabled?: unknown } = {}) {
+  const calls: { url: string; method: string; body?: any }[] = [];
+  const service = new DesktopService(config(root), {
+    ...driverFakes,
+    spawn: (() => fakeChild()) as typeof import('node:child_process').spawn,
+    fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input), method = init?.method ?? 'GET', body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      calls.push({ url, method, body });
+      if (url.endsWith('/status')) return response(200, { value: {} });
+      if (url.endsWith('/session')) return response(200, { value: { sessionId: 'upload-session' } });
+      if (url.endsWith('/elements')) return response(200, { value: Array.from({ length: options.matches ?? 1 }, (_, i) => ({ 'element-6066-11e4-a52e-4f735466cecf': `element-${i + 1}` })) });
+      if (url.endsWith('/element/element-1/name')) return response(200, { value: options.tagName ?? 'input' });
+      if (url.endsWith('/attribute/type')) return response(200, { value: options.type ?? 'file' });
+      if (url.endsWith('/enabled')) return response(200, { value: options.enabled ?? true });
+      return response(200, { value: null });
+    }) as typeof fetch,
+  });
+  await service.start();
+  return { service, calls };
+}
+
+test('upload sends one bounded local path through W3C element value and returns only metadata', async () => {
+  const root = await project();
+  try {
+    const bytes = Buffer.from('safe upload'); await writeFile(path.join(root, 'upload.txt'), bytes);
+    const { service, calls } = await uploadHarness(root);
+    try {
+      const result = await service.upload('input[type=file]', 'upload.txt');
+      assert.deepEqual(result, { basename: 'upload.txt', byteLength: bytes.length });
+      assert.deepEqual(Object.keys(result).sort(), ['basename', 'byteLength']);
+      const sent = calls.find(call => call.method === 'POST' && call.url.endsWith('/element/element-1/value'))!;
+      assert.deepEqual(sent.body, { text: path.join(root, 'upload.txt'), value: [...path.join(root, 'upload.txt')] });
+      assert.ok(calls.some(call => call.method === 'GET' && call.url.endsWith('/element/element-1/name')));
+      assert.ok(calls.some(call => call.method === 'GET' && call.url.endsWith('/element/element-1/attribute/type')));
+      assert.ok(calls.some(call => call.method === 'GET' && call.url.endsWith('/element/element-1/enabled')));
+    } finally { await service.stop(); }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('upload requires a managed session and rejects invalid paths and targets without sending element value', async () => {
+  const root = await project();
+  try {
+    await writeFile(path.join(root, 'upload.txt'), 'ok');
+    await mkdir(path.join(root, 'folder'));
+    await writeFile(path.join(root, `line\nbreak.txt`), 'bad');
+    const outside = await mkdtemp(path.join(os.tmpdir(), 'desktop-upload-outside-'));
+    try {
+      await writeFile(path.join(outside, 'secret.txt'), 'secret');
+      await symlink(path.join(outside, 'secret.txt'), path.join(root, 'escape.txt'));
+      const noSession = new DesktopService(config(root), { fetch: (async () => { throw Error('unexpected request'); }) as typeof fetch });
+      await assert.rejects(noSession.upload('input[type=file]', 'upload.txt'), /managed WebDriver session/);
+
+      const scenarios: Array<{ label: string; filename: string; options?: { matches?: number; type?: unknown; enabled?: unknown }; pattern: RegExp }> = [
+        { label: 'traversal', filename: '../secret.txt', pattern: /relative|traversal/ },
+        { label: 'symlink escape', filename: 'escape.txt', pattern: /escapes|Symlink/ },
+        { label: 'directory', filename: 'folder', pattern: /regular file/ },
+        { label: 'newline path', filename: 'line\nbreak.txt', pattern: /CR or LF/ },
+        { label: 'selector cardinality', filename: 'upload.txt', options: { matches: 2 }, pattern: /exactly one/ },
+        { label: 'wrong element', filename: 'upload.txt', options: { tagName: 'button' }, pattern: /input\[type=file\]/ },
+        { label: 'wrong input type', filename: 'upload.txt', options: { type: 'text' }, pattern: /input\[type=file\]/ },
+        { label: 'disabled input', filename: 'upload.txt', options: { enabled: false }, pattern: /enabled/ },
+      ];
+      const oversized = path.join(root, 'oversized.bin');
+      const handle = await nodeFs.open(oversized, 'w'); try { await handle.truncate(20 * 1024 * 1024 + 1); } finally { await handle.close(); }
+      scenarios.push({ label: 'oversized file', filename: 'oversized.bin', pattern: /20 MiB/ });
+      for (const scenario of scenarios) {
+        const { service, calls } = await uploadHarness(root, scenario.options);
+        try {
+          await assert.rejects(service.upload('input[type=file]', scenario.filename), scenario.pattern, scenario.label);
+          assert.equal(calls.some(call => call.method === 'POST' && /\/element\/[^/]+\/value$/.test(call.url)), false, `${scenario.label} must not issue element/value`);
+        } finally { await service.stop(); }
+      }
+    } finally { await rm(outside, { recursive: true, force: true }); }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('inspection discovers Tauri without executing commands', async () => {
   const root = await project(); let commandCalls = 0;
   try {

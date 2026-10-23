@@ -44,6 +44,7 @@ test('desktop_run_workflow enforces owned-session execution, preflight, provenan
   const actions: string[] = [];
   let operationGate = { entered: deferred(), release: deferred() };
   let shouldBlock = false, failClick = false, factoryCalls = 0, startCalls = 0, stopCalls = 0, captureCalls = 0, running = false;
+  const uploads: Array<{ selector: string; projectRelativePath: string }> = [];
   let sessionId: string | undefined;
   let serverStop: (() => Promise<void>) | undefined, transport: StreamableHTTPClientTransport | undefined, client: Client | undefined;
   const workflow = (id: string, body: string) => `schema_version: 1\nkind: workflow\nid: ${id}\nname: ${id}\n${body}`;
@@ -60,6 +61,11 @@ test('desktop_run_workflow enforces owned-session execution, preflight, provenan
       if (failClick) throw Error('Fixture click failed with PRIVATE_ACTION_SENTINEL');
     },
     type: async (selector: string, text: string) => { actions.push(`type:${selector}:${text}`); },
+    upload: async (selector: string, projectRelativePath: string) => {
+      if (!running) throw Error('No managed WebDriver session.');
+      uploads.push({ selector, projectRelativePath });
+      return { basename: path.basename(projectRelativePath), byteLength: 12 };
+    },
     scroll: async (_selector?: string, _x?: number, _y?: number) => { actions.push('scroll'); },
     waitFor: async () => { actions.push('wait'); return true; },
     text: async () => 'Ready',
@@ -148,9 +154,37 @@ steps: [{id: click, action: click, target: {by: css, value: '#blocked'}}]
     assert.equal(start.structuredContent.ok, true); assert.equal(factoryCalls, 1); assert.equal(startCalls, 1);
     await call('desktop_session_stop', {});
     const stoppedCount = countRuns('portable');
+    const stoppedUpload = await call('desktop_upload', { selector: 'input[type=file]', project_relative_path: 'fixtures/upload.txt' });
+    assert.equal(stoppedUpload.structuredContent.ok, false);
+    assert.equal(stoppedUpload.structuredContent.error.code, 'desktop_session_not_running');
+    assert.equal(startCalls, 1, 'desktop_upload never starts a session');
+    assert.deepEqual(uploads, []);
     const stopped = await call('desktop_run_workflow', { workflow_id: 'portable', expected_session_id: 'owned-desktop-session' });
     assert.equal(stopped.structuredContent.ok, false); assert.equal(countRuns('portable'), stoppedCount);
     await call('desktop_session_start', {});
+    const successfulUpload = await call('desktop_upload', { selector: '#file', project_relative_path: 'fixtures/upload.txt' });
+    assert.equal(successfulUpload.structuredContent.ok, true);
+    assert.deepEqual(successfulUpload.structuredContent.data, { basename: 'upload.txt', byteLength: 12 });
+    assert.deepEqual(uploads, [{ selector: '#file', projectRelativePath: 'fixtures/upload.txt' }]);
+    assert.equal(JSON.stringify(successfulUpload).includes(root), false, 'MCP result does not disclose the absolute upload path');
+    const invalidUpload = await call('desktop_upload', { selector: '#file', path: 'fixtures/upload.txt' });
+    assert.equal(invalidUpload.structuredContent.ok, false);
+    assert.equal(invalidUpload.structuredContent.error.code, 'invalid_input');
+    assert.equal(uploads.length, 1, 'invalid schema input cannot call the upload method');
+    const factoryBeforeDisabled = factoryCalls;
+    config.desktop!.enabled = false;
+    const disabledUpload = await call('desktop_upload', { selector: '#file', project_relative_path: 'fixtures/upload.txt' });
+    config.desktop!.enabled = true;
+    assert.equal(disabledUpload.structuredContent.error.code, 'desktop_disabled');
+    assert.equal(factoryCalls, factoryBeforeDisabled, 'disabled desktop upload does not construct or start a service');
+    assert.equal(uploads.length, 1);
+    for (const action of ['upload', 'any'] as const) {
+      config.security = { high_risk: [{ action, target: { by: 'test_id', value: 'fixture' }, description: 'High-risk fixture' }] } as any;
+      const deniedUpload = await call('desktop_upload', { selector: '#file', project_relative_path: 'fixtures/upload.txt' });
+      assert.equal(deniedUpload.structuredContent.error.code, 'approval_denied');
+      assert.equal(uploads.length, 1, `${action} rule denies before upload side effects`);
+    }
+    config.security = undefined;
     const mismatchCount = countRuns('portable');
     const mismatch = await call('desktop_run_workflow', { workflow_id: 'portable', expected_session_id: 'not-this-session' });
     assert.equal(mismatch.structuredContent.ok, false); assert.equal(countRuns('portable'), mismatchCount); assert.equal(startCalls, 2);

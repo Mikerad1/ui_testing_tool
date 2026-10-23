@@ -4,6 +4,7 @@ import { constants as fsConstants } from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { createServer } from 'node:net';
+import { safePath } from '../config/config.js';
 import { inspectPng, MAX_SUPPORTED_PNG_BYTES } from './png-diff.js';
 import { isStableMaskSelector, MASK_SELECTOR_SUBSET_ERROR } from './mask-selector.js';
 
@@ -62,6 +63,7 @@ export interface DesktopTreeNode { role: string; accessibleName: string; text: s
 export interface DesktopElementDetails { text: string; rect: DesktopRect; attributes: Record<string, string | null>; styles: Record<string, string>; overflow: { horizontal: boolean; vertical: boolean; clippedHorizontal: boolean; clippedVertical: boolean; scrollWidth: number; scrollHeight: number; clientWidth: number; clientHeight: number } }
 export interface DesktopCapture { kind: CaptureKind; path: string; artifactRef: string; sha256?: string; byteLength?: number; mimeType: 'image/png'; bytes: Buffer; width?: number; height?: number }
 export interface GeneratedDesktopArtifact { path: string; artifactRef: string; sha256: string; byteLength: number; mimeType: 'image/png'; width?: number; height?: number }
+export interface DesktopUploadResult { basename: string; byteLength: number }
 export interface DesktopCommandResult { code: number | null; stdout: string; stderr: string }
 export interface DesktopAdapters {
   spawn: typeof spawn;
@@ -317,6 +319,29 @@ export class DesktopService {
 
   async click(selector: string): Promise<void> { await this.elementAction(selector, 'click', {}); }
   async type(selector: string, text: string): Promise<void> { if (text.length > 10_000) throw Error('Text input exceeds 10000 characters.'); await this.elementAction(selector, 'value', { text, value: [...text] }); }
+  async upload(selector: string, projectRelativePath: string): Promise<DesktopUploadResult> {
+    this.requireSession();
+    if (typeof projectRelativePath !== 'string' || !projectRelativePath || path.isAbsolute(projectRelativePath)
+      || projectRelativePath.includes('\\') || projectRelativePath.split('/').some(part => !part || part === '.' || part === '..')) {
+      throw Error('Upload path must be a project-relative file path without traversal.');
+    }
+    const candidate = await safePath(this.root, projectRelativePath, false);
+    const [realRoot, resolved] = await Promise.all([fs.realpath(this.root), fs.realpath(candidate)]);
+    if (!this.within(realRoot, resolved)) throw Error('Upload path escapes project root.');
+    const info = await fs.stat(resolved);
+    if (!info.isFile()) throw Error('Upload must be a regular file no larger than 20 MiB.');
+    if (info.size > 20 * 1024 * 1024) throw Error('Upload must be a regular file no larger than 20 MiB.');
+    if (/[\r\n]/.test(resolved)) throw Error('Upload path cannot contain CR or LF characters.');
+    const element = await this.findElement(selector);
+    const tagName = (await this.request('GET', `/element/${encodeURIComponent(element)}/name`)).value;
+    if (typeof tagName !== 'string' || tagName.toLowerCase() !== 'input') throw Error('Upload target must be an input[type=file].');
+    const type = (await this.request('GET', `/element/${encodeURIComponent(element)}/attribute/type`)).value;
+    if (typeof type !== 'string' || type.toLowerCase() !== 'file') throw Error('Upload target must be an input[type=file].');
+    const enabled = (await this.request('GET', `/element/${encodeURIComponent(element)}/enabled`)).value;
+    if (enabled !== true) throw Error('Upload target must be enabled.');
+    await this.request('POST', `/element/${encodeURIComponent(element)}/value`, { text: resolved, value: [...resolved] });
+    return { basename: path.basename(resolved), byteLength: info.size };
+  }
   async text(selector: string): Promise<string> { const e = await this.findElement(selector); return String((await this.request('GET', `/element/${e}/text`)).value ?? ''); }
   async tree(maxNodes = 200): Promise<DesktopTreeNode[]> {
     bounded(maxNodes, 1, 300, 'maxNodes');

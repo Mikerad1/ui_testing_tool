@@ -1,14 +1,14 @@
 # Product Requirements Document: UI Memory Browser (UMB)
 
 **Version:** 1.0  
-**Status:** Proposed / implementation-ready MVP specification  
+**Status:** Implemented product with current capability matrix and remaining backlog
 **Date:** 2026-10-11  
 **Product type:** Local CLI application, MCP testing service with distinct Playwright browser and managed Tauri app backends
 **Primary users:** AI coding agents, QA agents, developers, and automated test orchestrators
 
 ## 1. Executive summary
 
-UI Memory Browser (UMB) is a lightweight, local-first application-testing service that AI agents connect to via Model Context Protocol (MCP). Its browser backend uses Playwright for web apps; a separate, explicitly selected Tauri backend controls an owned Tauri app through `tauri-driver`. The product direction is useful-surface parity where native semantics support it, not full Playwright API parity. Current Tauri capabilities are partial and Tauri YAML workflow execution is absent; the matrices below distinguish existing behavior from target acceptance. Both backends connect to a persistent SQLite-backed knowledge graph. Users supply declarative YAML describing known screens, UI elements, workflows, preconditions, assertions, and other project knowledge. Startup validates and reconciles YAML-owned knowledge; agents can consult and improve learned knowledge through MCP tools.
+UI Memory Browser (UMB) is a lightweight, local-first application-testing service that AI agents connect to via Model Context Protocol (MCP). Its browser backend uses Playwright for web apps; a separate, explicitly selected Tauri backend controls an owned Tauri app through `tauri-driver`. The product provides useful-surface parity where native semantics support it, not full Playwright API parity. Tauri capabilities are partial; its shipped YAML workflow subset is documented separately from the browser runner. Both backends connect to a persistent SQLite-backed knowledge graph. Users supply declarative YAML describing known screens, UI elements, workflows, preconditions, assertions, and other project knowledge. Startup validates and reconciles YAML-owned knowledge; agents can consult and improve learned knowledge through MCP tools.
 
 **Critical separation of responsibilities:** UMB contains no LLM and requires no AI-provider credentials. An external AI agent interprets page snapshots, plans actions, tests hypotheses, and optionally commits verified findings. UMB supplies tools, stores observations and evidence, and executes deterministic browser operations. The external agent may require its own model access.
 
@@ -18,7 +18,7 @@ The product is not merely a Playwright wrapper; its differentiator is versioned,
 
 Existing agent/browser systems can navigate a website, click controls, and inspect accessibility trees, but project-specific procedural understanding is often ephemeral. Agents repeatedly rediscover where actions live, which role can access a page, how to complete multistep forms, and what to do after a state changes. Test reliability drops if interface changes invalidate a remembered CSS selector or the agent confuses a previous observation with an invariant.
 
-UMB reduces repeated discovery while keeping browser interactions deterministic, isolated, auditable, and safely recoverable.
+UMB reduces repeated discovery while keeping browser interactions deterministic, isolated, auditable, and safely recoverable. The Playwright browser surface and bounded Tauri workflow subset are implemented; capability matrices below describe shipped behavior, not full Playwright API parity.
 
 ## 3. Goals and non-goals
 
@@ -175,10 +175,10 @@ Suggested locator shape: `{ "by": "role", "role": "button", "name": "Save", "exa
 | Tool | Purpose |
 | --- | --- |
 | `test_assert` | Apply a deterministic condition and report PASS/FAIL with evidence. |
-| `test_run_workflow` (P1) | Execute stored declarative steps with checkpoints. |
+| `test_run_workflow` | Execute stored declarative steps through the Playwright browser runner. |
 | `test_report` | Retrieve run summary, step timing, failed assertions, artifacts. |
 
-`test_run_workflow` currently executes through the browser workflow runner. Its optional `desktop_screenshot` failure evidence is not desktop workflow execution. The planned Tauri adapter must use explicit backend selection and reject unsupported steps before effects; it must never fall back to Playwright.
+`test_run_workflow` executes through the Playwright browser runner. Its optional `desktop_screenshot` failure evidence is diagnostic only, not desktop workflow execution. The separate `desktop_run_workflow` executes only its documented subset against an already-running owned session and exact session ID; it never auto-starts or falls back, and rejects unsupported semantics in preflight.
 
 ### 8.3 Memory/knowledge tools
 
@@ -483,31 +483,31 @@ rules:
 
 ## 12. Execution backends and useful capability parity
 
-UMB preserves two distinct adapters. Playwright drives web browsers and owns the existing `browser_*` contract. The opt-in Tauri backend uses a separately owned `tauri-driver` session. Status describes the current Tauri implementation; it is not a claim of parity with the Playwright API. Matrix status values: **FULL** means equivalent observable behavior with contract tests; **PARTIAL** means only the stated subset is available or platform/runtime constrained; **UNSUPPORTED** means no Tauri operation exists; **NOT_APPLICABLE** means the browser concept has no meaningful Tauri equivalent.
+UMB preserves distinct adapters. `browser_*` and `test_run_workflow` remain Playwright-backed. Tauri uses a separate explicitly selected, owned `tauri-driver` session and `desktop_run_workflow`. Status vocabulary describes **UMB's shipped surface**, not full Playwright API parity: **FULL** = UMB's useful capability is implemented and observable; **PARTIAL** = only the stated subset or runtime-constrained surface exists; **UNSUPPORTED** = no UMB operation; **NOT_APPLICABLE** = no meaningful equivalent.
 
-| Capability | Tauri status | Current surface / observable acceptance criteria |
-| --- | --- | --- |
-| Session lifecycle | PARTIAL | Starts/stops only a configured Tauri binary and the driver/app session UMB owns. Acceptance: status identifies that managed session; stop affects only owned processes. No arbitrary app attachment. |
-| Direct navigation/history controls | UNSUPPORTED | No desktop MCP route, direct navigation, back, or forward controls. App state can change through UI interaction, which is not direct navigation parity. Acceptance: Tauri preflight rejects route/navigation/history requirements before effects unless a reviewed native equivalent is added. |
-| Browser tabs | NOT_APPLICABLE | A single managed native app is not a browser-tab model. Acceptance: do not claim or synthesize browser tab IDs or tab switching for Tauri. |
-| Viewport/window size | PARTIAL | Native window resize is backend-dependent and can be refused; temporary capture profiles restore the complete prior rect. Acceptance: report failure honestly and verify restoration after capture. |
-| Locators and semantic tree | PARTIAL | Bounded DOM-derived WebView tree/details and CSS selectors. No browser role/label/placeholder/test-id targets or ephemeral browser snapshot refs. Acceptance: CSS target must resolve uniquely; no conversion claim for unsupported locator forms. |
-| Interactions | PARTIAL | Click, type, keypress, and scroll. No desktop fill/select/upload. WebKitGTK behavior varies by build. Acceptance: supported calls have bounded results; unsupported action is rejected before effects. |
-| Waits and assertions | PARTIAL | Waits: present, visible, hidden, enabled. Assertions: those states plus exact/contains text. No browser URL/count/value assertions or URL waits. Acceptance: each supported condition maps to its named semantic condition; other browser conditions fail preflight. |
-| Screenshots, masks, visual baselines | PARTIAL | WebView and managed exact-title X11 window screenshots, desktop baselines/comparisons/findings. Configured masks are narrow top-level DOM overlays, not PII redaction; full-page capture is not equivalent. Wayland window capture and native Windows capture are unsupported. Acceptance: label capture kind, disclose mask scope, and fail explicitly without safe backend. |
-| Tauri YAML workflow execution | UNSUPPORTED | No Tauri workflow adapter exists; `test_run_workflow` runs on the browser runner. Acceptance target: an explicit Tauri adapter preflights the bounded subset below and never falls back to Playwright. |
-| Workflow desktop failure screenshot | PARTIAL | Explicit `desktop_screenshot` is diagnostic failure evidence only, gated by config and an already-existing desktop service; not workflow execution. Acceptance: preserve browser behavior, masking, auth suppression, retention, and no-auto-start. |
-| Upload | UNSUPPORTED | No desktop upload action. Browser upload remains project-root-contained regular file, at most 20 MiB, to a unique file input; these constraints do not imply desktop upload support. |
-| Diagnostics | PARTIAL | Browser console/page/network/HTTP errors; desktop status, tree/details, and failure screenshots, but no equivalent desktop console/network diagnostic tool. Acceptance: do not return browser diagnostics for Tauri. |
-| Memory, evidence, reports | PARTIAL | Shared graph/reporting and separate desktop visual records; caller-authored findings. No automatic visual finding or desktop memory bridge. Workflow desktop failure screenshot is a separately linked artifact. Acceptance: each ref has correct provenance and retention protection; no automatic learning from pixels. |
-| Auth and security | PARTIAL | Explicit opt-in managed app; no arbitrary attach. Baseline save requires caller attestation plus server approver. Not equivalent to browser-origin/target-revision approval. Auth safe flows suppress failure capture; workflow capture never auto-starts a desktop session. Acceptance: preserve explicit gates and report only safe bounded statuses. |
-| Platforms | PARTIAL | Capability discovery; native WebView needs configured driver. X11 window capture needs exact title, `wmctrl`, and ImageMagick. Wayland window capture and Windows native window capture are unsupported. Acceptance: capability reports are truthful and unsupported paths fail without whole-desktop fallback. |
+| Capability | Playwright/browser status + observable scope | Desktop/Tauri status + observable scope | Gap / notes |
+| --- | --- | --- | --- |
+| Lifecycle / engine | PARTIAL — configurable Chromium/Firefox/WebKit and managed browser session. | PARTIAL — configured Tauri binary and owned `tauri-driver` session/lifecycle. | No arbitrary desktop attach; independent runtimes. |
+| Navigation / history / tabs | FULL — origin/redirect restrictions, navigation, back/forward, tabs and selection. | UNSUPPORTED for direct navigation/history; NOT_APPLICABLE for tabs. | UI-driven state changes are not direct navigation; no desktop tab model. |
+| Viewport / window size | FULL — set browser viewport dimensions. | PARTIAL — resize managed Tauri window; backend/compositor may refuse; capture profiles restore the prior window rect. | Browser viewport and native window geometry are not identical. |
+| Locators / discovery | FULL — role/name, label, placeholder, test ID, text and CSS locators; semantic discovery and ephemeral refs. | PARTIAL — bounded DOM-derived tree/details and uniquely resolved CSS targets. | No desktop browser locator forms or refs. |
+| Interactions | FULL — click/fill/type/press/select/keyboard/scroll/upload. | PARTIAL — direct tools provide click/type/global keypress/upload; workflows provide click/type/scroll. | No desktop fill/select; upload is direct-tool-only. Workflows have no press/keypress/upload. WebKitGTK behavior varies by build. |
+| Waits / assertions | FULL — broader waits and assertions including URL/count/value, element state and text. | PARTIAL — waits present/visible/hidden/enabled; assertions for these plus exact/contains text. | No desktop URL/count/value conditions. |
+| YAML workflow | FULL — `test_run_workflow` runs through Playwright, including supported navigation, screens, pre/postconditions, actions, waits, assertions and failure captures. | PARTIAL — explicit `desktop_run_workflow`: CSS targets; click/type/scroll; waits present/visible/hidden/enabled; assertions for those and exact/contains text. | No desktop screens, routes/navigation, press, fill/select/upload, URL/count/value, browser-only locators or browser diagnostics. Preflight rejects unsupported semantics before effects; exact already-running owned session ID required; never auto-starts/falls back. |
+| Screenshots / visual evidence / masks | PARTIAL — viewport/full-page screenshots and managed artifacts. | PARTIAL — opt-in screenshot capture; visual baselines/comparisons/findings implemented. | Browser workflows can capture screenshots/diagnostics; the managed baseline/diff/finding loop is desktop-only. Auth workflows suppress capture. Desktop masks are narrow configured top-level DOM overlays, not general PII redaction. |
+| Upload | PARTIAL — <=20 MiB project-contained regular file to a unique file input. | PARTIAL — direct `desktop_upload` only: one project-relative regular file (<=20 MiB) to a unique enabled `input[type=file]` in an already-running managed session. | W3C Element Send Keys only; no chooser/JavaScript assignment; reject traversal, symlink escape, and CR/LF paths; return basename/size only. Matching high-risk `upload`/`any` rules fail closed without prompt. Not a YAML workflow action. Native acceptance passed only on Fedora 44 WebKitGTK/WebKitWebDriver 2.54.1-1.fc44. |
+| Diagnostics | PARTIAL — opt-in metadata-only console/page/request/HTTP diagnostics. | PARTIAL — status/tree/details and screenshot evidence, no console/network diagnostics. | No general network interception, download API or trace. |
+| Accessibility | PARTIAL — accessibility-oriented snapshots and semantic locators. | PARTIAL — bounded DOM-derived tree/details. | ARIA snapshot is partial, not a dedicated a11y audit; no desktop audit. |
+| Run / evidence / security | PARTIAL — managed workflow records/artifacts and origin/redirect restrictions; configured high-risk targets require local approval and fail closed if denied/unavailable. | PARTIAL — separate workflow and visual evidence artifacts, explicit baseline gates; matching high-risk mutation rules fail closed without prompting. | Failure capture requires an existing service; auth capture suppressed. No automatic finding/memory writeback. |
+| Platform / runtime | PARTIAL — configurable Chromium/Firefox/WebKit; installed runtime dependent. | PARTIAL — Tauri workflow interaction acceptance passed Fedora 44 WebKitGTK/WebKitWebDriver 2.54.1-1.fc44. | Other runtimes not generalized. X11 capture requires exact title, `wmctrl`, ImageMagick; Wayland window capture and Windows native window capture unsupported. |
 
-### 12.1 Planned portable YAML workflow subset for Tauri
+Browser evidence: MCP/controller `src/mcp/server.ts:413-459`, `src/browser/controller.ts:15-65`; workflow schema/runner `src/workflow/contract.ts:8-53` and `src/workflow/runner.ts`. Tauri evidence: MCP tools `src/mcp/server.ts:263-310,435-457`; driver `src/workflow/desktop-driver.ts:17-94,149-173`; service `src/desktop/index.ts:198-216,238-361,385-460`.
 
-This is a design target, not an implemented workflow backend. The initial adapter should accept CSS targets and `click`, `type`, `scroll`, and possibly `press` if the design gate approves a validated focus-bound equivalent. Current desktop keypress is global while workflow `press` targets an element; if a safe equivalent is not designed and implemented, exclude `press` and reject it during preflight. Candidate waits: `present`, `visible`, `hidden`, `enabled`; candidate assertions: those states plus `text` exact/contains. Reuse bounded preconditions, retries, per-step outcomes, and reporting only where the current contract has the same meaning.
+### 12.1 Shipped Tauri YAML workflow subset
 
-The design gate must explicitly decide (a) per-action Tauri authorization/approval. Existing desktop actions do not use the browser `authorize` path, so define a secure fail-closed rule and a denial/no-side-effect test; (b) targeted `press` semantics as above; and (c) route-based `start_screen`, `end_screen`, `navigate`, and URL assertion semantics. Provide reviewed Tauri equivalents or reject these requirements before any step side effects. Browser-only `fill`/`select`, URL/count/value conditions, role/label/placeholder/test-id locators, browser snapshot refs, upload, and browser diagnostics also fail Tauri preflight explicitly. Never silently run a step in the browser. Backend selection must be explicit; exact schema/tool naming requires a separate design gate before implementation.
+The explicit `desktop_run_workflow` tool and Tauri adapter are implemented. It accepts CSS targets; `click`, `type`, and `scroll`; waits for present/visible/hidden/enabled; and assertions for those states plus exact/contains text. Preflight rejects start/end screens, route/navigation, `press`, `fill`/`select`, URL/count/value conditions, browser-only locators/refs, upload, and browser diagnostics before effects. Direct `desktop_upload` is a separate MCP tool and does not expand this YAML workflow subset. High-risk workflow mutation rules fail closed rather than prompting for approval. The workflow tool requires an already-running UMB-owned desktop session and exact session ID; it never auto-starts a session or falls back to Playwright. `browser_*` and `test_run_workflow` remain Playwright-backed.
+
+Phase 3C shipped at commit `b16cf50`; Gate 3C passed for the tested runtime. This is runtime-specific acceptance, not a claim about every WebKitGTK build. Remaining capability gaps are tracked in the backlog below.
 
 ### 12.2 Playwright browser support
 
@@ -644,9 +644,9 @@ Expose guarded Playwright attach with one external proxy client at a time, profi
 
 **Exit gate:** External Playwright client can attach in a supported configuration without corrupting MCP session state.
 
-### Tauri useful-surface parity (separate planned roadmap)
+### Tauri useful-surface status and backlog
 
-The Tauri backend is PARTIAL overall, while direct navigation/history and Tauri YAML workflow execution are UNSUPPORTED, and browser tabs are NOT_APPLICABLE, as detailed in §12. Phase 0 workflow failure screenshots are complete (`77d72eb`) and remain diagnostic-only: opt-in mode plus both config gates, existing service only, masked WebView path, no automatic session start, and auth-safe suppression. Next, approve an explicit adapter contract and reject unsupported steps in preflight; then implement only the bounded portable YAML subset in §12.1 with a managed Tauri fixture and cross-backend contract tests. Acceptance must include action-approval denial with no side effect and preflight rejection of unsupported `press` and route-based requirements before any effects. Additional locators, upload, diagnostics, and navigation/history are later gaps, not prerequisites to reorder ahead of workflow parity. Exact workflow schema/tool names require a design review before implementation.
+The Tauri backend remains PARTIAL overall; direct navigation/history and desktop console/network diagnostics are unsupported, and browser tabs are not applicable. Direct upload is PARTIAL via `desktop_upload`, but is not a YAML workflow step. Phase 0 failure screenshots (`77d72eb`) are diagnostic-only: opt-in, both config gates, existing service only, masked WebView path, no automatic start and auth-safe suppression. Phases 1–3 are complete, including the adapter contract and bounded `desktop_run_workflow` subset (§12.1); Phase 3C commit `b16cf50` passed Gate 3C for the tested runtime. Upload native acceptance is verified only on Fedora 44 WebKitGTK/WebKitWebDriver 2.54.1-1.fc44. Matching high-risk upload/any rules fail closed without prompt. Additional locators, diagnostics and navigation/history remain backlog, not selected next features.
 
 ## 18. Recommended repository architecture
 
