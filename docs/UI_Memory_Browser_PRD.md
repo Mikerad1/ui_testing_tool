@@ -3,16 +3,16 @@
 **Version:** 1.0  
 **Status:** Proposed / implementation-ready MVP specification  
 **Date:** 2026-10-11  
-**Product type:** Local CLI application, headless browser automation server, MCP tool provider  
+**Product type:** Local CLI application, MCP testing service with distinct Playwright browser and managed Tauri app backends
 **Primary users:** AI coding agents, QA agents, developers, and automated test orchestrators
 
 ## 1. Executive summary
 
-UI Memory Browser (UMB) is a lightweight, local-first browser automation service that AI agents connect to via Model Context Protocol (MCP). UMB launches an isolated, headless Chromium browser, exposes predictable tools to inspect and manipulate web pages, provides Playwright-based automation, and maintains a persistent SQLite-backed knowledge graph of how a particular application works. Users supply a directory of declarative YAML files containing known screens, routes, UI elements, workflows, preconditions, assertions, and navigation rules. Every application startup checks this directory, validates its contents, and reconciles YAML-owned knowledge into the SQLite graph. During exploration, agents can consult and improve learned knowledge through MCP tools.
+UI Memory Browser (UMB) is a lightweight, local-first application-testing service that AI agents connect to via Model Context Protocol (MCP). Its browser backend uses Playwright for web apps; a separate, explicitly selected Tauri backend controls an owned Tauri app through `tauri-driver`. The product direction is useful-surface parity where native semantics support it, not full Playwright API parity. Current Tauri capabilities are partial and Tauri YAML workflow execution is absent; the matrices below distinguish existing behavior from target acceptance. Both backends connect to a persistent SQLite-backed knowledge graph. Users supply declarative YAML describing known screens, UI elements, workflows, preconditions, assertions, and other project knowledge. Startup validates and reconciles YAML-owned knowledge; agents can consult and improve learned knowledge through MCP tools.
 
 **Critical separation of responsibilities:** UMB contains no LLM and requires no AI-provider credentials. An external AI agent interprets page snapshots, plans actions, tests hypotheses, and optionally commits verified findings. UMB supplies tools, stores observations and evidence, and executes deterministic browser operations. The external agent may require its own model access.
 
-The product is not merely a Playwright wrapper; its differentiator is versioned, evidence-backed procedural knowledge that survives across browser sessions and helps agents discover and validate application workflows faster.
+The product is not merely a Playwright wrapper; its differentiator is versioned, evidence-backed procedural knowledge that survives across test sessions and helps agents discover and validate application workflows faster. Playwright remains the browser automation technology and `browser_*` remains the browser tool surface; Tauri is a distinct backend with a deliberately bounded capability contract.
 
 ## 2. Problem statement
 
@@ -26,21 +26,23 @@ UMB reduces repeated discovery while keeping browser interactions deterministic,
 
 - G1. User starts `umb serve` in a terminal; external MCP clients connect to a local endpoint.
 - G2. Browser is headless by default, launches locally, and has low orchestration overhead.
-- G3. Agent can determine current URL, title, accessible page structure, open tabs, available actions, and page errors.
-- G4. Agent can navigate, click, fill, select, scroll, wait, upload files, take screenshots, inspect console/network failures, and run assertions.
-- G5. Agent can request Playwright-style locators and optionally attach a separate Playwright client using an explicitly enabled connection interface.
+- G2a. User can explicitly select an owned Tauri app backend for the useful supported testing surface without changing or routing browser operations through Tauri.
+- G3. In the browser backend, the agent can determine current URL, title, accessible page structure, open tabs, available actions, and page errors.
+- G4. In the browser backend, the agent can navigate, click, fill, select, scroll, wait, upload files, take screenshots, inspect console/network failures, and run assertions.
+- G5. In the browser backend, the agent can request Playwright-style locators and optionally attach a separate Playwright client using an explicitly enabled connection interface.
 - G6. User manages a per-project SQLite graph for screens, elements, workflows, transitions, requirements, observations, and test evidence.
 - G7. Both browser capabilities and memory search/read/write are exposed through MCP.
 - G8. Declarative YAML teaches routes, workflows, roles, and checks and is reconciled on *every* startup.
 - G9. Verified knowledge survives restarts. Invalid or outdated facts are marked stale rather than silently trusted.
 - G10. No AI provider SDK, keys, or external model inference required for UMB to operate.
+- G11. Share workflow knowledge and reporting across backends only where semantics are supported; unsupported actions fail preflight rather than silently falling back to another backend.
 
 ### 3.2 Non-goals for MVP
 
 - Bundled agent orchestration or autonomous planning; the connecting agent does this.
 - Hosting or training a local language model.
 - Cloud synchronization or multi-user collaboration.
-- Native mobile app testing and desktop application testing.
+- Mobile apps, desktop frameworks other than the specifically supported Tauri path, arbitrary attachment to user-owned desktop processes, and complete Playwright API parity on Tauri.
 - Cross-browser matrix (Firefox/WebKit), distributed testing, or high-scale concurrency.
 - General-purpose graph database engine or arbitrary externally supplied SQL execution.
 - Learning from screenshot pixels without the external agent's vision capabilities.
@@ -59,7 +61,7 @@ UMB reduces repeated discovery while keeping browser interactions deterministic,
 1. User creates a project configuration and a directory of YAML knowledge files.
 2. User launches `umb serve --config ./umb.config.yaml`.
 3. UMB validates config, acquires project-scoped file/database lock, opens/migrates SQLite, recursively scans the configured YAML directory, validates all YAML, computes file hashes, and transactionally reconciles knowledge.
-4. UMB launches an isolated headless Chromium instance and opens the configured start URL (or `about:blank`).
+4. UMB launches the isolated headless Chromium browser backend. The user separately opts into Tauri tools and explicitly invokes operations on its owned configured managed app session; the two tool families do not silently switch backends. Workflow failure evidence never auto-starts a desktop session.
 5. UMB binds MCP Streamable HTTP to `127.0.0.1` and announces the endpoint and configured project to stderr/terminal.
 6. User configures external MCP client with the HTTP endpoint (or optionally uses `umb mcp --stdio` for client-launched mode).
 7. Agent calls `project_context`, `browser_status`, `memory_recall`, `browser_snapshot`, etc.; it navigates and tests through MCP.
@@ -76,8 +78,10 @@ flowchart LR
   C --> Y[YAML Validation + Reconciler]
   Y <--> K[(SQLite Knowledge Graph)]
   M --> O[Action Orchestrator]
-  O --> P[Playwright Adapter]
+  O -->|browser backend| P[Playwright Browser Adapter]
   P <--> B[Headless Chromium]
+  O -->|explicit Tauri backend| T[Tauri WebDriver Adapter]
+  T <--> D[Owned Tauri App via tauri-driver]
   O <--> K
   O --> E[Test Assertions + Artifacts]
   E --> F[Local Screenshots / Traces]
@@ -88,7 +92,8 @@ flowchart LR
 ### Technology decisions
 
 - **Runtime:** Node.js with TypeScript (current supported LTS; pin exact major at implementation).
-- **Browser:** Playwright-managed Chromium in headless mode. Download browsers on explicit `umb install browser` command or validated first-run prompt; avoid silently downloading in CI.
+- **Browser backend:** Playwright-managed Chromium in headless mode. The existing `browser_*` contract is Playwright-backed and remains browser-only. Download browsers on explicit `umb install browser` command or validated first-run prompt; avoid silently downloading in CI.
+- **Tauri backend:** separate, opt-in `tauri-driver` service for a configured app binary and owned managed session. It is not a Playwright adapter and must not imply browser navigation, tab, locator, or assertion semantics it does not implement.
 - **MCP:** Official TypeScript SDK, Streamable HTTP as primary transport; optional stdio mode.
 - **Database:** SQLite in WAL mode, foreign keys enabled, versioned migrations, standard `nodes` and `edges` tables, structured attributes as JSON and indexed columns, SQLite FTS5 for keyword search when available.
 - **YAML:** Safe YAML parser plus explicit schema validation, reject duplicate keys, disallow arbitrary executable tags, validate references and topological consistency.
@@ -125,7 +130,10 @@ flowchart LR
 | SECURITY-01 | P0 | Local-only transport | Listener defaults to `127.0.0.1`, with configurable token for HTTP access. |
 | SECURITY-02 | P0 | Input boundaries | Optional domain allowlist, path restrictions, action permissions, secrets redaction. |
 | API-01 | P1 | Playwright client attachment | Explicit opt-in endpoint allows compatible external Playwright client to attach to a browser server. |
-| TEST-03 | P1 | Declarative workflow replay | Replay a stored flow with preconditions, assertions, retries, and per-step logs. |
+| TEST-03 | P1 | Declarative workflow replay | Replay a stored flow with preconditions, assertions, retries, and per-step logs. Backend-specific supported subsets are explicit; unsupported Tauri steps fail preflight without browser fallback. |
+| TAURI-01 | P1 | Explicit Tauri backend selection | Select Tauri only through explicit configuration/requested backend; browser operations remain Playwright-backed and do not start or attach to arbitrary desktop processes. |
+| TAURI-02 | P1 | Portable workflow subset | Preflight and execute only the documented Tauri-supported YAML subset; unsupported steps return a bounded incompatibility before side effects. |
+| TAURI-03 | P1 | Equivalent bounded outcomes | For supported actions/assertions, report step outcome, timing, and linked artifacts with the same workflow-level result shape; do not claim unsupported browser semantics. |
 | BROWSER-07 | P1 | Extra introspection | Console errors, failed network requests, screenshot, downloadable trace. |
 | MEMORY-05 | P1 | Proposed self-healing | Return alternate locators based on graph evidence; agent confirms, never blindly rewrite. |
 | MEMORY-06 | P1 | Explainable graph routes | Query paths between screens, prerequisite authentication, role constraints. |
@@ -169,6 +177,8 @@ Suggested locator shape: `{ "by": "role", "role": "button", "name": "Save", "exa
 | `test_assert` | Apply a deterministic condition and report PASS/FAIL with evidence. |
 | `test_run_workflow` (P1) | Execute stored declarative steps with checkpoints. |
 | `test_report` | Retrieve run summary, step timing, failed assertions, artifacts. |
+
+`test_run_workflow` currently executes through the browser workflow runner. Its optional `desktop_screenshot` failure evidence is not desktop workflow execution. The planned Tauri adapter must use explicit backend selection and reject unsupported steps before effects; it must never fall back to Playwright.
 
 ### 8.3 Memory/knowledge tools
 
@@ -471,15 +481,43 @@ rules:
 
 **Memory boundaries:** Browser ref `e42`, DOM node IDs, browser tab handles, volatile session cookies, and raw passwords must not become long-lived application graph facts. Store semantic locators, route patterns, roles, validated preconditions, and evidence instead.
 
-## 12. Playwright support
+## 12. Execution backends and useful capability parity
 
-- **P0:** Internally use Playwright's `Browser`, `BrowserContext`, `Page`, `Locator`, navigation, events, and assertions. MCP actions map to these APIs.
-- **P0:** Support locator specification by role/name, label, placeholder, test ID, text, and scoped CSS. No arbitrary JavaScript evaluation via MCP by default.
+UMB preserves two distinct adapters. Playwright drives web browsers and owns the existing `browser_*` contract. The opt-in Tauri backend uses a separately owned `tauri-driver` session. Status describes the current Tauri implementation; it is not a claim of parity with the Playwright API. Matrix status values: **FULL** means equivalent observable behavior with contract tests; **PARTIAL** means only the stated subset is available or platform/runtime constrained; **UNSUPPORTED** means no Tauri operation exists; **NOT_APPLICABLE** means the browser concept has no meaningful Tauri equivalent.
+
+| Capability | Tauri status | Current surface / observable acceptance criteria |
+| --- | --- | --- |
+| Session lifecycle | PARTIAL | Starts/stops only a configured Tauri binary and the driver/app session UMB owns. Acceptance: status identifies that managed session; stop affects only owned processes. No arbitrary app attachment. |
+| Direct navigation/history controls | UNSUPPORTED | No desktop MCP route, direct navigation, back, or forward controls. App state can change through UI interaction, which is not direct navigation parity. Acceptance: Tauri preflight rejects route/navigation/history requirements before effects unless a reviewed native equivalent is added. |
+| Browser tabs | NOT_APPLICABLE | A single managed native app is not a browser-tab model. Acceptance: do not claim or synthesize browser tab IDs or tab switching for Tauri. |
+| Viewport/window size | PARTIAL | Native window resize is backend-dependent and can be refused; temporary capture profiles restore the complete prior rect. Acceptance: report failure honestly and verify restoration after capture. |
+| Locators and semantic tree | PARTIAL | Bounded DOM-derived WebView tree/details and CSS selectors. No browser role/label/placeholder/test-id targets or ephemeral browser snapshot refs. Acceptance: CSS target must resolve uniquely; no conversion claim for unsupported locator forms. |
+| Interactions | PARTIAL | Click, type, keypress, and scroll. No desktop fill/select/upload. WebKitGTK behavior varies by build. Acceptance: supported calls have bounded results; unsupported action is rejected before effects. |
+| Waits and assertions | PARTIAL | Waits: present, visible, hidden, enabled. Assertions: those states plus exact/contains text. No browser URL/count/value assertions or URL waits. Acceptance: each supported condition maps to its named semantic condition; other browser conditions fail preflight. |
+| Screenshots, masks, visual baselines | PARTIAL | WebView and managed exact-title X11 window screenshots, desktop baselines/comparisons/findings. Configured masks are narrow top-level DOM overlays, not PII redaction; full-page capture is not equivalent. Wayland window capture and native Windows capture are unsupported. Acceptance: label capture kind, disclose mask scope, and fail explicitly without safe backend. |
+| Tauri YAML workflow execution | UNSUPPORTED | No Tauri workflow adapter exists; `test_run_workflow` runs on the browser runner. Acceptance target: an explicit Tauri adapter preflights the bounded subset below and never falls back to Playwright. |
+| Workflow desktop failure screenshot | PARTIAL | Explicit `desktop_screenshot` is diagnostic failure evidence only, gated by config and an already-existing desktop service; not workflow execution. Acceptance: preserve browser behavior, masking, auth suppression, retention, and no-auto-start. |
+| Upload | UNSUPPORTED | No desktop upload action. Browser upload remains project-root-contained regular file, at most 20 MiB, to a unique file input; these constraints do not imply desktop upload support. |
+| Diagnostics | PARTIAL | Browser console/page/network/HTTP errors; desktop status, tree/details, and failure screenshots, but no equivalent desktop console/network diagnostic tool. Acceptance: do not return browser diagnostics for Tauri. |
+| Memory, evidence, reports | PARTIAL | Shared graph/reporting and separate desktop visual records; caller-authored findings. No automatic visual finding or desktop memory bridge. Workflow desktop failure screenshot is a separately linked artifact. Acceptance: each ref has correct provenance and retention protection; no automatic learning from pixels. |
+| Auth and security | PARTIAL | Explicit opt-in managed app; no arbitrary attach. Baseline save requires caller attestation plus server approver. Not equivalent to browser-origin/target-revision approval. Auth safe flows suppress failure capture; workflow capture never auto-starts a desktop session. Acceptance: preserve explicit gates and report only safe bounded statuses. |
+| Platforms | PARTIAL | Capability discovery; native WebView needs configured driver. X11 window capture needs exact title, `wmctrl`, and ImageMagick. Wayland window capture and Windows native window capture are unsupported. Acceptance: capability reports are truthful and unsupported paths fail without whole-desktop fallback. |
+
+### 12.1 Planned portable YAML workflow subset for Tauri
+
+This is a design target, not an implemented workflow backend. The initial adapter should accept CSS targets and `click`, `type`, `scroll`, and possibly `press` if the design gate approves a validated focus-bound equivalent. Current desktop keypress is global while workflow `press` targets an element; if a safe equivalent is not designed and implemented, exclude `press` and reject it during preflight. Candidate waits: `present`, `visible`, `hidden`, `enabled`; candidate assertions: those states plus `text` exact/contains. Reuse bounded preconditions, retries, per-step outcomes, and reporting only where the current contract has the same meaning.
+
+The design gate must explicitly decide (a) per-action Tauri authorization/approval. Existing desktop actions do not use the browser `authorize` path, so define a secure fail-closed rule and a denial/no-side-effect test; (b) targeted `press` semantics as above; and (c) route-based `start_screen`, `end_screen`, `navigate`, and URL assertion semantics. Provide reviewed Tauri equivalents or reject these requirements before any step side effects. Browser-only `fill`/`select`, URL/count/value conditions, role/label/placeholder/test-id locators, browser snapshot refs, upload, and browser diagnostics also fail Tauri preflight explicitly. Never silently run a step in the browser. Backend selection must be explicit; exact schema/tool naming requires a separate design gate before implementation.
+
+### 12.2 Playwright browser support
+
+- **P0:** Internally use Playwright's `Browser`, `BrowserContext`, `Page`, `Locator`, navigation, events, and assertions for the browser backend. Existing `browser_*` MCP tools map to browser APIs only.
+- **P0:** Browser locator specification supports role/name, label, placeholder, test ID, text, and scoped CSS. No arbitrary JavaScript evaluation via MCP by default.
 - **P1:** Expose opt-in `umb playwright endpoint` capability backed by a Playwright-launched browser server. Require compatible Playwright client versions and local binding/authentication. BrowserType `connect()` provides higher fidelity than attaching via CDP.
 - **P1:** Optionally attach UMB to an existing local Chromium browser via `connectOverCDP()` for diagnostics only; document fidelity limitations.
-- **P2:** Generate a standalone Playwright `.spec.ts` from a verified workflow; emitted source must be reviewed/owned by the project.
+- **P2:** Generate a standalone Playwright `.spec.ts` from a verified browser workflow; emitted source must be reviewed/owned by the project.
 
-Multiple MCP sessions may use the process's shared browser page. Globally serialize each browser operation (and each workflow/assertion run as a unit), but make clear that separate clients share page state and their sequences are not isolated or transactional. Clients should provide the current `expected_revision` on mutations where supported to reject stale changes. MCP sessions expire independently after five minutes without requests. The optional Playwright endpoint launches a separate browser and admits one external client at a time; project locking prevents it from running concurrently with the MCP server for the same project.
+Multiple MCP sessions may use the process's shared browser page. Globally serialize each browser operation (and each workflow/assertion run as a unit), but make clear that separate clients share page state and their sequences are not isolated or transactional. Clients should provide the current `expected_revision` on mutations where supported to reject stale changes. MCP sessions expire independently after five minutes without requests. The optional Playwright endpoint launches a separate browser and admits one external client at a time; project locking prevents it from running concurrently with the MCP server for the same project. Tauri session operations remain a separate owned-service lifecycle.
 
 ## 13. CLI and startup UX
 
@@ -537,7 +575,7 @@ Specific clients differ in the names and shapes of HTTP MCP configuration fields
 - Allowlist target origins; reject or require explicit permission for cross-origin navigation, downloads, file URLs, external uploads, and sensitive actions.
 - Designate potentially destructive operations (`delete`, `publish`, `pay`, `send`, `bulk edit`) as approval-gated based on workflow policy. Browser button labels are insufficient authority to perform them.
 - Treat website content as untrusted. Ignore webpage prompts instructing the agent to export secrets, access another project, or override MCP permissions. Host-agent must enforce same trust boundary.
-- Redact passwords, credentials, session tokens, PII, and sensitive form values from logs, network bodies, screenshots where practical, and SQLite.
+- Redact passwords, credentials, session tokens, PII, and sensitive form values from logs, network bodies, and SQLite. Desktop selector masks only overlay explicitly selected visible WebView DOM regions; they are not general PII/pixel redaction and do not cover native UI, all pixels, iframes, or shadow DOM.
 - Artifact path traversal protection; enforce quotas, retention, and secure permissions. Screenshots can still contain sensitive information; opt-in or redacted storage may be necessary.
 - Store authentication state only in protected, ignored local paths; support clean ephemeral contexts by default.
 - SQLite WAL, migrations, transactions, backups, integrity checks, and graceful shutdown. Do not enable unsafe raw SQL on MCP.
@@ -606,6 +644,10 @@ Expose guarded Playwright attach with one external proxy client at a time, profi
 
 **Exit gate:** External Playwright client can attach in a supported configuration without corrupting MCP session state.
 
+### Tauri useful-surface parity (separate planned roadmap)
+
+The Tauri backend is PARTIAL overall, while direct navigation/history and Tauri YAML workflow execution are UNSUPPORTED, and browser tabs are NOT_APPLICABLE, as detailed in §12. Phase 0 workflow failure screenshots are complete (`77d72eb`) and remain diagnostic-only: opt-in mode plus both config gates, existing service only, masked WebView path, no automatic session start, and auth-safe suppression. Next, approve an explicit adapter contract and reject unsupported steps in preflight; then implement only the bounded portable YAML subset in §12.1 with a managed Tauri fixture and cross-backend contract tests. Acceptance must include action-approval denial with no side effect and preflight rejection of unsupported `press` and route-based requirements before any effects. Additional locators, upload, diagnostics, and navigation/history are later gaps, not prerequisites to reorder ahead of workflow parity. Exact workflow schema/tool names require a design review before implementation.
+
 ## 18. Recommended repository architecture
 
 ```text
@@ -622,6 +664,10 @@ ui-memory-browser/
       src/adapter/
       src/snapshots/
       src/locators/
+    tauri-driver/
+      src/adapter/
+      src/selectors/
+      src/session-ownership/
     mcp-server/
       src/tools/browser/
       src/tools/memory/
@@ -646,7 +692,9 @@ ui-memory-browser/
       umb-knowledge/
   tests/
     fixtures/webapp/
-    integration/
+    fixtures/tauri-app/
+    integration/browser/
+    integration/tauri/
     security/
   docs/
 ```
@@ -677,4 +725,4 @@ Favor package-level boundaries so the SQLite backend or browser transport can be
 - Playwright BrowserType API — https://playwright.dev/docs/api/class-browsertype
 - Playwright authentication state guidance — https://playwright.dev/docs/auth
 
-**Final recommendation:** implement UMB as a locally launched TypeScript MCP server using Playwright for execution, SQLite for provenance-aware graph memory, and strictly declarative YAML for human-owned project knowledge. Optimize token usage with compact accessibility snapshots and ranked memory recall before adding visual models, embeddings, or sophisticated agent loops. The external agent does the reasoning; UMB makes actions and knowledge durable, repeatable, and explainable.
+**Final recommendation:** implement UMB as a locally launched TypeScript MCP service with Playwright for browser execution and a separate managed `tauri-driver` adapter for Tauri apps, backed by SQLite provenance-aware memory and strictly declarative YAML. Keep their semantics distinct; deliver only a reviewed useful-surface subset on Tauri rather than claiming complete Playwright parity. Optimize token usage with compact accessibility snapshots and ranked memory recall before adding visual models, embeddings, or sophisticated agent loops. The external agent does the reasoning; UMB makes supported actions and knowledge durable, repeatable, and explainable.

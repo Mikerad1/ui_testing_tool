@@ -1,8 +1,32 @@
-# Desktop Testing Implementation Plan
+# Tauri / Playwright Useful-Surface Parity Plan
 
 ## Objective
 
-Extend UMB without changing its existing browser contract. The first milestone targets a configured Tauri 2 binary on Linux: launch it through a managed WebDriver session, interact with its WebView, capture its verified OS window as PNG where the display backend permits, and deliver both MCP image content and truthful capture metadata. The tool observes and verifies; source edits and visual judgment remain with the connected coding agent.
+Close the gap between UMB's useful Playwright browser-testing/MCP/workflow surface and its Tauri app-testing surface, only where comparable semantics exist. Preserve `browser_*` as Playwright-backed browser tools. Tauri is a distinct, explicitly selected `tauri-driver` backend that controls only its owned configured app session. This is not a goal to reproduce the full Playwright API on desktop or claim unsupported browser semantics. The desktop-visual foundation below is already delivered; the forward roadmap prioritizes bounded YAML workflow execution on Tauri. Source edits and visual judgment remain with the connected coding agent.
+
+## Current parity gap matrix
+
+Status vocabulary: **FULL**, **PARTIAL**, **UNSUPPORTED**, **NOT_APPLICABLE**. Statuses describe the existing Tauri backend, not the target roadmap. Acceptance criteria are observable and backend-specific; parity is not claimed solely because two tools have similar names.
+
+| Capability | Current Tauri status | Observable current behavior / acceptance |
+|---|---|---|
+| Session lifecycle | PARTIAL | Configured Tauri binary plus owned `tauri-driver` session only; no arbitrary attach. Start/status/stop affect only the managed session. |
+| Direct navigation/history controls | UNSUPPORTED | No desktop MCP route, direct navigation, back, or forward controls. UI-driven app state changes are not direct navigation parity; preflight rejects route requirements unless an equivalent is approved. |
+| Browser tabs | NOT_APPLICABLE | A single managed native app is not a browser-tab model. Do not synthesize browser tab IDs or switching. |
+| Viewport/window size | PARTIAL | Native window resize can be refused by the backend; temporary capture sizing restores the full prior rect. Report refusal and verify restoration. |
+| Locators/semantic tree | PARTIAL | Bounded DOM-derived tree/details and CSS selectors only. No browser role/label/placeholder/test-id targets or snapshot refs. Unique CSS resolution is required. |
+| Interactions | PARTIAL | Click/type/keypress/scroll only; no desktop fill/select/upload. WebKitGTK behavior varies by build; unsupported actions must fail before effects. |
+| Waits/assertions | PARTIAL | present/visible/hidden/enabled waits and assertions, plus exact/contains text assertions. No URL/count/value conditions or URL waits; reject those rather than emulate. |
+| Screenshots/masks/visual evidence | PARTIAL | WebView and managed exact-title X11 screenshots, baselines/comparisons/findings. Configured selector masks are narrow DOM overlays, not PII redaction; no full-page equivalence. Wayland window capture and Windows native window capture unsupported. |
+| Tauri YAML workflow execution | UNSUPPORTED | No Tauri workflow adapter exists; `test_run_workflow` remains browser-only. |
+| Workflow desktop failure screenshot | PARTIAL | `desktop_screenshot` is opt-in diagnostic evidence only; not desktop workflow execution. |
+| Upload | UNSUPPORTED | No desktop upload action. Browser upload remains a separate project-root-contained regular-file operation (<=20 MiB) to a unique file input. |
+| Diagnostics | PARTIAL | Desktop status/tree/details/failure screenshot exist; no equivalent desktop console/network errors tool. |
+| Memory/evidence/reporting | PARTIAL | Shared graph/reporting and separate desktop visual evidence; caller-authored findings only. No automatic visual finding or desktop memory bridge; screenshot evidence has its own retained artifact ref. |
+| Auth/security | PARTIAL | Explicit managed app opt-in and baseline server approver plus caller attestation; not browser-origin/target-revision approval parity. Auth safe flows suppress failure capture; workflow failure capture never auto-starts desktop. |
+| Platforms | PARTIAL | Capability discovery; WebView needs configured driver. X11 window capture needs exact title, `wmctrl`, and ImageMagick. Wayland window capture and Windows native window capture unsupported; fail without whole-desktop fallback. |
+
+The PRD's execution-backend matrix defines the same status vocabulary and portable workflow semantics. A capability becomes FULL only after matching observable contract tests and supported-runtime evidence; full Playwright API parity is explicitly out of scope.
 
 ## Repository fit and boundaries
 
@@ -20,9 +44,9 @@ Extend UMB without changing its existing browser contract. The first milestone t
 
 Oracle Gate 6A passed for lifecycle safety. The original center-only pixel checks were insufficient, so the canary was strengthened to calibrate from a unique connected green control component, validate plausible X/Y scale, verify every pixel in inset target/control interiors (opaque `[0,0,0,255]` for the target), and aggregate cleanup failures without hiding the primary test error. Oracle Gate 6B passed this controlled-pixel acceptance: a real Linux Tauri/WebKitGTK run captured WebView and process-owned X11 through the production `serve()` MCP route; persisted PNGs passed interior pixel checks, and MCP image blocks were byte-identical to the referenced artifacts with matching SHA-256 and byte length. This proves only the controlled inset interiors and capture paths, not arbitrary screen content. The dedicated `test:desktop-mask-pixels-native` requires a reachable X11 display, `tauri-driver`, `WebKitWebDriver`, `wmctrl`, and ImageMagick; it does not run as part of ordinary `npm test`. No general PII-redaction claim is made; the exclusions above remain.
 
-## Phased delivery
+## Historical desktop-visual delivery plan (foundation now implemented)
 
-### Phase 1 — Native Tauri control (P0)
+### Historical Phase 1 — Native Tauri control (foundation delivered)
 
 1. Add strict optional desktop configuration for the target project, approved build command, Tauri binary, driver executable, readiness timeout, window identity, and capture mode.
 2. Add read-only Tauri/Angular discovery and a capability report, including missing Linux driver/setup diagnostics.
@@ -32,7 +56,7 @@ Oracle Gate 6A passed for lifecycle safety. The original center-only pixel check
 
 **Exit evidence:** unit tests cover project discovery, configuration safety, selector/error behavior, and ownership cleanup; an opt-in local fixture demonstrates an actual Tauri binary and WebDriver. A browser renderer preview is not accepted as native validation.
 
-### Phase 2 — Real screenshots and MCP images (P0, critical)
+### Historical Phase 2 — Real screenshots and MCP images (foundation delivered)
 
 1. Detect X11/Wayland and report available capture backends.
 2. Capture only a window positively associated with the managed session. X11 window-targeted capture is eligible; Wayland must use an explicitly supported/consented portal path or fail with an actionable permission/capability error. Never fall back to a whole-desktop image.
@@ -41,7 +65,7 @@ Oracle Gate 6A passed for lifecycle safety. The original center-only pixel check
 
 **Exit evidence:** an MCP stdio test checks the decoded PNG image block and metadata; display-specific integration checks run only when a real matching display and driver are available. A vision-capable runtime check remains environment-dependent.
 
-### Phase 3 — Visual improvement and verification loop (P0)
+### Historical Phase 3 — Visual improvement and verification loop (foundation delivered)
 
 1. Return bounded UI tree and targeted styles/geometry alongside screenshot metadata.
 2. Assemble a review bundle for the agent; do not fabricate model findings or infer visual quality from a pixel-difference score.
@@ -51,7 +75,7 @@ Oracle Gate 6A passed for lifecycle safety. The original center-only pixel check
 
 **Exit evidence:** geometry detects deterministic overflow where supported; MCP tests cover baseline/finding lifecycle behavior, evidence integrity, and all-or-none image bundles. A real vision-model defect/fix review is not claimed from text-only tests.
 
-### Phase 4 — P1 hardening and extension
+### Historical Phase 4 — P1 hardening and extension (implemented items recorded below)
 
 The opt-in selector privacy control and documented X11/Wayland/Windows compatibility boundaries are implemented; Wayland window capture and Windows remain unsupported. Existing memory reuse is delivered through the normal `memory_save` path, with no desktop-specific memory tool or schema. Visual profiles support bounded `window_size: {width, height}` for capture only, restoring the complete prior window rect afterward; other fields including `theme` remain persisted metadata and do not mutate app state. The explicit `desktop_assert` failure-screenshot path and reference-aware age retention are implemented. Keep Jira and the memory architecture unchanged.
 
@@ -60,6 +84,44 @@ The opt-in selector privacy control and documented X11/Wayland/Windows compatibi
 **Failure screenshots:** `desktop.visual.capture_on_failure` defaults to `false`. The explicit `desktop_assert` tool supports bounded semantic `present`, `visible`, `hidden`, `enabled`, and exact/contains text assertions. Only a completed FAIL can trigger an opt-in WebView screenshot; PASS, disabled capture, invalid inputs, and assertion errors do not capture. Capture failures preserve the assertion FAIL with a bounded status code. This diagnostic creates no finding or memory assertion and uses the normal private artifact and MCP image-delivery policies. General content is not automatically redacted; only explicitly configured desktop selector masks affect supported screenshot pixels, and those masks are not general PII redaction.
 
 **Opt-in native fixture:** `npm run test:desktop-native` builds `tests/fixtures/tauri-app` and exercises the existing `DesktopService` direct `tauri-driver` path against a real Tauri WebView. The ordinary `npm test` skips this environment-dependent acceptance. Install Rust/Cargo and WebKitWebDriver, then install the driver with `cargo install tauri-driver --locked`. The fixture's Tauri Rust dependencies are declared in its Cargo package/lockfile; the native executables are platform prerequisites rather than npm dependencies. When a reachable X11 display, `wmctrl`, and ImageMagick `import` are available, the test also attempts `kind: window`; otherwise it reports that only the WebView capture was tested. Wayland window capture remains unsupported, and a real app test does not establish vision-model inspection.
+
+## Forward parity roadmap (not yet implemented)
+
+The phases below supersede the old assumption that desktop visual tools alone close the Tauri testing gap. The earlier delivery phases remain historical evidence for the desktop-visual foundation, not claims that workflow parity is complete.
+
+### Phase 0 — Workflow failure screenshot evidence (complete)
+
+Commit `77d72eb` added explicit `on_failure.capture: [desktop_screenshot]` support. Both `desktop.enabled` and `desktop.visual.capture_on_failure` are required; capture uses only an already-existing per-MCP-session service and never starts a desktop session. It reuses masked `DesktopService.capture('webview')`; configured masks remain narrow DOM overlays, not general PII redaction. Auth safe flows continue to suppress capture. Browser screenshots remain browser-backed and browser-first in ordinary workflow evidence; desktop screenshot artifacts have separate evidence/retention protection. This is diagnostic evidence only, not Tauri workflow execution.
+
+**Acceptance evidence:** schema accepts/rejects the explicit mode; config and service-existence gates prevent incidental capture/start; mask-aware service path is used; auth capture remains suppressed; browser output is unchanged; best-effort statuses, atomic evidence links, cleanup, and retention refs are covered by focused tests.
+
+### Phase 1 — Documented gap matrix (current)
+
+Maintain the PRD and this plan's capability matrices with FULL/PARTIAL/UNSUPPORTED/NOT_APPLICABLE status, actual observable semantics, and acceptance criteria. Keep Playwright/browser APIs distinct from the native Tauri surface. Record WebKitGTK build variation, Wayland window capture and Windows native capture as limitations, not implied future guarantees.
+
+**Acceptance gate:** reviewers can identify the current implementation, the planned subset, and unsupported behaviors without reading tool names as claims of parity. No source/schema changes belong to this documentation phase.
+
+### Phase 2 — Tauri workflow adapter contract and design gate (not started)
+
+Design an explicitly selected Tauri workflow adapter without changing the existing browser runner or silently falling back between backends. Specify preflight semantics, target forms, step outcomes, bounded errors, evidence/artifact handling, session ownership, and how unsupported steps are rejected before any side effect. Keep exact schema and tool names open until the design is reviewed. Run an Oracle gate on the contract and safety boundaries before implementation.
+
+The design gate must explicitly decide: (a) per-action Tauri authorization/approval. Existing desktop actions do not use browser `authorize`, so define a secure fail-closed rule and a denial/no-side-effect test; (b) workflow `press` semantics. Workflow `press` targets an element while current desktop keypress is global; approve a validated focus-bound equivalent or exclude `press` and preflight-reject it; and (c) route-based `start_screen`, `end_screen`, `navigate`, and URL assertion semantics. Define reviewed Tauri equivalents or reject them before any step side effects.
+
+Initial portable candidate subset: CSS targets; `click`, `type`, `scroll`, and possibly `press` only after the focus-bound semantic is approved; waits for `present`, `visible`, `hidden`, `enabled`; assertions for those states and text exact/contains. Reuse bounded preconditions, retries, and reporting only where the current contract has equivalent meaning. Browser-only navigation, route contracts, `fill`/`select`, URL/count/value conditions, role/label/placeholder/test-id locators, browser snapshot refs, upload, and browser diagnostics must fail Tauri preflight explicitly unless a specific native equivalent passes the design gate. No Playwright fallback.
+
+**Acceptance gate:** approved adapter contract lists every accepted step and rejects every unsupported step before side effects; backend selection is explicit; no auto-start is introduced; browser tool signatures and behavior remain untouched. Tests prove action-approval denial has no side effect and unsupported `press` and route-based preconditions/postconditions/navigation/URL assertions fail preflight before any workflow step effects.
+
+### Phase 3 — Bounded YAML Tauri workflow execution (not started)
+
+Implement the approved adapter for the Phase 2 subset against an already-owned managed Tauri session. Reuse deterministic workflow records and report structure where compatible, but keep browser and desktop execution adapters separate. Preserve action approval boundaries, sensitive-variable handling, retries/timeouts, artifact safety/retention, masked WebView capture, and auth-flow capture suppression. Do not start a session merely to run or capture workflow failure evidence.
+
+**Acceptance gate:** cross-backend contract tests show the same result shape for supported equivalent operations; Tauri fixture tests exercise every supported action/wait/assertion and verify text readback; approval-denial tests prove no action occurs; unsupported `press` and route-based workflow requirements fail preflight before effects; negative tests prove other unsupported browser-only steps never reach the browser runner. Run against available WebKitGTK builds and record runtime-specific failures rather than generalizing one build. The browser workflow suite must remain unchanged and pass.
+
+### Later gaps — prioritize only after workflow gate
+
+Investigate additional locator forms, desktop upload, desktop diagnostics, and direct navigation/history controls only where a meaningful, secure native semantic exists. Upload is a known isolated gap but is intentionally lower priority than the approved YAML workflow parity work. Do not equate a native window with browser tabs or claim a desktop console/network equivalent without observable support and tests.
+
+**Acceptance gate:** each later feature gets an explicit capability contract, safe failure behavior, and backend-specific fixture coverage before being marked PARTIAL/FULL. Keep mobile, other desktop frameworks, arbitrary process attachment, and complete Playwright API parity out of scope.
 
 ## Verification budget
 
@@ -90,4 +152,4 @@ P0 work is delivered in sequence and is not declared complete merely because MCP
 
 **Desktop learning reuse:** this is an explicit two-step caller workflow, not automatic finding writeback. First use the desktop evidence tools and have the caller actually review the images; after choosing to author reusable learning, make a separate `memory_save({content, title?})` call with a bounded caller-authored summary, optionally mentioning finding/comparison IDs. Finding report/update, a resolved status/assessment, baseline approval, and comparison metrics do not prove human approval or image review and must not trigger writes. `memory_save` remains governed by the existing per-project `memory.persistent_learning_writes` opt-in, LearningWriter redaction and NLP readiness, and current project/environment scope. The result is an `agent_learned` note rather than a `verified_fact`; no structured graph relationship is created, and any IDs appear only in note text. Do not persist screenshot bytes or raw screen content, or infer quality from pixel metrics. The focused stdio MCP test exercises baseline, finding, comparison, resolution, then the separate explicit save and normal search/get retrieval, including configured-secret redaction. Default desktop fixture mode continues to leave persistent writes disabled.
 
-**Still unverified or not implemented:** interaction acceptance passes on Fedora 44/WebKitGTK 2.54.1 in a disposable container, while this host's 2.52.5 runtime still rejects click and W3C pointer Actions; do not generalize the passing runtime to other distro/build variants. The visual before/after path passed with a temporary injected contrast defect and an inspected same-state MCP comparison, but there is no persistent defect/fix fixture or shipped application fix acceptance. Linux Wayland portal capture and Windows are unsupported. The release packaging regression test now inspects the generated bundle and rejects the Tauri acceptance fixture or compiled `tauri-acceptance-fixture` binary. There is no automatic desktop memory bridge; reusable learning requires the separate caller-authored `memory_save` step above. Workflow failure capture now supports explicit `on_failure.capture: [desktop_screenshot]`; it is opt-in and best-effort, requires both `desktop.enabled` and `desktop.visual.capture_on_failure`, and only uses an already-created per-MCP-session desktop service (it never starts a service/session). Its artifact ref is separate from the browser `screenshot` ref and the existing masked WebView `DesktopService.capture('webview')` path is used. Auth-flow safe outcomes continue to disable all failure capture. Age retention is opt-in through `desktop.visual.retain_artifacts_max_age_days` (absent means disabled); pruning enumerates project-wide refs across environments and history and shares the serve-wide desktop operation queue with artifact/link writers. `desktop_assert` failure screenshots are opt-in through `desktop.visual.capture_on_failure`; they are diagnostic WebView artifacts, not persisted findings or memory assertions. Remaining platform limitations and the lack of an automatic desktop memory bridge remain tracked; they are not completed P0 claims.
+**Still unverified or not implemented:** there is no YAML workflow execution adapter for Tauri; `test_run_workflow` still uses the browser runner and `desktop_screenshot` is failure evidence only. Interaction acceptance passes on Fedora 44/WebKitGTK 2.54.1 in a disposable container, while this host's 2.52.5 runtime still rejects click and W3C pointer Actions; do not generalize the passing runtime to other distro/build variants. The visual before/after path passed with a temporary injected contrast defect and an inspected same-state MCP comparison, but there is no persistent defect/fix fixture or shipped application fix acceptance. Linux Wayland portal capture and Windows native window capture are unsupported. The release packaging regression test now inspects the generated bundle and rejects the Tauri acceptance fixture or compiled `tauri-acceptance-fixture` binary. There is no automatic desktop memory bridge; reusable learning requires the separate caller-authored `memory_save` step above. Workflow failure capture now supports explicit `on_failure.capture: [desktop_screenshot]`; it is opt-in and best-effort, requires both `desktop.enabled` and `desktop.visual.capture_on_failure`, and only uses an already-created per-MCP-session desktop service (it never starts a service/session). Its artifact ref is separate from the browser `screenshot` ref and the existing masked WebView `DesktopService.capture('webview')` path is used. Auth-flow safe outcomes continue to disable all failure capture. Age retention is opt-in through `desktop.visual.retain_artifacts_max_age_days` (absent means disabled); pruning enumerates project-wide refs across environments and history and shares the serve-wide desktop operation queue with artifact/link writers. `desktop_assert` failure screenshots are opt-in through `desktop.visual.capture_on_failure`; they are diagnostic WebView artifacts, not persisted findings or memory assertions. Remaining platform limitations and the lack of an automatic desktop memory bridge remain tracked; they are not completed P0 claims.
