@@ -6,6 +6,7 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import {Store,type DesktopArtifactRecord,type DesktopBaselineRecord,type DesktopComparisonRecord,type DesktopFindingRecord} from '../src/memory/store.js';
 import {migrateDesktopVisualLoopV18} from '../src/memory/schema-v18.js';
+import {testWriter} from './helpers/learning.js';
 
 const artifact=(name:string):DesktopArtifactRecord=>({ref:`.umb-managed/desktop/${name}.png`,sha256:'a'.repeat(64),bytes:1024});
 function baseline(override:Partial<DesktopBaselineRecord>={}):DesktopBaselineRecord{return{
@@ -57,11 +58,14 @@ test('v18 visual records are scoped, immutable and use baseline CAS plus finding
     const reported=store.createDesktopVisualFinding(finding()) as any;
     assert.equal(reported.status,'open');assert.equal(reported.state_version,1);
     const before=store.createDesktopVisualComparison(comparison({baselineRevision:2,findingIds:[reported.id]})) as any;
-    otherEnvironment.saveDesktopBaseline(baseline({artifact:artifact('staging-baseline')}));
-    otherEnvironment.createDesktopVisualFinding(finding({screenshot:artifact('staging-finding')}));
-    otherEnvironment.createDesktopVisualComparison(comparison({after:artifact('staging-after'),diff:artifact('staging-diff')}));
-    const refs=store.listDesktopArtifactReferences();
-    assert.deepEqual(new Set(refs),new Set([artifact('baseline').ref,'artifacts/.umb-managed/desktop/baseline-2.png',artifact('finding').ref,artifact('after').ref,artifact('diff').ref,artifact('staging-baseline').ref,artifact('staging-finding').ref,artifact('staging-after').ref,artifact('staging-diff').ref]));
+     otherEnvironment.saveDesktopBaseline(baseline({artifact:artifact('staging-baseline')}));
+     otherEnvironment.createDesktopVisualFinding(finding({screenshot:artifact('staging-finding')}));
+     otherEnvironment.createDesktopVisualComparison(comparison({after:artifact('staging-after'),diff:artifact('staging-diff')}));
+     const localWorkflow=await testWriter(store).propose({observation_id:'desktop-retention-local',type:'screen',stable_key:'desktop-retention-local',display_name:'Local retention subject'}) as any,localWorkflowRun=store.createRun('session');store.addEvidence({run_id:localWorkflowRun,subject_node_id:localWorkflow.id,kind:'workflow_desktop_screenshot',outcome:'failed',artifact_ref:artifact('workflow-local').ref});store.createWorkflowStepAttempt({runId:localWorkflowRun,stepId:'retained-desktop',ordinal:1,attempt:1,action:'assert'});store.finishWorkflowStepAttempt({runId:localWorkflowRun,stepId:'retained-desktop',attempt:1,status:'failed',durationMs:0,artifactRef:artifact('attempt-local').ref});
+     const stagingWorkflow=await testWriter(otherEnvironment).propose({observation_id:'desktop-retention-staging',type:'screen',stable_key:'desktop-retention-staging',display_name:'Staging retention subject'}) as any,stagingWorkflowRun=otherEnvironment.createRun('session');otherEnvironment.addEvidence({run_id:stagingWorkflowRun,subject_node_id:stagingWorkflow.id,kind:'workflow_desktop_screenshot',outcome:'failed',artifact_ref:artifact('workflow-staging').ref});otherEnvironment.createWorkflowStepAttempt({runId:stagingWorkflowRun,stepId:'retained-desktop',ordinal:1,attempt:1,action:'assert'});otherEnvironment.finishWorkflowStepAttempt({runId:stagingWorkflowRun,stepId:'retained-desktop',attempt:1,status:'failed',durationMs:0,artifactRef:artifact('attempt-staging').ref});
+     const foreignWorkflow=await testWriter(otherProject).propose({observation_id:'desktop-retention-foreign',type:'screen',stable_key:'desktop-retention-foreign',display_name:'Foreign retention subject'}) as any,foreignWorkflowRun=otherProject.createRun('session');otherProject.addEvidence({run_id:foreignWorkflowRun,subject_node_id:foreignWorkflow.id,kind:'workflow_desktop_screenshot',outcome:'failed',artifact_ref:artifact('workflow-foreign').ref});otherProject.createWorkflowStepAttempt({runId:foreignWorkflowRun,stepId:'retained-desktop',ordinal:1,attempt:1,action:'assert'});otherProject.finishWorkflowStepAttempt({runId:foreignWorkflowRun,stepId:'retained-desktop',attempt:1,status:'failed',durationMs:0,artifactRef:artifact('attempt-foreign').ref});
+     const refs=store.listDesktopArtifactReferences();
+      assert.deepEqual(new Set(refs),new Set([artifact('baseline').ref,'artifacts/.umb-managed/desktop/baseline-2.png',artifact('finding').ref,artifact('after').ref,artifact('diff').ref,artifact('staging-baseline').ref,artifact('staging-finding').ref,artifact('staging-after').ref,artifact('staging-diff').ref,artifact('workflow-local').ref,artifact('workflow-staging').ref,artifact('attempt-local').ref,artifact('attempt-staging').ref]));
     assert.deepEqual(before.finding_ids,[reported.id]);
     assert.throws(()=>store!.updateDesktopVisualFinding({id:reported.id,expectedVersion:1,status:'resolved'}),/assessment/);
     assert.throws(()=>store!.updateDesktopVisualFinding({id:reported.id,expectedVersion:1,status:'resolved',assessment:'Looks fixed',comparisonId:'00000000-0000-4000-8000-000000000001'}),/linked/);

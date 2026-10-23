@@ -50,7 +50,7 @@ const workflowStepSchema=z.union([
   assertSteps[0]!,assertSteps[1]!,assertSteps[2]!,assertSteps[3]!,assertSteps[4]!,
 ]);
 export {workflowStepSchema};
-const baseWorkflow=z.object({schema_version:z.literal(1),kind:z.literal('workflow'),id:safeId,name:z.string().min(1).max(300),start_screen:screenRef.optional(),end_screen:screenRef.optional(),requires:z.object({role:roleRef.optional(),environment:z.array(z.string().min(1).max(100)).max(20).optional()}).strict().optional(),variables:z.record(z.string().regex(/^[A-Z_][A-Z0-9_]{0,127}$/),z.object({from_env:z.string().regex(/^[A-Z_][A-Z0-9_]{0,127}$/),sensitive:z.boolean().default(true)}).strict()).optional(),preconditions:z.array(assertion).max(20).optional(),steps:z.array(workflowStepSchema).min(1).max(100),on_failure:z.object({capture:z.array(z.enum(['snapshot','screenshot','console_errors'])).max(3).optional(),stop:z.literal(true).default(true)}).strict().optional()}).strict();
+const baseWorkflow=z.object({schema_version:z.literal(1),kind:z.literal('workflow'),id:safeId,name:z.string().min(1).max(300),start_screen:screenRef.optional(),end_screen:screenRef.optional(),requires:z.object({role:roleRef.optional(),environment:z.array(z.string().min(1).max(100)).max(20).optional()}).strict().optional(),variables:z.record(z.string().regex(/^[A-Z_][A-Z0-9_]{0,127}$/),z.object({from_env:z.string().regex(/^[A-Z_][A-Z0-9_]{0,127}$/),sensitive:z.boolean().default(true)}).strict()).optional(),preconditions:z.array(assertion).max(20).optional(),steps:z.array(workflowStepSchema).min(1).max(100),on_failure:z.object({capture:z.array(z.enum(['snapshot','screenshot','desktop_screenshot','console_errors'])).max(4).optional(),stop:z.literal(true).default(true)}).strict().optional()}).strict();
 export const workflowSchema=baseWorkflow.superRefine((workflow,ctx)=>{
   const input=workflow as any;const ids=new Set<string>();for(const step of input.steps){if(ids.has(step.id))ctx.addIssue({code:'custom',path:['steps'],message:'Step IDs must be unique'});ids.add(step.id);}
   const refs=new Set<string>();
@@ -81,7 +81,7 @@ export type WorkflowStep=StepBase & (
   | {action:'assert';condition:'url_matches';expected:string}
   | {action:'assert';condition:'count';target:WorkflowTarget;expected:number}
 );
-export type WorkflowDocument={schema_version:1;kind:'workflow';id:string;name:string;start_screen?:string;end_screen?:string;requires?:{role?:string;environment?:string[]};variables?:Record<string,{from_env:string;sensitive:boolean}>;preconditions?:WorkflowAssertion[];steps:WorkflowStep[];on_failure?:{capture?:('snapshot'|'screenshot'|'console_errors')[];stop:true}};
+export type WorkflowDocument={schema_version:1;kind:'workflow';id:string;name:string;start_screen?:string;end_screen?:string;requires?:{role?:string;environment?:string[]};variables?:Record<string,{from_env:string;sensitive:boolean}>;preconditions?:WorkflowAssertion[];steps:WorkflowStep[];on_failure?:{capture?:('snapshot'|'screenshot'|'desktop_screenshot'|'console_errors')[];stop:true}};
 export function parseWorkflowDocument(input:unknown):WorkflowDocument{return workflowSchema.parse(input) as WorkflowDocument;}
 export function parseStoredWorkflowDocument(input:unknown):WorkflowDocument{
   if(!input||typeof input!=='object'||Array.isArray(input))return parseWorkflowDocument(input);

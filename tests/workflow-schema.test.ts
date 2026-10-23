@@ -14,6 +14,7 @@ test('accepts a strict login workflow and resolves declared env values only for 
   const values=resolveWorkflowVariables(workflow,{APP_USER:'local-user',APP_PASSWORD:'local-password'});assert.deepEqual(values,{USERNAME:'local-user',PASSWORD:'local-password'});
 });
 test('accepts PRD-style prefixed screen and role references',()=>{const doc=validDoc() as any;doc.start_screen='screen:login';doc.end_screen='screen:home';doc.requires.role='role:member';doc.steps[1].target.screen='screen:login';assert.equal(workflowSchema.safeParse(doc).success,true);});
+test('accepts the explicit desktop failure capture mode and rejects unknown modes',()=>{const doc=validDoc() as any;doc.on_failure.capture=['desktop_screenshot'];assert.equal(workflowSchema.safeParse(doc).success,true);assert.equal(parseWorkflowDocument(doc).on_failure?.capture?.[0],'desktop_screenshot');doc.on_failure.capture=['desktop'];rejects(doc);});
 test('rejects invalid action discriminants, irrelevant fields, IDs, and missing action fields',()=>{
   for(const mutate of [
     (x:any)=>x.steps[0].action='launch',

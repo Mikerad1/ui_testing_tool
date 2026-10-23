@@ -449,7 +449,9 @@ export class Store {
       UNION SELECT screenshot_ref AS ref FROM desktop_visual_findings WHERE project_id=?
       UNION SELECT after_ref AS ref FROM desktop_visual_comparisons WHERE project_id=?
       UNION SELECT diff_ref AS ref FROM desktop_visual_comparisons WHERE project_id=?
-    `).all(this.projectId,this.projectId,this.projectId,this.projectId) as Array<{ref:string}>;
+      UNION SELECT artifact_ref AS ref FROM evidence WHERE project_id=? AND kind='workflow_desktop_screenshot' AND artifact_ref IS NOT NULL
+      UNION SELECT artifact_ref AS ref FROM workflow_step_attempts WHERE project_id=? AND artifact_ref IS NOT NULL
+    `).all(this.projectId,this.projectId,this.projectId,this.projectId,this.projectId,this.projectId) as Array<{ref:string}>;
     return rows.map(row=>row.ref);
   }
   createDesktopVisualComparison(input:DesktopComparisonRecord):Record<string,unknown>{
@@ -1175,14 +1177,22 @@ export class Store {
   verifyWorkflowExport(workflowId:string,runId:string){return this.#database.transaction(()=>{const eligible=this.workflowExportEligibility(workflowId,runId);if(!eligible)return false;this.#database.prepare('INSERT INTO workflow_export_verifications(project_id,workflow_node_id,snapshot_hash,run_id,verified_at) VALUES(?,?,?,?,?) ON CONFLICT(project_id,workflow_node_id,snapshot_hash) DO UPDATE SET run_id=excluded.run_id,verified_at=excluded.verified_at').run(this.projectId,eligible.workflowId,eligible.snapshotHash,eligible.runId,new Date().toISOString());return true;})();}
     hasWorkflowExportVerification(workflowId:string){const node=this.currentYamlWorkflow(workflowId),snapshotHash=this.workflowSnapshotHash(workflowId);if(!node||!snapshotHash)return false;return Boolean(this.#database.prepare(`SELECT 1 FROM workflow_export_verifications v JOIN runs r ON r.project_id=v.project_id AND r.id=v.run_id WHERE v.project_id=? AND v.workflow_node_id=? AND v.snapshot_hash=? AND r.memory_environment=? AND r.workflow_id=v.workflow_node_id AND r.workflow_snapshot_hash=v.snapshot_hash AND r.status='passed' AND EXISTS(SELECT 1 FROM evidence e WHERE e.project_id=v.project_id AND e.run_id=v.run_id AND e.subject_node_id=v.workflow_node_id AND e.kind='workflow' AND e.outcome='passed')`).get(this.projectId,node.id,snapshotHash,this.memoryEnvironment));}
   finishRun(id:string,status='finished'){return this.#database.prepare('UPDATE runs SET status=?,finished_at=? WHERE id=? AND project_id=? AND memory_environment=?').run(status,new Date().toISOString(),id,this.projectId,this.memoryEnvironment).changes>0;}
-   addEvidence(input:{run_id:string;subject_node_id:string;kind:string;outcome:string;metadata?:unknown;artifact_ref?:string}){
-    const id=randomUUID(),metadata=JSON.stringify(input.metadata??{});
-    if(metadata.length>4096||input.kind.length>100||input.outcome.length>100||input.artifact_ref&&input.artifact_ref.length>1000)throw Error('Evidence field too long');
-    const run=this.#database.prepare('SELECT 1 FROM runs WHERE project_id=? AND memory_environment=? AND id=?').get(this.projectId,this.memoryEnvironment,input.run_id),subject=this.#database.prepare('SELECT 1 FROM nodes WHERE project_id=? AND environment=? AND id=?').get(this.projectId,this.memoryEnvironment,input.subject_node_id);
-    if(!run||!subject)throw Error('Evidence run and subject must belong to this Store environment');
-    this.#database.prepare('INSERT INTO evidence VALUES(?,?,?,?,?,?,?,?,?)').run(id,this.projectId,input.run_id,input.subject_node_id,input.kind,input.outcome,metadata,input.artifact_ref??null,new Date().toISOString());
-    return this.#database.prepare('SELECT * FROM evidence WHERE id=?').get(id) as Evidence;
-  }
+    addEvidence(input:{run_id:string;subject_node_id:string;kind:string;outcome:string;metadata?:unknown;artifact_ref?:string}){
+     const id=randomUUID(),metadata=JSON.stringify(input.metadata??{});
+     if(metadata.length>4096||input.kind.length>100||input.outcome.length>100||input.artifact_ref&&input.artifact_ref.length>1000)throw Error('Evidence field too long');
+     const run=this.#database.prepare('SELECT 1 FROM runs WHERE project_id=? AND memory_environment=? AND id=?').get(this.projectId,this.memoryEnvironment,input.run_id),subject=this.#database.prepare('SELECT 1 FROM nodes WHERE project_id=? AND environment=? AND id=?').get(this.projectId,this.memoryEnvironment,input.subject_node_id);
+     if(!run||!subject)throw Error('Evidence run and subject must belong to this Store environment');
+     this.#database.prepare('INSERT INTO evidence VALUES(?,?,?,?,?,?,?,?,?)').run(id,this.projectId,input.run_id,input.subject_node_id,input.kind,input.outcome,metadata,input.artifact_ref??null,new Date().toISOString());
+     return this.#database.prepare('SELECT * FROM evidence WHERE id=?').get(id) as Evidence;
+    }
+    addWorkflowTerminalEvidence(input:{run_id:string;subject_node_id:string;outcome:string;metadata:unknown;artifact_ref?:string;desktop_artifact_ref:string}){
+      return this.#database.transaction(()=>{
+        const workflow=this.addEvidence({run_id:input.run_id,subject_node_id:input.subject_node_id,kind:'workflow',outcome:input.outcome,metadata:input.metadata,...(input.artifact_ref?{artifact_ref:input.artifact_ref}:{})});
+        const desktop=this.addEvidence({run_id:input.run_id,subject_node_id:input.subject_node_id,kind:'workflow_desktop_screenshot',outcome:input.outcome,metadata:{artifact_kind:'desktop_screenshot'},artifact_ref:input.desktop_artifact_ref});
+        return{workflow,desktop};
+      })();
+    }
+    clearWorkflowAttemptArtifactReferences(runId:string,artifactRef:string){return this.#database.transaction(()=>{const changed=this.#database.prepare("UPDATE workflow_step_attempts SET artifact_ref=NULL WHERE project_id=? AND run_id=? AND artifact_ref=? AND status IN ('failed','interrupted')").run(this.projectId,runId,artifactRef).changes;return changed;})();}
   recordAssertion(input:{session_id:string;subject_node_id:string;passed:boolean;observed_count:number;artifact_ref?:string|null;actions?:unknown}){return this.#database.transaction(()=>{if(!this.get(input.subject_node_id))throw Error('Assertion subject must belong to this Store environment');const id=this.createRun(input.session_id),metadata=JSON.stringify({observed_count:input.observed_count,actions:input.actions??[]});if(metadata.length>4096)throw Error('Evidence metadata too large');const evidenceId=randomUUID(),now=new Date().toISOString();this.#database.prepare('INSERT INTO evidence VALUES(?,?,?,?,?,?,?,?,?)').run(evidenceId,this.projectId,id,input.subject_node_id,'assertion',input.passed?'passed':'failed',metadata,input.artifact_ref??null,now);this.finishRun(id,input.passed?'passed':'failed');return{id,evidence:this.#database.prepare('SELECT * FROM evidence WHERE id=?').get(evidenceId)};})();}
     addAssertionDiagnostics(input:{runId:string;evidenceId:string;roleCounts:Record<string,number>;capture:{status:'captured'|'failed';code?:string}}){
       if(!input||typeof input.runId!=='string'||!input.runId||typeof input.evidenceId!=='string'||!input.evidenceId)throw Error('Invalid assertion evidence identity');
