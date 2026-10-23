@@ -1,16 +1,15 @@
-import type { ElementHandle } from 'playwright';
 import type { Store } from '../memory/store.js';
-import type { BrowserController } from '../browser/controller.js';
+import type { BrowserAdapter, CapturedBrowserApproval } from '../browser/adapter.js';
 import { parseStoredWorkflowDocument, resolveWorkflowVariables, type WorkflowDocument, type WorkflowStep } from './contract.js';
 import { createBrowserWorkflowDriver, type WorkflowDriver, type WorkflowExecutableStep, type WorkflowFailureCaptureMode, type WorkflowWaitStep } from './browser-driver.js';
 
 const RUN_LIMIT_MS=5*60_000;
 type SessionLike={id:string;closed:boolean};
-type Approval={handle:ElementHandle<HTMLElement>;release:()=>Promise<void>};
+type Approval=CapturedBrowserApproval;
 type DesktopRedaction={applied:boolean;method:string;scope:string;warning:string};
 type DesktopFailureCapture={status:'captured';artifactRef:string;redaction:DesktopRedaction}|{status:'disabled'|'unavailable'|'capture_failed'|'cleanup_failed'};
 export type WorkflowRunnerOptions={store:Store;session:SessionLike;workflowId:string;backend?:'browser'|'tauri';role?:string;environment?:string;knowledgeRoot?:string;env?:NodeJS.ProcessEnv;disableFailureCapture?:boolean;safeOutcome?:boolean;captureDesktopFailure?:()=>Promise<DesktopFailureCapture>;removeDesktopFailureArtifact?:(ref:string)=>Promise<'removed'|'unavailable'|'failed'>};
-type RunnerOptions=WorkflowRunnerOptions&{browser:BrowserController;expectedRevision:number;authorize:(action:string,target:any,revision:number)=>Promise<Approval|undefined>};
+type RunnerOptions=WorkflowRunnerOptions&{browser:BrowserAdapter;expectedRevision:number;authorize:(action:string,target:any,revision:number)=>Promise<Approval|undefined>};
 type SafeCode='precondition_failed'|'missing_variable'|'timeout'|'approval_denied'|'revision_conflict'|'navigation_denied'|'target_invalid'|'assertion_failed'|'action_failed'|'interrupted';
 export type WorkflowPreflightErrorCode='precondition_failed'|'approval_denied';
 export class WorkflowPreflightError extends Error {

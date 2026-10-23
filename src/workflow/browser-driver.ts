@@ -1,6 +1,5 @@
-import type { ElementHandle } from 'playwright';
 import type { Store } from '../memory/store.js';
-import type { BrowserController } from '../browser/controller.js';
+import type { BrowserAdapter, BrowserTarget, CapturedBrowserApproval } from '../browser/adapter.js';
 import { locatorEquals, normalizeLocator, readLocatorProposalSource } from '../knowledge/locator-proposals.js';
 import type { WorkflowAssertion, WorkflowDocument, WorkflowStep, WorkflowTarget } from './contract.js';
 
@@ -27,11 +26,11 @@ export interface WorkflowDriver {
   cleanup(): void;
 }
 
-type Approval = { handle: ElementHandle<HTMLElement>; release: () => Promise<void> };
+type Approval = CapturedBrowserApproval;
 type BrowserDriverOptions = {
   store: Store;
-  browser: BrowserController;
-  authorize: (action: string, target: any, revision: number) => Promise<Approval | undefined>;
+  browser: BrowserAdapter;
+  authorize: (action: string, target: BrowserTarget, revision: number) => Promise<Approval | undefined>;
 };
 
 function screenId(value: string) { return value.replace(/^(screen:|role:)/, ''); }
@@ -73,7 +72,7 @@ export function createBrowserWorkflowDriver(options: BrowserDriverOptions): Work
   const routeMatches = async (id: string): Promise<boolean | undefined> => {
     const route = await currentScreenRoute(id);
     if (!route) return undefined;
-    try { return new URL(browser.page.url()).pathname === new URL(route, 'http://workflow.invalid').pathname; } catch { return false; }
+    try { return new URL(browser.currentUrl()).pathname === new URL(route, 'http://workflow.invalid').pathname; } catch { return false; }
   };
   const proposeFallbacks = async (step: WorkflowStep): Promise<string[]> => {
     const proposalIds: string[] = [];
@@ -117,7 +116,7 @@ export function createBrowserWorkflowDriver(options: BrowserDriverOptions): Work
       if (step.action === 'scroll') { await browser.scroll(step.direction, step.amount); return; }
       const target = resolveTarget(step.target), action = step.action, approval = await options.authorize(action, target, browser.revision);
       try {
-        if (approval) await browser.performCaptured(action, approval.handle, action === 'press' ? step.key : action === 'fill' || action === 'type' || action === 'select' ? substitute(step.value, variables) : undefined);
+        if (approval) await browser.performCaptured(action, approval.handle, action === 'press' ? step.key : action === 'fill' || action === 'type' || action === 'select' ? substitute(step.value, variables) : undefined, 0, approval.guard);
         else if (action === 'click') await browser.act('click', target);
         else if (action === 'press') await browser.act('press', target, step.key);
         else if (action === 'fill' || action === 'select') await browser.act(action, target, substitute(step.value, variables));
