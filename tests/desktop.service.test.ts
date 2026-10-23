@@ -67,13 +67,15 @@ async function uploadHarness(root: string, options: { matches?: number; tagName?
   return { service, calls };
 }
 
-type LocatorNode = { tag: string; role?: string; label?: string; text: string; alt?: string; testId?: string; visible?: boolean; enabled?: boolean };
+type LocatorNode = { tag: string; role?: string; label?: string; text: string; alt?: string; testId?: string; placeholder?: string; inputType?: string; visible?: boolean; enabled?: boolean };
 async function locatorHarness(root: string, nodes: LocatorNode[]) {
   const calls: { url: string; method: string; body?: any }[] = [];
   const matches = (locator: any) => nodes.map((node, index) => ({ node, index })).filter(({ node }) => {
     const role = node.role || ({ A: 'link', BUTTON: 'button', INPUT: 'textbox', TEXTAREA: 'textbox', SELECT: 'combobox' } as Record<string, string>)[node.tag] || node.tag.toLowerCase();
     const name = (node.label || node.text || node.alt || '').trim().slice(0, 300);
-    return locator.by === 'role' ? role === locator.role && (locator.name === undefined || name === locator.name) : node.testId === locator.value;
+    return locator.by === 'role' ? role === locator.role && (locator.name === undefined || name === locator.name)
+      : locator.by === 'test_id' ? node.testId === locator.value
+        : (node.tag === 'TEXTAREA' || node.tag === 'INPUT' && ['text', 'search', 'url', 'tel', 'email', 'password'].includes(node.inputType ?? 'text')) && node.placeholder === locator.value;
   });
   const service = new DesktopService(config(root), {
     ...driverFakes, spawn: (() => fakeChild()) as typeof import('node:child_process').spawn,
@@ -172,12 +174,71 @@ test('semantic locator validation enforces schema lengths and rejects extra or m
         { by: 'role', role: 'r'.repeat(101) },
         { by: 'role', role: 'button', name: 'n'.repeat(301) },
         { by: 'test_id', value: 'i'.repeat(1001) },
+        { by: 'placeholder', value: '' },
+        { by: 'placeholder', value: 'p'.repeat(1001) },
+        { by: 'placeholder', value: 'ok', extra: true },
+        { by: 'placeholder', value: 42 },
         { by: 'test_id', value: 'ok', extra: true },
         { by: 'role', role: 'button', unexpected: true },
         [],
       ]) await assert.rejects(service.find(locator as any), /Invalid desktop locator/);
       assert.equal(calls.some(call => call.url.endsWith('/execute/sync')), false);
     } finally { await service.stop(); }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('placeholder locators use exact raw equality for supported native text controls and preserve safe actions', async () => {
+  const root = await project();
+  try {
+    const placeholder = `Say "hi"'); document.body.innerHTML='pwned'//`;
+    const { service, calls } = await locatorHarness(root, [
+      { tag: 'INPUT', inputType: 'text', placeholder, text: '' },
+      { tag: 'INPUT', inputType: 'search', placeholder: 'Case', text: '' },
+      { tag: 'INPUT', inputType: 'url', placeholder: ' URL ', text: '' },
+      { tag: 'INPUT', inputType: 'tel', placeholder: 'phone', text: '' },
+      { tag: 'INPUT', inputType: 'email', placeholder: 'email', text: '' },
+      { tag: 'INPUT', inputType: 'password', placeholder: 'secret', text: '' },
+      { tag: 'TEXTAREA', placeholder: 'Case', text: '' },
+      { tag: 'INPUT', inputType: 'number', placeholder: 'Case', text: '' },
+      { tag: 'INPUT', inputType: 'file', placeholder: 'Case', text: '' },
+      { tag: 'INPUT', inputType: 'text', placeholder: 'case', text: '' },
+      { tag: 'INPUT', inputType: 'text', placeholder: ' Case ', text: '' },
+    ]);
+    try {
+      const locator = { by: 'placeholder' as const, value: placeholder };
+      await service.click(locator);
+      assert.ok(calls.some(call => call.url.endsWith('/element/element-0/click')));
+      const resolveScript = calls.find(call => call.url.endsWith('/execute/sync') && call.body?.script.includes('out.push(e)'))!;
+      assert.deepEqual(resolveScript.body.args, [locator]);
+      assert.doesNotMatch(resolveScript.body.script, /Say|pwned|placeholder\]/);
+      assert.match(resolveScript.body.script, /getAttribute\('placeholder'\)===l\.value/);
+      assert.match(resolveScript.body.script, /\['text','search','url','tel','email','password'\]/);
+      assert.equal((await service.find({ by: 'placeholder', value: 'Case' })).length, 2);
+      assert.equal((await service.find({ by: 'placeholder', value: 'case' })).length, 1);
+      assert.equal((await service.find({ by: 'placeholder', value: ' Case ' })).length, 1);
+      assert.equal((await service.find({ by: 'placeholder', value: 'missing' })).length, 0);
+    } finally { await service.stop(); }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('placeholder semantic actions reject duplicates and check visibility and enabled state on resolved reference', async () => {
+  const root = await project();
+  try {
+    for (const nodes of [
+      [{ tag: 'INPUT', inputType: 'text', placeholder: 'same', text: '' }, { tag: 'TEXTAREA', placeholder: 'same', text: '' }],
+      [{ tag: 'INPUT', inputType: 'text', placeholder: 'same', text: '', visible: false }],
+      [{ tag: 'INPUT', inputType: 'text', placeholder: 'same', text: '', enabled: false }],
+    ] as LocatorNode[][]) {
+      const { service, calls } = await locatorHarness(root, nodes);
+      try {
+        await assert.rejects(service.click({ by: 'placeholder', value: 'same' }), /exactly one|visible and enabled/);
+        assert.equal(calls.some(call => /\/element\/.*\/click$/.test(call.url)), false);
+        if (nodes.length === 1) {
+          const check = calls.find(call => call.body?.script?.includes('return {visible:'))!;
+          assert.deepEqual(check.body.args, [{ 'element-6066-11e4-a52e-4f735466cecf': 'element-0' }]);
+        }
+      } finally { await service.stop(); }
+    }
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

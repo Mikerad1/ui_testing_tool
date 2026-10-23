@@ -113,6 +113,8 @@ steps: [{id: click, action: click, target: {by: css, value: '#marker'}}]
 `);
     await writeWorkflow('unsupported-target', `steps: [{id: click, action: click, target: {by: role, role: button}}]
 `);
+    await writeWorkflow('unsupported-placeholder-target', `steps: [{id: click, action: click, target: {by: placeholder, value: Save}}]
+`);
     await writeWorkflow('unsupported-condition', `steps: [{id: wait, action: wait, condition: url, target: /home}]
 `);
     await writeWorkflow('risky-click', `steps: [{id: click, action: click, target: {by: css, value: '#marker'}}]
@@ -173,15 +175,30 @@ steps: [{id: click, action: click, target: {by: css, value: '#blocked'}}]
     await call('desktop_session_start', {});
     const roleTarget = { by: 'role', role: 'button', name: 'Save' };
     const testIdTarget = { by: 'test_id', value: 'save-button' };
+    const placeholderTarget = { by: 'placeholder', value: 'Search' };
+    const minimumPlaceholderTarget = { by: 'placeholder', value: 'x' };
+    const maximumPlaceholderTarget = { by: 'placeholder', value: 'x'.repeat(1000) };
     assert.equal((await call('desktop_find_element', { selector: roleTarget })).structuredContent.ok, true);
     assert.equal((await call('desktop_find_element', { selector: testIdTarget })).structuredContent.ok, true);
+    assert.equal((await call('desktop_find_element', { selector: placeholderTarget })).structuredContent.ok, true);
+    assert.equal((await call('desktop_find_element', { selector: minimumPlaceholderTarget })).structuredContent.ok, true);
+    assert.equal((await call('desktop_find_element', { selector: maximumPlaceholderTarget })).structuredContent.ok, true);
     assert.equal((await call('desktop_click', { selector: roleTarget })).structuredContent.ok, true);
     assert.equal((await call('desktop_type', { selector: testIdTarget, text: 'hello' })).structuredContent.ok, true);
+    assert.equal((await call('desktop_click', { selector: placeholderTarget })).structuredContent.ok, true);
+    assert.equal((await call('desktop_type', { selector: placeholderTarget, text: 'query' })).structuredContent.ok, true);
+    assert.equal((await call('desktop_upload', { selector: placeholderTarget, project_relative_path: 'fixtures/upload.txt' })).structuredContent.ok, true);
+    assert.equal((await call('desktop_scroll', { selector: placeholderTarget, y: 10 })).structuredContent.ok, true);
+    assert.equal((await call('desktop_wait_for', { selector: placeholderTarget })).structuredContent.ok, true);
+    assert.equal((await call('desktop_assert', { selector: placeholderTarget, assertion: 'visible' })).structuredContent.ok, true);
+    assert.equal((await call('desktop_assert', { selector: placeholderTarget, assertion: 'text', match: 'contains', expected: 'Ready' })).structuredContent.ok, true);
+    assert.equal((await call('desktop_get_element_details', { selector: placeholderTarget })).structuredContent.ok, true);
     assert.equal((await call('desktop_scroll', { selector: roleTarget, y: 10 })).structuredContent.ok, true);
     assert.equal((await call('desktop_wait_for', { selector: testIdTarget })).structuredContent.ok, true);
     assert.equal((await call('desktop_assert', { selector: roleTarget, assertion: 'visible' })).structuredContent.ok, true);
     assert.equal((await call('desktop_get_element_details', { selector: testIdTarget })).structuredContent.ok, true);
-    for (const target of [roleTarget, testIdTarget]) assert.ok(directTargets.some(item => item.selector === target || JSON.stringify(item.selector) === JSON.stringify(target)), `semantic target passed through: ${JSON.stringify(target)}`);
+    for (const target of [roleTarget, testIdTarget, placeholderTarget]) assert.ok(directTargets.some(item => item.selector === target || JSON.stringify(item.selector) === JSON.stringify(target)), `semantic target passed through: ${JSON.stringify(target)}`);
+    for (const operation of ['find', 'click', 'type', 'upload', 'scroll', 'waitFor', 'text', 'details']) assert.ok(directTargets.some(item => item.operation === operation && JSON.stringify(item.selector) === JSON.stringify(placeholderTarget)), `placeholder target passed through ${operation}`);
     assert.equal((await call('desktop_assert', { selector: { by: 'test_id', value: 'missing' }, assertion: 'present' })).structuredContent.data.assertion.status, 'FAIL');
     const multipleAssertion = await call('desktop_assert', { selector: { by: 'test_id', value: 'multiple' }, assertion: 'visible' });
     assert.equal(multipleAssertion.structuredContent.ok, false, 'ambiguous semantic assertion fails safely');
@@ -195,6 +212,10 @@ steps: [{id: click, action: click, target: {by: css, value: '#blocked'}}]
       { selector: { by: 'test_id', value: '' } },
       { selector: { by: 'test_id', value: 'x'.repeat(1001) } },
       { selector: { by: 'test_id', value: 'id', role: 'button' } },
+      { selector: { by: 'placeholder', value: '' } },
+      { selector: { by: 'placeholder', value: 'x'.repeat(1001) } },
+      { selector: { by: 'placeholder', value: 'Search', extra: true } },
+      { selector: { by: 'placeholder', value: 'Search', role: 'textbox' } },
       { selector: '' },
       { selector: 'x'.repeat(2001) },
     ]) {
@@ -205,27 +226,27 @@ steps: [{id: click, action: click, target: {by: css, value: '#blocked'}}]
     const successfulUpload = await call('desktop_upload', { selector: '#file', project_relative_path: 'fixtures/upload.txt' });
     assert.equal(successfulUpload.structuredContent.ok, true);
     assert.deepEqual(successfulUpload.structuredContent.data, { basename: 'upload.txt', byteLength: 12 });
-    assert.deepEqual(uploads, [{ selector: '#file', projectRelativePath: 'fixtures/upload.txt' }]);
+    assert.deepEqual(uploads[1], { selector: '#file', projectRelativePath: 'fixtures/upload.txt' });
     const semanticUpload = await call('desktop_upload', { selector: testIdTarget, project_relative_path: 'fixtures/upload.txt' });
     assert.equal(semanticUpload.structuredContent.ok, true);
-    assert.deepEqual(uploads[1], { selector: testIdTarget, projectRelativePath: 'fixtures/upload.txt' });
+    assert.deepEqual(uploads[2], { selector: testIdTarget, projectRelativePath: 'fixtures/upload.txt' });
     assert.equal(JSON.stringify(successfulUpload).includes(root), false, 'MCP result does not disclose the absolute upload path');
     const invalidUpload = await call('desktop_upload', { selector: '#file', path: 'fixtures/upload.txt' });
     assert.equal(invalidUpload.structuredContent.ok, false);
     assert.equal(invalidUpload.structuredContent.error.code, 'invalid_input');
-    assert.equal(uploads.length, 2, 'invalid schema input cannot call the upload method');
+    assert.equal(uploads.length, 3, 'invalid schema input cannot call the upload method');
     const factoryBeforeDisabled = factoryCalls;
     config.desktop!.enabled = false;
     const disabledUpload = await call('desktop_upload', { selector: '#file', project_relative_path: 'fixtures/upload.txt' });
     config.desktop!.enabled = true;
     assert.equal(disabledUpload.structuredContent.error.code, 'desktop_disabled');
     assert.equal(factoryCalls, factoryBeforeDisabled, 'disabled desktop upload does not construct or start a service');
-    assert.equal(uploads.length, 2);
+    assert.equal(uploads.length, 3);
     for (const action of ['upload', 'any'] as const) {
       config.security = { high_risk: [{ action, target: { by: 'test_id', value: 'fixture' }, description: 'High-risk fixture' }] } as any;
       const deniedUpload = await call('desktop_upload', { selector: '#file', project_relative_path: 'fixtures/upload.txt' });
       assert.equal(deniedUpload.structuredContent.error.code, 'approval_denied');
-      assert.equal(uploads.length, 2, `${action} rule denies before upload side effects`);
+      assert.equal(uploads.length, 3, `${action} rule denies before upload side effects`);
     }
     config.security = undefined;
     const mismatchCount = countRuns('portable');
@@ -246,7 +267,7 @@ steps: [{id: click, action: click, target: {by: css, value: '#blocked'}}]
     assert.equal(store.verifyWorkflowExport('portable', successRun), false);
     assert.equal(store.hasWorkflowExportVerification('portable'), false);
 
-    for (const workflowId of ['late-unsupported', 'unsupported-route', 'unsupported-capture', 'unsupported-target', 'unsupported-condition']) {
+    for (const workflowId of ['late-unsupported', 'unsupported-route', 'unsupported-capture', 'unsupported-target', 'unsupported-placeholder-target', 'unsupported-condition']) {
       const beforeRuns = countRuns(workflowId), beforeActions = actions.length;
       const rejected = await call('desktop_run_workflow', { workflow_id: workflowId, expected_session_id: 'owned-desktop-session' });
       assert.equal(rejected.structuredContent.data.errorCode, 'precondition_failed', workflowId);

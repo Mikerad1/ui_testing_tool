@@ -261,11 +261,12 @@ export async function serve(config: Config, store: Store, browser: BrowserContro
           }
        };
       const noArgs = z.object({}).strict();
-       const desktopSelector = z.union([
-         z.string().min(1).max(2000),
-         z.object({ by: z.literal('role'), role: z.string().min(1).max(100), name: z.string().min(0).max(300).optional() }).strict(),
-         z.object({ by: z.literal('test_id'), value: z.string().min(1).max(1000) }).strict(),
-       ]);
+        const desktopSelector = z.union([
+          z.string().min(1).max(2000),
+          z.object({ by: z.literal('role'), role: z.string().min(1).max(100), name: z.string().min(0).max(300).optional() }).strict(),
+          z.object({ by: z.literal('test_id'), value: z.string().min(1).max(1000) }).strict(),
+          z.object({ by: z.literal('placeholder'), value: z.string().min(1).max(1000) }).strict(),
+        ]);
       desktopTool('desktop_capabilities', 'Report OS, display server, driver, binary, WebView, and real-window capture availability. Does not launch processes.', noArgs, (_a, service) => service.capabilities(), false);
       desktopTool('desktop_project_inspect', 'Read-only detection of Tauri/Angular project files and configured build/binary paths. Never executes project commands.', noArgs, (_a, service) => service.inspectProject(), false);
       desktopTool('desktop_session_start', 'Launch a real configured Tauri binary through a managed local tauri-driver WebDriver session. Requires desktop.enabled, an absolute driver path, and a prebuilt binary; does not attach to arbitrary apps.', noArgs, (_a, service) => service.start());
@@ -273,7 +274,7 @@ export async function serve(config: Config, store: Store, browser: BrowserContro
       desktopTool('desktop_session_stop', 'Stop only this MCP session’s managed Tauri WebDriver session and its owned app process tree.', noArgs, (_a, service) => service.stop());
       desktopTool('desktop_session_restart', 'Stop and relaunch the configured Tauri binary in a fresh managed WebDriver session; an explicitly configured build_command runs on start.', noArgs, async (_a, service) => { await service.stop(); return service.start(); });
       desktopTool('desktop_get_ui_tree', 'Return a bounded semantic summary of visible WebView elements; does not expose raw HTML or form values.', z.object({ max_nodes: z.number().int().min(1).max(300).optional() }).strict(), (a, service) => service.tree(a.max_nodes));
-        desktopTool('desktop_find_element', 'Find bounded CSS, role/name-approximation, or test_id candidates and return approximate name, text, visibility, enabled state, and geometry.', z.object({ selector: desktopSelector, limit: z.number().int().min(1).max(50).optional() }).strict(), (a, service) => service.find(a.selector, a.limit));
+       desktopTool('desktop_find_element', 'Find bounded CSS, role/name-approximation, test_id, or placeholder candidates and return approximate name, text, visibility, enabled state, and geometry.', z.object({ selector: desktopSelector, limit: z.number().int().min(1).max(50).optional() }).strict(), (a, service) => service.find(a.selector, a.limit));
        desktopTool('desktop_click', 'Click a unique element in the managed Tauri WebView using a CSS or semantic locator.', z.object({ selector: desktopSelector }).strict(), (a, service) => service.click(a.selector));
        desktopTool('desktop_type', 'Type bounded text into a unique WebView element selected by CSS or semantic locator.', z.object({ selector: desktopSelector, text: z.string().max(10000) }).strict(), (a, service) => service.type(a.selector, a.text));
       desktopTool('desktop_keypress', 'Send bounded WebDriver keyboard actions to the managed WebView.', z.object({ keys: z.array(z.string().min(1).max(100)).min(1).max(100) }).strict(), (a, service) => service.keypress(a.keys));
