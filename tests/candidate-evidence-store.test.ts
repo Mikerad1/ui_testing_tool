@@ -31,7 +31,7 @@ test('v16 scoped evidence associations validate, persist immutably, and span pip
     store=await Store.open(filename,'evidence-project','local');
     staging=await Store.open(filename,'evidence-project','staging');
     otherProject=await Store.open(filename,'other-project','local');
-     assert.equal((store.db.prepare('SELECT max(version) version FROM schema_migrations').get() as {version:number}).version,17);
+     assert.equal((store.db.prepare('SELECT max(version) version FROM schema_migrations').get() as {version:number}).version,18);
     const v13Triggers=store.db.prepare("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name LIKE 'memory_candidate_observations_%' ORDER BY name").all();
     assert.deepEqual(v13Triggers.map((row:any)=>row.name),['memory_candidate_observations_no_delete','memory_candidate_observations_no_update']);
     assert(v13Triggers.every((row:any)=>row.sql.includes('candidate observations are immutable')));

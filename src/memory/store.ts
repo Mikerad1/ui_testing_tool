@@ -14,6 +14,7 @@ import {migrateCandidateObservations} from './schema-v13.js';
 import {appendLifecycleEvent,migrateLifecycleEventsV15} from './schema-v15.js';
 import {migrateEvidenceAssociationsV16} from './schema-v16.js';
 import {migrateProvenanceIndexesV17} from './schema-v17.js';
+import {migrateDesktopVisualLoopV18} from './schema-v18.js';
 import {normalizeSearchText, SEARCH_NORMALIZER_VERSION, SEARCH_RANKER_VERSION} from './search-index.js';
 import {commitYamlReconciliation} from './yaml-commit.js';
 import {backupSqlite} from './sqlite-backup.js';
@@ -76,6 +77,53 @@ function boundedString(value:unknown,name:string,max:number,allowEmpty=false):st
   if(typeof value!=='string'||(!allowEmpty&&value.length===0)||Buffer.byteLength(value,'utf8')>max)throw new Error(`Invalid candidate observation ${name}`);
   return value;
 }
+function desktopText(value:unknown,name:string,max:number):string{
+  if(typeof value!=='string'||value.trim().length===0||Buffer.byteLength(value,'utf8')>max||/[\u0000-\u001f\u007f]/.test(value))throw new Error(`Invalid desktop ${name}`);
+  return value;
+}
+function desktopOptionalText(value:unknown,name:string,max:number):string|null{
+  if(value===undefined||value===null||value==='')return null;
+  return desktopText(value,name,max);
+}
+function desktopIdentifier(value:unknown,name:string):string{
+  if(typeof value!=='string'||!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value))throw new Error(`Invalid desktop ${name}`);
+  return value;
+}
+function desktopBaselineKey(value:unknown):string{
+  const key=desktopText(value,'baseline key',120);
+  if(!/^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/.test(key)||key.includes('..')||key.endsWith('.'))throw new Error('Invalid desktop baseline key');
+  return key;
+}
+function desktopCaptureKind(value:unknown):DesktopCaptureKind{
+  if(value!=='window'&&value!=='webview')throw new Error('Invalid desktop capture kind');
+  return value;
+}
+function desktopObjectJson(value:unknown,name:string,max:number):string{
+  if(!value||typeof value!=='object'||Array.isArray(value))throw new Error(`Invalid desktop ${name}`);
+  let json:string;
+  try{json=canonicalJson(value);}catch{throw new Error(`Invalid desktop ${name}`);}
+  if(Buffer.byteLength(json,'utf8')>max)throw new Error(`Desktop ${name} exceeds ${max} bytes`);
+  return json;
+}
+function desktopProfileJson(value:unknown):string{return desktopObjectJson(value,'capture profile',4096);}
+function desktopArtifact(value:DesktopArtifactRecord):DesktopArtifactRecord{
+  if(!value||typeof value!=='object')throw new Error('Invalid desktop artifact reference');
+  const ref=desktopText(value.ref,'artifact reference',512);
+  const parts=ref.split('/'),managedIndex=parts.findIndex((part,index)=>part==='.umb-managed'&&parts[index+1]==='desktop');
+  if(ref.includes('\\')||parts.some(part=>!part||part==='.'||part==='..'||!/^[A-Za-z0-9._-]+$/.test(part))||managedIndex<0||managedIndex!==parts.length-3||!/^[A-Za-z0-9][A-Za-z0-9._-]{0,179}\.png$/.test(parts.at(-1)!))throw new Error('Desktop artifact reference must be a project-root-relative managed PNG path under .umb-managed/desktop');
+  if(typeof value.sha256!=='string'||!/^[a-f0-9]{64}$/.test(value.sha256))throw new Error('Invalid desktop artifact SHA-256');
+  if(!Number.isSafeInteger(value.bytes)||value.bytes<1||value.bytes>8*1024*1024)throw new Error('Desktop artifact must be between 1 byte and 8 MiB');
+  return{ref,sha256:value.sha256,bytes:value.bytes};
+}
+function desktopDimension(value:unknown,name:string):number{
+  if(!Number.isSafeInteger(value)||Number(value)<1||Number(value)>8192)throw new Error(`Desktop ${name} must be between 1 and 8192`);
+  return Number(value);
+}
+function desktopTimestamp(value:unknown):string{
+  if(value===undefined)return new Date().toISOString();
+  if(typeof value!=='string'||!isWorkflowTimestamp(value))throw new Error('Invalid desktop timestamp');
+  return value;
+}
 function candidateJson(value:unknown,name:string,max:number):string{
   const json=canonicalJson(value);
   if(Buffer.byteLength(json,'utf8')>max)throw new Error(`Candidate observation ${name} is too large`);
@@ -91,7 +139,7 @@ function semanticAttributesJson(value:string|Record<string,unknown>):string{
   }
 }
 
-export const CURRENT_SCHEMA_VERSION=17;
+export const CURRENT_SCHEMA_VERSION=18;
 
 export type CandidateObservationSourceKind='mcp_node'|'mcp_edge'|'yaml_document'|'backfill_node'|'backfill_edge';
 export type CandidateObservationStatus='proposed'|'conflict'|'stale'|'superseded'|'rejected';
@@ -106,6 +154,12 @@ export type CandidateObservationInput={
 export type CandidateObservation=Omit<CandidateObservationInput,'entities'|'relations'|'links'|'created_at'> & {
   id:string; project_id:string; environment:string; entities:unknown; relations:unknown; links:unknown; created_at:string; updated_at:string;
 };
+export type DesktopArtifactRecord={ref:string;sha256:string;bytes:number};
+export type DesktopCaptureKind='window'|'webview';
+export type DesktopBaselineRecord={baselineKey:string;captureKind:DesktopCaptureKind;profile:Record<string,unknown>;artifact:DesktopArtifactRecord;width:number;height:number;approval_attestation:'approved';replace?:boolean;expectedRevision?:number;createdAt?:string};
+export type DesktopComparisonRecord={baselineKey:string;baselineRevision:number;captureKind:DesktopCaptureKind;profile:Record<string,unknown>;after:DesktopArtifactRecord;diff:DesktopArtifactRecord;metrics:Record<string,unknown>;findingIds?:string[];createdAt?:string};
+export type DesktopFindingRecord={screen:string;severity:'low'|'medium'|'high'|'critical';confidence:number;category:string;observedIssue:string;region?:Record<string,unknown>|null;selector?:string|null;remediation?:string|null;verificationMethod?:string|null;screenshot:DesktopArtifactRecord;createdAt?:string};
+export type DesktopFindingTransition={id:string;expectedVersion:number;status:'in_progress'|'resolved'|'reopened';note?:string;assessment?:string;comparisonId?:string;updatedAt?:string};
 export class Store {
   declare readonly db: ReadOnlyDatabase; declare readonly projectId: string; declare readonly memoryEnvironment: string; #database: Database.Database; #graphMutationDepth=0; #searchCursorKey=randomBytes(32); #searchCursorKeyId=randomBytes(12).toString('base64url');
   static async open(filename:string,projectId:string,memoryEnvironment=LEGACY_MEMORY_ENVIRONMENT):Promise<Store>{
@@ -123,7 +177,10 @@ export class Store {
     try{
       const migrationTable=database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'").get();
       if(!migrationTable)return (database.prepare("SELECT count(*) count FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").get() as {count:number}).count>0;
-      const applied=new Set((database.prepare('SELECT version FROM schema_migrations').all() as Array<{version:number}>).map(row=>row.version));
+      const versions=(database.prepare('SELECT version FROM schema_migrations').all() as Array<{version:number}>).map(row=>row.version);
+      const futureVersion=versions.find(version=>version>CURRENT_SCHEMA_VERSION);
+      if(futureVersion!==undefined)throw new Error(`Store schema version ${futureVersion} is newer than this binary supports (v${CURRENT_SCHEMA_VERSION}); refusing to open it.`);
+      const applied=new Set(versions);
       for(let version=1;version<=CURRENT_SCHEMA_VERSION;version++)if(!applied.has(version))return true;
       return false;
     }finally{database.close();}
@@ -353,9 +410,136 @@ export class Store {
     if(!has(14))this.#database.transaction(()=>migrateSearchIndexV14(this.#database))();
      if(!has(15))migrateLifecycleEventsV15(this.#database);
       if(!has(16))migrateEvidenceAssociationsV16(this.#database);
-      if(!has(17))migrateProvenanceIndexesV17(this.#database);
-  }
+       if(!has(17))migrateProvenanceIndexesV17(this.#database);
+       if(!has(18))migrateDesktopVisualLoopV18(this.#database);
+   }
   close(){this.#database.close();}
+  saveDesktopBaseline(input:DesktopBaselineRecord):Record<string,unknown>{
+    const baselineKey=desktopBaselineKey(input?.baselineKey),captureKind=desktopCaptureKind(input?.captureKind),profileJson=desktopProfileJson(input?.profile),artifact=desktopArtifact(input?.artifact),width=desktopDimension(input?.width,'width'),height=desktopDimension(input?.height,'height');
+    if(width*height>2_097_152)throw new Error('Desktop baseline dimensions exceed the 2,097,152 pixel limit.');
+    if(input.approval_attestation!=='approved')throw new Error('An explicit caller approval attestation is required to save a desktop baseline.');
+    const replacing=input.replace===true,expectedRevision=input.expectedRevision;
+    if(replacing){if(!Number.isSafeInteger(expectedRevision)||expectedRevision!<1)throw new Error('Baseline replacement requires the expected current revision.');}
+    else if(input.replace!==undefined&&input.replace!==false||expectedRevision!==undefined)throw new Error('Baseline replacement confirmation and expected revision must be supplied together.');
+    const createdAt=desktopTimestamp(input.createdAt);
+    return this.#database.transaction(()=>{
+      const latest=this.#database.prepare('SELECT revision FROM desktop_baseline_revisions WHERE project_id=? AND environment=? AND baseline_key=? ORDER BY revision DESC LIMIT 1').get(this.projectId,this.memoryEnvironment,baselineKey) as {revision:number}|undefined;
+      let revision=1;
+      if(latest){
+        if(!replacing||expectedRevision!==latest.revision)throw new Error('revision_conflict: baseline exists; an explicit replacement and current expected revision are required.');
+        revision=latest.revision+1;
+      }else if(replacing)throw new Error('revision_conflict: cannot replace a baseline that does not exist.');
+      this.#database.prepare(`INSERT INTO desktop_baseline_revisions
+        (project_id,environment,baseline_key,revision,capture_kind,profile_json,artifact_ref,artifact_sha256,artifact_bytes,width,height,approval_attestation,created_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(this.projectId,this.memoryEnvironment,baselineKey,revision,captureKind,profileJson,artifact.ref,artifact.sha256,artifact.bytes,width,height,'caller_attested_approved',createdAt);
+      return this.getDesktopBaseline(baselineKey,revision)!;
+    })();
+  }
+  getDesktopBaseline(baselineKey:string,revision?:number):Record<string,unknown>|null{
+    const key=desktopBaselineKey(baselineKey);
+    if(revision!==undefined&&(!Number.isSafeInteger(revision)||revision<1))throw new Error('Invalid desktop baseline revision.');
+    const row=revision===undefined
+      ?this.#database.prepare('SELECT * FROM desktop_baseline_revisions WHERE project_id=? AND environment=? AND baseline_key=? ORDER BY revision DESC LIMIT 1').get(this.projectId,this.memoryEnvironment,key)
+      :this.#database.prepare('SELECT * FROM desktop_baseline_revisions WHERE project_id=? AND environment=? AND baseline_key=? AND revision=?').get(this.projectId,this.memoryEnvironment,key,revision);
+    return row?(row as Record<string,unknown>):null;
+  }
+  listDesktopArtifactReferences():string[]{
+    const rows=this.#database.prepare(`
+      SELECT artifact_ref AS ref FROM desktop_baseline_revisions WHERE project_id=?
+      UNION SELECT screenshot_ref AS ref FROM desktop_visual_findings WHERE project_id=?
+      UNION SELECT after_ref AS ref FROM desktop_visual_comparisons WHERE project_id=?
+      UNION SELECT diff_ref AS ref FROM desktop_visual_comparisons WHERE project_id=?
+    `).all(this.projectId,this.projectId,this.projectId,this.projectId) as Array<{ref:string}>;
+    return rows.map(row=>row.ref);
+  }
+  createDesktopVisualComparison(input:DesktopComparisonRecord):Record<string,unknown>{
+    const baselineKey=desktopBaselineKey(input?.baselineKey),captureKind=desktopCaptureKind(input?.captureKind),baselineRevision=input?.baselineRevision;
+    if(!Number.isSafeInteger(baselineRevision)||baselineRevision<1)throw new Error('Invalid desktop baseline revision.');
+    const profileJson=desktopProfileJson(input?.profile),after=desktopArtifact(input?.after),diff=desktopArtifact(input?.diff),metricsJson=desktopObjectJson(input?.metrics,'comparison metrics',4096),createdAt=desktopTimestamp(input.createdAt);
+    const findingIds=[...new Set(input.findingIds??[])];if(findingIds.length>50||(input.findingIds??[]).length!==findingIds.length)throw new Error('Comparison may link at most 50 unique finding IDs.');
+    for(const id of findingIds)desktopIdentifier(id,'finding ID');
+    const id=randomUUID();
+    this.#database.transaction(()=>{
+      const baseline=this.#database.prepare('SELECT revision,capture_kind,profile_json FROM desktop_baseline_revisions WHERE project_id=? AND environment=? AND baseline_key=? ORDER BY revision DESC LIMIT 1').get(this.projectId,this.memoryEnvironment,baselineKey) as {revision:number;capture_kind:string;profile_json:string}|undefined;
+      if(!baseline||baseline.revision!==baselineRevision)throw new Error('revision_conflict: comparison baseline is not the current approved revision.');
+      if(baseline.capture_kind!==captureKind||baseline.profile_json!==profileJson)throw new Error('Comparison capture kind and profile must exactly match the approved baseline.');
+      if(findingIds.length){
+        const existing=this.#database.prepare(`SELECT id FROM desktop_visual_findings WHERE project_id=? AND environment=? AND id IN (${findingIds.map(()=>'?').join(',')})`).all(this.projectId,this.memoryEnvironment,...findingIds) as Array<{id:string}>;
+        if(existing.length!==findingIds.length)throw new Error('Comparison finding IDs must already exist in this project and environment.');
+      }
+      this.#database.prepare(`INSERT INTO desktop_visual_comparisons
+        (project_id,environment,id,baseline_key,baseline_revision,capture_kind,profile_json,after_ref,after_sha256,after_bytes,diff_ref,diff_sha256,diff_bytes,metrics_json,created_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(this.projectId,this.memoryEnvironment,id,baselineKey,baselineRevision,captureKind,profileJson,after.ref,after.sha256,after.bytes,diff.ref,diff.sha256,diff.bytes,metricsJson,createdAt);
+      const link=this.#database.prepare('INSERT INTO desktop_comparison_findings(project_id,environment,comparison_id,finding_id) VALUES(?,?,?,?)');
+      for(const findingId of findingIds)link.run(this.projectId,this.memoryEnvironment,id,findingId);
+    })();
+    return this.getDesktopComparison(id)!;
+  }
+  getDesktopComparison(id:string):Record<string,unknown>|null{
+    desktopIdentifier(id,'comparison ID');
+    const row=this.#database.prepare('SELECT * FROM desktop_visual_comparisons WHERE project_id=? AND environment=? AND id=?').get(this.projectId,this.memoryEnvironment,id) as Record<string,unknown>|undefined;
+    if(!row)return null;
+    const findingIds=this.#database.prepare('SELECT finding_id FROM desktop_comparison_findings WHERE project_id=? AND environment=? AND comparison_id=? ORDER BY finding_id').all(this.projectId,this.memoryEnvironment,id) as Array<{finding_id:string}>;
+    return{...row,finding_ids:findingIds.map(item=>item.finding_id)};
+  }
+  createDesktopVisualFinding(input:DesktopFindingRecord):Record<string,unknown>{
+    const screen=desktopText(input?.screen,'screen',200),severity=input?.severity;
+    if(!['low','medium','high','critical'].includes(severity))throw new Error('Invalid desktop finding severity.');
+    if(typeof input.confidence!=='number'||!Number.isFinite(input.confidence)||input.confidence<0||input.confidence>1)throw new Error('Finding confidence must be between 0 and 1.');
+    const category=desktopText(input.category,'category',64);if(!/^[a-z][a-z0-9_-]*$/.test(category))throw new Error('Finding category must be a lowercase identifier.');
+    const observedIssue=desktopText(input.observedIssue,'observed issue',4000),regionJson=desktopObjectJson(input.region??{},'finding region',1200);
+    const selector=desktopOptionalText(input.selector,'selector',500),remediation=desktopOptionalText(input.remediation,'remediation',2000),verificationMethod=desktopOptionalText(input.verificationMethod,'verification method',2000),screenshot=desktopArtifact(input.screenshot),createdAt=desktopTimestamp(input.createdAt),id=randomUUID(),eventId=randomUUID();
+    this.#database.transaction(()=>{
+      this.#database.prepare(`INSERT INTO desktop_visual_findings
+        (project_id,environment,id,screen,severity,confidence,category,observed_issue,region_json,selector,remediation,verification_method,screenshot_ref,screenshot_sha256,screenshot_bytes,status,state_version,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'open',1,?,?)`).run(this.projectId,this.memoryEnvironment,id,screen,severity,input.confidence,category,observedIssue,regionJson,selector,remediation,verificationMethod,screenshot.ref,screenshot.sha256,screenshot.bytes,createdAt,createdAt);
+      this.#database.prepare(`INSERT INTO desktop_finding_events(project_id,environment,id,finding_id,action,from_status,to_status,note,assessment,comparison_id,created_at)
+        VALUES(?,?,?,?,'reported',NULL,'open',NULL,NULL,NULL,?)`).run(this.projectId,this.memoryEnvironment,eventId,id,createdAt);
+    })();
+    return this.getDesktopVisualFinding(id)!;
+  }
+  getDesktopVisualFinding(id:string):Record<string,unknown>|null{
+    desktopIdentifier(id,'finding ID');
+    const row=this.#database.prepare('SELECT * FROM desktop_visual_findings WHERE project_id=? AND environment=? AND id=?').get(this.projectId,this.memoryEnvironment,id) as Record<string,unknown>|undefined;
+    if(!row)return null;
+    const events=this.#database.prepare('SELECT action,from_status,to_status,note,assessment,comparison_id,created_at FROM desktop_finding_events WHERE project_id=? AND environment=? AND finding_id=? ORDER BY created_at,id').all(this.projectId,this.memoryEnvironment,id);
+    return{...row,region:JSON.parse(String(row.region_json)),events};
+  }
+  listDesktopVisualFindings(options:{status?:'open'|'in_progress'|'resolved'|'reopened';limit?:number}={}):Record<string,unknown>[]{
+    const limit=options.limit??50;if(!Number.isSafeInteger(limit)||limit<1||limit>100)throw new Error('Finding limit must be between 1 and 100.');
+    if(options.status!==undefined&&!['open','in_progress','resolved','reopened'].includes(options.status))throw new Error('Invalid desktop finding status.');
+    const rows=(options.status
+      ?this.#database.prepare('SELECT * FROM desktop_visual_findings WHERE project_id=? AND environment=? AND status=? ORDER BY updated_at DESC,id LIMIT ?').all(this.projectId,this.memoryEnvironment,options.status,limit)
+      :this.#database.prepare('SELECT * FROM desktop_visual_findings WHERE project_id=? AND environment=? ORDER BY updated_at DESC,id LIMIT ?').all(this.projectId,this.memoryEnvironment,limit)) as Array<Record<string,unknown>>;
+    return rows.map(row=>({...row,region:JSON.parse(String(row.region_json))}));
+  }
+  updateDesktopVisualFinding(input:DesktopFindingTransition):Record<string,unknown>{
+    const id=desktopIdentifier(input?.id,'finding ID'),expectedVersion=input?.expectedVersion,next=input?.status;
+    if(!Number.isSafeInteger(expectedVersion)||expectedVersion<1)throw new Error('Finding update requires its current expected version.');
+    if(!['in_progress','resolved','reopened'].includes(next))throw new Error('Invalid desktop finding transition target.');
+    const note=desktopOptionalText(input.note,'transition note',2000),assessment=desktopOptionalText(input.assessment,'resolution assessment',2000),comparisonId=input.comparisonId===undefined?null:desktopIdentifier(input.comparisonId,'comparison ID'),updatedAt=desktopTimestamp(input.updatedAt);
+    const finding=this.#database.prepare('SELECT status,state_version FROM desktop_visual_findings WHERE project_id=? AND environment=? AND id=?').get(this.projectId,this.memoryEnvironment,id) as {status:string;state_version:number}|undefined;
+    if(!finding)throw new Error('Desktop finding not found in this project and environment.');
+    if(finding.state_version!==expectedVersion)throw new Error('revision_conflict: desktop finding changed since it was read.');
+    const transitions:Record<string,string[]>={open:['in_progress','resolved'],in_progress:['resolved'],resolved:['reopened'],reopened:['in_progress','resolved']};
+    if(!transitions[finding.status]?.includes(next))throw new Error(`Invalid desktop finding transition ${finding.status} -> ${next}.`);
+    if(next==='resolved'&&!assessment)throw new Error('An explicit agent assessment is required to resolve a finding.');
+    if(next!=='resolved'&&assessment)throw new Error('Resolution assessment is only accepted when resolving a finding.');
+    if(next==='resolved'&&!comparisonId)throw new Error('A comparison linked to this finding is required to resolve it.');
+    const eventId=randomUUID();
+    this.#database.transaction(()=>{
+      if(comparisonId){
+        const linked=this.#database.prepare('SELECT 1 FROM desktop_comparison_findings WHERE project_id=? AND environment=? AND comparison_id=? AND finding_id=?').get(this.projectId,this.memoryEnvironment,comparisonId,id);
+        if(!linked)throw new Error('The supplied comparison is not linked to this finding.');
+      }
+      const updated=this.#database.prepare(`UPDATE desktop_visual_findings SET status=?,state_version=state_version+1,updated_at=?
+        WHERE project_id=? AND environment=? AND id=? AND state_version=?`).run(next,updatedAt,this.projectId,this.memoryEnvironment,id,expectedVersion);
+      if(updated.changes!==1)throw new Error('revision_conflict: desktop finding changed during update.');
+      this.#database.prepare(`INSERT INTO desktop_finding_events(project_id,environment,id,finding_id,action,from_status,to_status,note,assessment,comparison_id,created_at)
+        VALUES(?,?,?,?,'transitioned',?,?,?,?,?,?)`).run(this.projectId,this.memoryEnvironment,eventId,id,finding.status,next,note??null,assessment??null,comparisonId,updatedAt);
+    })();
+    return this.getDesktopVisualFinding(id)!;
+  }
   #yamlNodeOwnedSql(alias:string):string{return `EXISTS(SELECT 1 FROM yaml_ownership y JOIN yaml_sources ys ON ys.project_id=y.project_id AND ys.environment=y.environment AND ys.path=y.source_path WHERE y.project_id=${alias}.project_id AND y.environment=${alias}.environment AND y.entity_id=${alias}.id AND y.entity_type=${alias}.type AND y.entity_key=${alias}.canonical_key AND y.tombstone=0 AND y.conflict_status='none' AND y.hash=${alias}.content_hash AND ys.active=1 AND ys.hash=y.hash)`;}
   #yamlEdgeOwnedSql(alias:string):string{return `EXISTS(SELECT 1 FROM yaml_ownership y JOIN yaml_sources ys ON ys.project_id=y.project_id AND ys.environment=y.environment AND ys.path=y.source_path WHERE y.project_id=${alias}.project_id AND y.environment=${alias}.environment AND y.entity_id=${alias}.id AND y.entity_type='edge' AND y.tombstone=0 AND y.conflict_status='none' AND ys.active=1)`;}
   #mcpNodeSql(alias:string):string{return `(${alias}.origin='agent' AND EXISTS(SELECT 1 FROM memory_candidate_observations c,json_each(c.links_json) l WHERE c.project_id=${alias}.project_id AND c.environment=${alias}.environment AND c.source_kind='mcp_node' AND json_extract(l.value,'$.kind')='node' AND json_extract(l.value,'$.id')=${alias}.id))`;}

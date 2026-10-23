@@ -31,6 +31,9 @@ test('stdio CLI serves MCP tools over official transport and releases resources 
  try{
   await client.connect(transport);
       const listed=await client.listTools();assert.ok(listed.tools.some(tool=>tool.name==='browser_status'));assert.ok(listed.tools.some(tool=>tool.name==='browser_refresh'));assert.ok(listed.tools.some(tool=>tool.name==='browser_set_viewport'));
+      for(const name of ['desktop_capabilities','desktop_project_inspect','desktop_session_start','desktop_screenshot','desktop_get_ui_tree'])assert.ok(listed.tools.some(tool=>tool.name===name),`${name} is discoverable`);
+      const desktopInspect=await client.callTool({name:'desktop_project_inspect',arguments:{}}) as any;assert.equal(desktopInspect.structuredContent.data.tauri,false);assert.equal(desktopInspect.structuredContent.data.buildCommandConfigured,false);
+      const desktopStart=await client.callTool({name:'desktop_session_start',arguments:{}}) as any;assert.equal(desktopStart.isError,true);assert.equal(desktopStart.structuredContent.error.code,'desktop_disabled');
          const saveTool=listed.tools.find(tool=>tool.name==='memory_save')!,saveSchema=saveTool.inputSchema as any;
          assert.deepEqual(saveSchema.required,['content']);assert.ok(saveSchema.properties.content);assert.ok(saveSchema.properties.title);assert.match(saveTool.description!,/immediately persistent.*available through normal memory retrieval/i);
          for(const removed of ['memory_propose','memory_verify','memory_add_edge','memory_supersede','memory_candidates'])assert.equal(listed.tools.some(tool=>tool.name===removed),false,`${removed} is not registered`);

@@ -1,5 +1,6 @@
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
+import { chmod, lstat, mkdir, realpath } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -16,6 +17,9 @@ import { runWorkflow } from '../workflow/runner.js';
 import { reconcile } from '../knowledge/reconcile.js';
 import { startKnowledgeWatcher, type KnowledgeWatchEvent, type KnowledgeWatchHandle } from '../knowledge/watcher.js';
 import { publishJiraScreenshotComment } from '../jira/comment.js';
+import { ArtifactCleanupError, DesktopService, type CaptureKind, type DesktopBuildCommand, type DesktopConfig } from '../desktop/index.js';
+import { imageBundleToolCallResult, imageToolCallResult, MAX_MCP_IMAGE_BYTES, MAX_MCP_IMAGE_BUNDLE_BYTES } from './image-content.js';
+import { comparePngs } from '../desktop/png-diff.js';
 
 export function originAllowed(origin: string | undefined, tokenMode: boolean, port: number): boolean {
   if (!origin) return true;
@@ -26,11 +30,19 @@ export function originAllowed(origin: string | undefined, tokenMode: boolean, po
   } catch { return false; }
 }
 
-type Session = { id: string; server: McpServer; transport: any; timer?: NodeJS.Timeout; closed: boolean };
+type Session = { id: string; server: McpServer; transport: any; timer?: NodeJS.Timeout; closed: boolean; cleanup?: () => Promise<void> };
 const MAX_BODY = 1024 * 1024;
 const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60_000;
 const MAX_MEMORY_SEARCH_CALL_RESULT_BYTES=48*1024;
 function sanitizeErrorMessage(message:string){return message.replace(/\b(?:https?|wss?):\/\/[^\s"'<>]+/gi,token=>{const suffix=token.match(/[),.;]+$/)?.[0]??'',candidate=suffix?token.slice(0,-suffix.length):token;try{const url=new URL(candidate);url.username='';url.password='';url.search='';url.hash='';return `${url.origin}${url.pathname}${suffix}`;}catch{return candidate.replace(/^([a-z][a-z\d+.-]*:\/\/)[^/@\s]+@/i,'$1').replace(/[?#].*$/,'')+suffix;}}).slice(0,500);}
+function hasArtifactCleanupFailure(error: unknown, seen = new Set<unknown>()): boolean {
+  if (error === null || typeof error !== 'object' || seen.has(error)) return false;
+  seen.add(error);
+  if (error instanceof ArtifactCleanupError || (error as { code?: unknown }).code === 'ARTIFACT_CLEANUP_FAILED') return true;
+  if (error instanceof Error && /artifact (?:deletion|rollback) failed/i.test(error.message)) return true;
+  if (error instanceof AggregateError && [...error.errors].some(item => hasArtifactCleanupFailure(item, seen))) return true;
+  return hasArtifactCleanupFailure((error as { cause?: unknown }).cause, seen);
+}
 
 export function memorySearchCallToolResult(envelope:Record<string,any>,pageSize:number){
   const wrap=(structuredContent:Record<string,any>)=>({structuredContent,content:[{type:'text' as const,text:JSON.stringify(structuredContent)}]});
@@ -48,7 +60,7 @@ async function readJsonBody(req: IncomingMessage): Promise<unknown> {
 }
 function reply(res: ServerResponse, status: number, message: string) { if (!res.headersSent) { res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' }); res.end(message); } }
 
-export type ServeOptions={stdio?:boolean;idleTimeoutMs?:number;applicationReady?:boolean;approver?:(prompt:string)=>Promise<boolean>;knowledgeRoot?:string;projectRoot?:string;learningWriter?:LearningWriter;watchKnowledge?:boolean;watcherFactory?:(root:string,listener:KnowledgeWatchEvent)=>KnowledgeWatchHandle;watchDebounceMs?:number;jiraFetch?:typeof fetch};
+export type ServeOptions={stdio?:boolean;idleTimeoutMs?:number;applicationReady?:boolean;approver?:(prompt:string)=>Promise<boolean>;knowledgeRoot?:string;projectRoot?:string;learningWriter?:LearningWriter;watchKnowledge?:boolean;watcherFactory?:(root:string,listener:KnowledgeWatchEvent)=>KnowledgeWatchHandle;watchDebounceMs?:number;jiraFetch?:typeof fetch;desktopServiceFactory?:(config:DesktopConfig)=>DesktopService};
 export async function serve(config: Config, store: Store, browser: BrowserController, options: ServeOptions = {}) {
   const token = !options.stdio && config.server.auth.mode === 'token' ? process.env[config.server.auth.token_env] : undefined;
   if (!options.stdio && config.server.auth.mode === 'token' && !token) throw Error(`Set ${config.server.auth.token_env} before starting server`);
@@ -60,12 +72,18 @@ export async function serve(config: Config, store: Store, browser: BrowserContro
   if (!Number.isFinite(idleTimeoutMs) || idleTimeoutMs < 1) throw Error('idleTimeoutMs must be a positive finite number');
   let closing = false, pendingInitializers = 0, initializationDrain: (() => void) | undefined, activePosts=0,postDrain:(()=>void)|undefined,activeToolCalls=0,toolDrain:(()=>void)|undefined;
   let browserQueue: Promise<void> = Promise.resolve();
+  let desktopQueue: Promise<void> = Promise.resolve();
   let applicationReady = options.applicationReady ?? true;
   const assertApplicationReady = () => { if (!applicationReady) throw Error('Application is not ready. Start the configured application, then retry browser_refresh.'); };
   const browserStatus = async () => ({ ...await browser.status(), application_ready: applicationReady });
   const runBrowser = <T>(fn: () => Promise<T>): Promise<T> => {
     const next = browserQueue.then(fn, fn);
     browserQueue = next.then(() => undefined, () => undefined);
+    return next;
+  };
+  const runDesktop = <T>(fn: () => Promise<T>): Promise<T> => {
+    const next = desktopQueue.then(fn, fn);
+    desktopQueue = next.then(() => undefined, () => undefined);
     return next;
   };
   const armIdle = (session: Session) => {
@@ -78,13 +96,59 @@ export async function serve(config: Config, store: Store, browser: BrowserContro
     session.closed = true;
     if (session.timer) clearTimeout(session.timer);
     sessions.delete(session.id);
-    try { await session.transport.close(); } finally { await session.server.close(); }
+    try { await session.transport.close(); } finally { try { await session.cleanup?.(); } finally { await session.server.close(); } }
   };
 
   function createSession(): Session {
     const mcp = new McpServer({ name: 'ui-memory-browser', version: '0.1.0' });
-    const session: Session = { id: '', server: mcp, transport: undefined as unknown as StreamableHTTPServerTransport, closed: false };
-    const setRequestHandler = mcp.server.setRequestHandler.bind(mcp.server);
+    let desktopService: DesktopService | undefined;
+    const session: Session = { id: '', server: mcp, transport: undefined as unknown as StreamableHTTPServerTransport, closed: false, cleanup: async () => { await desktopService?.stop(); } };
+    const getDesktopService = async (requireEnabled = false) => {
+      if (requireEnabled && !config.desktop?.enabled) throw Error('Desktop testing is disabled. Set desktop.enabled: true explicitly in umb.config.yaml before starting or controlling an app.');
+      if (desktopService) return desktopService;
+      const configRoot = options.projectRoot ?? process.cwd();
+      const desktopRoot = await safePath(configRoot, config.desktop?.root ?? '.', true);
+      const desktop = config.desktop;
+      const serviceConfig: DesktopConfig = {
+        projectRoot: desktopRoot,
+        tauriBinary: desktop?.automation.binary_path,
+        driverExecutable: desktop?.automation.driver_path,
+        windowTitle: desktop?.window.title,
+        buildCommand: desktop?.build_command as DesktopBuildCommand | undefined,
+        buildTimeoutMs: (desktop?.automation.ready_timeout_seconds ?? 120) * 1000,
+        readinessTimeoutMs: (desktop?.automation.ready_timeout_seconds ?? 120) * 1000,
+        artifactDirectory: desktop?.visual.output_directory ?? config.artifacts?.directory ?? './.umb/artifacts',
+        maxArtifactBytes: config.artifacts?.max_total_bytes,
+        maxArtifactFileBytes: config.artifacts?.max_file_bytes,
+         maxArtifactCount: config.artifacts?.max_count,
+         maxArtifactAgeDays: desktop?.visual.retain_artifacts_max_age_days,
+         maskSelectors: desktop?.visual.mask_selectors,
+      };
+      desktopService = options.desktopServiceFactory?.(serviceConfig) ?? new DesktopService(serviceConfig);
+      return desktopService;
+    };
+    const prepareDesktopArtifacts = async () => {
+      const configRoot = options.projectRoot ?? process.cwd();
+      const desktopRoot = await safePath(configRoot, config.desktop?.root ?? '.', true);
+      const artifactPath = config.desktop?.visual.output_directory ?? config.artifacts?.directory ?? './.umb/artifacts';
+      const artifactRoot = await safePath(desktopRoot, artifactPath, true);
+      const realRoot = await realpath(desktopRoot);
+      const relative = path.relative(realRoot, artifactRoot);
+      if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw Error('Desktop artifact directory escapes the configured desktop project root.');
+      let current = realRoot;
+      const components = relative ? relative.split(path.sep) : [];
+      for (const component of [...components, '.umb-managed', 'desktop']) {
+        current = path.join(current, component);
+        try { await mkdir(current, { mode: 0o700 }); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+        const info = await lstat(current);
+        if (info.isSymbolicLink() || !info.isDirectory()) throw Error('Desktop artifact path components must be regular directories, not symlinks.');
+        await chmod(current, 0o700);
+      }
+      const realManaged = await realpath(current), managedRelative = path.relative(realRoot, realManaged);
+      if (managedRelative === '..' || managedRelative.startsWith(`..${path.sep}`) || path.isAbsolute(managedRelative)) throw Error('Managed desktop artifact directory escapes the configured desktop project root.');
+      return path.relative(realRoot, realManaged).split(path.sep).join('/');
+    };
+      const setRequestHandler = mcp.server.setRequestHandler.bind(mcp.server);
     (mcp.server as any).setRequestHandler = (schema: unknown, handler: (request: any, extra: any) => Promise<any> | any) =>
       setRequestHandler(schema as any, async (request: any, extra: any) => {
         const result = await handler(request, extra);
@@ -94,23 +158,245 @@ export async function serve(config: Config, store: Store, browser: BrowserContro
         const envelope = { ok: false, project_id: config.project.id, session_id: session.id, error: { code: 'invalid_input', message: text }, state_revision: browser.revision };
         return { ...result, isError: true, structuredContent: envelope, content: [{ type: 'text', text: JSON.stringify(envelope) }] };
       });
-     const invokeTool = (fn: (args: any) => unknown | Promise<unknown>, memorySearch=false) => async (args: any) => {
-        activeToolCalls++;
-        let result: any;
-         try { const value:any=await fn(args);result={ok:true,project_id:config.project.id,session_id:session.id,...(value&&Array.isArray(value.data)&&value.pagination?{data:value.data,pagination:value.pagination}:{data:value}),state_revision:browser.revision}; }
+       const invokeTool = (fn: (args: any) => unknown | Promise<unknown>, memorySearch=false, includeImage=false) => async (args: any) => {
+         activeToolCalls++;
+         let result: any, imageBytes: Uint8Array | undefined;
+          try {
+            let value:any=await fn(args);
+             if (includeImage && value && typeof value === 'object' && Array.isArray(value.imageBundle)) {
+               const { imageBundle, ...metadata } = value;
+               result = { ok: true, project_id: config.project.id, session_id: session.id, data: metadata, state_revision: browser.revision };
+               imageBytes = undefined;
+               const images = imageBundle as Array<{ name: string; bytes: Uint8Array }>;
+               return imageBundleToolCallResult(result, images, { enabled: config.desktop?.visual.return_mcp_images !== false, maxBytes: MAX_MCP_IMAGE_BUNDLE_BYTES });
+             }
+             if (includeImage && value && typeof value === 'object' && value.bytes instanceof Uint8Array) {
+              imageBytes = Buffer.from(value.bytes);
+              const { bytes: _bytes, ...metadata } = value;
+              value = metadata;
+            }
+            result={ok:true,project_id:config.project.id,session_id:session.id,...(value&&Array.isArray(value.data)&&value.pagination?{data:value.data,pagination:value.pagination}:{data:value}),state_revision:browser.revision};
+          }
         catch (error) {
           const message = sanitizeErrorMessage(error instanceof Error ? error.message : 'Operation failed');
-           const code = /application is not ready|application is not reachable/i.test(message)?'application_not_ready':/revision_conflict/i.test(message)?'revision_conflict':/approval_denied/i.test(message)?'approval_denied':/persistent learning writes are disabled/i.test(message)?'learning_writes_disabled':/revision conflict/i.test(message) ? 'revision_conflict' : /expired snapshot reference|stale ref/i.test(message) ? 'stale_ref' : /ambiguous|matches: 0|no match/i.test(message) ? 'ambiguous_or_missing_target' : /origin not allowed|navigation.*denied/i.test(message) ? 'navigation_denied' : /timeout|timed out/i.test(message) ? 'timeout' : /invalid|must be|requires/i.test(message) ? 'invalid_input' : 'internal';
+           const code = /Wayland|permission|capture denied/i.test(message)?'permission_denied':/desktop testing is disabled/i.test(message)?'desktop_disabled':/no managed desktop session/i.test(message)?'desktop_session_not_running':/application is not ready|application is not reachable/i.test(message)?'application_not_ready':/revision_conflict/i.test(message)?'revision_conflict':/approval_denied/i.test(message)?'approval_denied':/unsupported|unavailable/i.test(message)?'capability_unavailable':/persistent learning writes are disabled/i.test(message)?'learning_writes_disabled':/revision conflict/i.test(message) ? 'revision_conflict' : /expired snapshot reference|stale ref/i.test(message) ? 'stale_ref' : /ambiguous|matches: 0|no match/i.test(message) ? 'ambiguous_or_missing_target' : /origin not allowed|navigation.*denied/i.test(message) ? 'navigation_denied' : /timeout|timed out/i.test(message) ? 'timeout' : /invalid|must be|requires/i.test(message) ? 'invalid_input' : 'internal';
           result = { ok: false, project_id: config.project.id, session_id: session.id, error: { code, message }, state_revision: browser.revision };
            return { isError: true, structuredContent: result, content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
         } finally {
           activeToolCalls--;
           if (activeToolCalls === 0) { toolDrain?.(); toolDrain = undefined; }
         }
-         return memorySearch?memorySearchCallToolResult(result,args.page_size??50):{ structuredContent: result, content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
-       };
+          if (memorySearch) return memorySearchCallToolResult(result,args.page_size??50);
+           if (imageBytes) return imageToolCallResult(result, imageBytes, { enabled: config.desktop?.visual.return_mcp_images !== false, maxBytes: Math.min(MAX_MCP_IMAGE_BYTES, config.artifacts?.max_file_bytes ?? MAX_MCP_IMAGE_BYTES) });
+          return { structuredContent: result, content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
+        };
       const tool = (name: string, description: string, schema: any, fn: (args: any) => unknown | Promise<unknown>) => mcp.tool(name, description, schema, invokeTool(fn,name==='memory_search'));
-     const strictTool = (name: string, description: string, schema: z.ZodTypeAny, fn: (args: any) => unknown | Promise<unknown>) => mcp.registerTool(name, { description, inputSchema: schema }, invokeTool(fn));
+      const strictTool = (name: string, description: string, schema: z.ZodTypeAny, fn: (args: any) => unknown | Promise<unknown>) => mcp.registerTool(name, { description, inputSchema: schema }, invokeTool(fn));
+      const beforeDesktopOperation = async (service: DesktopService) => {
+        const maxAgeDays = config.desktop?.visual.retain_artifacts_max_age_days;
+        if (config.desktop?.enabled && maxAgeDays !== undefined) {
+          const references = store.listDesktopArtifactReferences();
+          await service.pruneUnreferencedArtifacts(references, maxAgeDays);
+        }
+      };
+      const desktopTool = (name: string, description: string, schema: z.ZodTypeAny, fn: (args: any, service: DesktopService) => unknown | Promise<unknown>, requireEnabled = true, sweepBefore = false) =>
+         strictTool(name, description, schema, args => runDesktop(async () => { const service = await getDesktopService(requireEnabled); if (sweepBefore) await beforeDesktopOperation(service); return fn(args, service); }));
+      const desktopImageTool = (name: string, description: string, schema: z.ZodTypeAny, fn: (args: any, service: DesktopService) => unknown | Promise<unknown>) =>
+         mcp.registerTool(name, { description, inputSchema: schema }, invokeTool(args => runDesktop(async () => { const service = await getDesktopService(true); await beforeDesktopOperation(service); return fn(args, service); }), false, true));
+      const rollbackArtifacts = async (service: DesktopService, original: unknown, references: string[]): Promise<never> => {
+        const failures: unknown[] = [];
+        for (const ref of [...new Set(references.filter(Boolean))]) try { await service.removeArtifact(ref); } catch (error) { failures.push(error); }
+        if (failures.length) {
+          const describe = (error: unknown) => error instanceof Error ? error.message : String(error);
+          throw new AggregateError([original, ...failures], `Desktop operation failed (${describe(original)}); artifact rollback failed (${failures.map(describe).join('; ')}).`);
+        }
+        throw original;
+      };
+       const captureDesktop = async (service: DesktopService, kind: CaptureKind, reviewBundle?: Record<string, unknown>): Promise<Record<string, any>> => {
+         if (!config.desktop?.enabled) throw Error('Desktop testing is disabled. Set desktop.enabled: true explicitly in umb.config.yaml before capturing.');
+         const artifactDirectory = await prepareDesktopArtifacts();
+         const capture = await service.capture(kind);
+         try {
+           const desktopRoot = await safePath(options.projectRoot ?? process.cwd(), config.desktop.root, true);
+           const captureRelative = path.relative(desktopRoot, path.resolve(capture.path));
+           if (!captureRelative || captureRelative === '..' || captureRelative.startsWith(`..${path.sep}`) || path.isAbsolute(captureRelative)) throw Error('Desktop capture artifact is outside the configured desktop project root.');
+           const canonicalArtifactRef = captureRelative.split(path.sep).join('/');
+           if (!canonicalArtifactRef.startsWith(`${artifactDirectory.replace(/\/$/, '')}/`)) throw Error('Desktop capture artifact is outside the managed artifact directory.');
+           if (capture.artifactRef !== canonicalArtifactRef) throw Error('Desktop service artifactRef does not match its canonical project-root-relative capture path.');
+           const sessionStatus = await service.status();
+           const width = capture.bytes.length >= 24 ? capture.bytes.readUInt32BE(16) : undefined;
+           const height = capture.bytes.length >= 24 ? capture.bytes.readUInt32BE(20) : undefined;
+           return {
+             capture_type: capture.kind,
+             source: capture.kind === 'window' ? 'verified X11 window capture via wmctrl + ImageMagick import' : 'WebDriver WebView screenshot',
+             method: capture.kind === 'window' ? 'os_window_targeted' : 'webdriver_webview',
+             window_title: capture.kind === 'window' ? config.desktop.window.title ?? null : null,
+             application_id: config.project.id,
+             application_session_id: sessionStatus.id,
+             dimensions: { width, height }, scale_factor: null,
+             captured_at: new Date().toISOString(),
+             artifact_ref: capture.artifactRef,
+             artifact_directory: artifactDirectory,
+             sha256: capture.sha256 ?? createHash('sha256').update(capture.bytes).digest('hex'),
+             byte_length: capture.byteLength ?? capture.bytes.length,
+              redaction: config.desktop?.visual.mask_selectors ? { applied: true, method: 'configured_dom_overlay', scope: 'Matched visible in-viewport top-level WebView DOM regions only; this is not general pixel or PII redaction.', warning: 'Native chrome/dialogs, other windows, unselected pixels, iframes, shadow DOM, and DOM-derived text/UI-tree tool responses are outside the screenshot-mask guarantee.' } : { applied: false, warning: 'Desktop pixels are stored as captured; screen-level masking is not guaranteed. Review sensitive content before sharing.' },
+             ...(reviewBundle ? { review_bundle: reviewBundle } : {}),
+             bytes: capture.bytes,
+           };
+           } catch (error) {
+             await rollbackArtifacts(service, error, [capture.artifactRef]);
+             throw error;
+          }
+       };
+      const noArgs = z.object({}).strict();
+      const desktopSelector = z.string().min(1).max(2000);
+      desktopTool('desktop_capabilities', 'Report OS, display server, driver, binary, WebView, and real-window capture availability. Does not launch processes.', noArgs, (_a, service) => service.capabilities(), false);
+      desktopTool('desktop_project_inspect', 'Read-only detection of Tauri/Angular project files and configured build/binary paths. Never executes project commands.', noArgs, (_a, service) => service.inspectProject(), false);
+      desktopTool('desktop_session_start', 'Launch a real configured Tauri binary through a managed local tauri-driver WebDriver session. Requires desktop.enabled, an absolute driver path, and a prebuilt binary; does not attach to arbitrary apps.', noArgs, (_a, service) => service.start());
+      desktopTool('desktop_session_status', 'Report the managed Tauri WebDriver session started by this MCP session.', noArgs, (_a, service) => service.status());
+      desktopTool('desktop_session_stop', 'Stop only this MCP session’s managed Tauri WebDriver session and its owned app process tree.', noArgs, (_a, service) => service.stop());
+      desktopTool('desktop_session_restart', 'Stop and relaunch the configured Tauri binary in a fresh managed WebDriver session; an explicitly configured build_command runs on start.', noArgs, async (_a, service) => { await service.stop(); return service.start(); });
+      desktopTool('desktop_get_ui_tree', 'Return a bounded semantic summary of visible WebView elements; does not expose raw HTML or form values.', z.object({ max_nodes: z.number().int().min(1).max(300).optional() }).strict(), (a, service) => service.tree(a.max_nodes));
+      desktopTool('desktop_find_element', 'Find bounded CSS-selector candidates and return accessible name, text, visibility, enabled state, and geometry.', z.object({ selector: desktopSelector, limit: z.number().int().min(1).max(50).optional() }).strict(), (a, service) => service.find(a.selector, a.limit));
+      desktopTool('desktop_click', 'Click a unique element in the managed Tauri WebView using a CSS selector.', z.object({ selector: desktopSelector }).strict(), (a, service) => service.click(a.selector));
+      desktopTool('desktop_type', 'Type bounded text into a unique WebView element selected by CSS.', z.object({ selector: desktopSelector, text: z.string().max(10000) }).strict(), (a, service) => service.type(a.selector, a.text));
+      desktopTool('desktop_keypress', 'Send bounded WebDriver keyboard actions to the managed WebView.', z.object({ keys: z.array(z.string().min(1).max(100)).min(1).max(100) }).strict(), (a, service) => service.keypress(a.keys));
+      desktopTool('desktop_scroll', 'Scroll the WebView or bring a selected element into view.', z.object({ selector: desktopSelector.optional(), x: z.number().int().min(-100000).max(100000).optional(), y: z.number().int().min(-100000).max(100000).optional() }).strict(), (a, service) => service.scroll(a.selector, a.x, a.y));
+       desktopTool('desktop_wait_for', 'Wait up to ten seconds for a CSS selector to become present, visible, hidden, or enabled.', z.object({ selector: desktopSelector, state: z.enum(['present','visible','hidden','enabled']).optional(), timeout_ms: z.number().int().min(0).max(10000).optional() }).strict(), (a, service) => service.waitFor(a.selector, a.state, a.timeout_ms));
+       const desktopAssertionSchema = z.union([
+         z.object({ selector: desktopSelector, assertion: z.enum(['present','visible','hidden','enabled']) }).strict(),
+         z.object({ selector: desktopSelector, assertion: z.literal('text'), match: z.enum(['exact','contains']), expected: z.string().max(1000) }).strict(),
+       ]);
+       desktopImageTool('desktop_assert', 'Assert bounded WebView semantic state. Returns PASS/FAIL; on FAIL, optionally captures a WebView PNG when desktop.visual.capture_on_failure is enabled.', desktopAssertionSchema, async (a, service) => {
+         let passed: boolean;
+         if (a.assertion === 'text') {
+           const actual = await service.text(a.selector);
+           passed = a.match === 'exact' ? actual === a.expected : actual.includes(a.expected);
+         } else {
+            const candidates = await service.find(a.selector, 2);
+            if (a.assertion !== 'present' && candidates.length > 1) throw Error('Desktop state assertion requires a selector matching at most one element.');
+           const candidate = candidates[0];
+           passed = a.assertion === 'present' ? candidates.length > 0
+             : a.assertion === 'visible' ? Boolean(candidate?.visible)
+               : a.assertion === 'hidden' ? !candidate || !candidate.visible
+                 : Boolean(candidate?.enabled);
+         }
+         const assertion = { status: passed ? 'PASS' : 'FAIL', assertion: a.assertion, selector: a.selector };
+         if (passed) return { assertion, capture: { status: 'not_needed' } };
+         if (config.desktop?.visual.capture_on_failure !== true) return { assertion, capture: { status: 'disabled' } };
+         try {
+           const capture = await captureDesktop(service, 'webview');
+           const { bytes, ...metadata } = capture;
+           return { assertion, capture: { status: 'captured', ...metadata }, bytes };
+          } catch (error) {
+            const rollbackFailed = hasArtifactCleanupFailure(error);
+            return { assertion, capture: { status: 'failed', code: rollbackFailed ? 'artifact_rollback_failed' : 'capture_failed' } };
+          }
+       });
+       desktopTool('desktop_resize_window', 'Request a native Tauri window size through WebDriver; returns a capability error when the backend/compositor refuses it.', z.object({ width: z.number().int().min(1).max(10000), height: z.number().int().min(1).max(10000) }).strict(), (a, service) => service.resizeWindow(a.width, a.height));
+      desktopTool('desktop_get_element_details', 'Inspect bounded text, geometry, safe attributes, and computed CSS for one CSS-selected element.', z.object({ selector: desktopSelector }).strict(), (a, service) => service.details(a.selector));
+       desktopImageTool('desktop_screenshot', 'Capture a PNG of the configured actual X11 app window (kind=window) or the WebDriver WebView (kind=webview). The default is window and never silently falls back. Returns MCP image content when enabled and bounded, plus metadata/artifact reference; Wayland window capture currently fails explicitly.', z.object({ kind: z.enum(['window','webview']).optional() }).strict(), async (a, service) => captureDesktop(service, a.kind ?? config.desktop!.window.screenshot_mode));
+       const baselineKeySchema = z.string().min(1).max(120).regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/).refine(value => !value.includes('..') && !value.endsWith('.'));
+         const profileSchema = z.record(z.unknown()).default({}).superRefine((profile, context) => {
+           if (Object.hasOwn(profile, '__umb_mask_policy_v1')) context.addIssue({ code: z.ZodIssueCode.custom, message: 'profile.__umb_mask_policy_v1 is reserved and cannot be supplied by callers.' });
+          if (!Object.hasOwn(profile, 'window_size')) return;
+          const size = profile.window_size;
+          if (!size || typeof size !== 'object' || Array.isArray(size)) { context.addIssue({ code: z.ZodIssueCode.custom, message: 'profile.window_size must contain integer width and height dimensions.' }); return; }
+          const rect = size as Record<string, unknown>;
+          for (const key of Object.keys(rect)) if (!['width', 'height'].includes(key)) context.addIssue({ code: z.ZodIssueCode.custom, message: `profile.window_size.${key} is not supported.` });
+          for (const dimension of ['width', 'height']) if (!Number.isInteger(rect[dimension]) || (rect[dimension] as number) < 1 || (rect[dimension] as number) > 10_000) context.addIssue({ code: z.ZodIssueCode.custom, message: `profile.window_size.${dimension} must be an integer between 1 and 10000.` });
+        });
+        const captureWithProfile = async (service: DesktopService, kind: CaptureKind, profile: Record<string, unknown>): Promise<Record<string, any>> => {
+          const size = profile.window_size as { width: number; height: number } | undefined;
+          if (!size) return captureDesktop(service, kind);
+          let capture: Record<string, any> | undefined;
+          try { return await service.withWindowSize(size.width, size.height, async () => { capture = await captureDesktop(service, kind); return capture; }); }
+          catch (error) { if (capture?.artifact_ref) await rollbackArtifacts(service, error, [String(capture.artifact_ref)]); throw error; }
+        };
+       const artifactRecord = (ref: string, sha256: string, bytes: number) => ({ ref, sha256, bytes });
+        const visualProfileJson = (value: unknown): string => {
+         const sort = (item: unknown): unknown => Array.isArray(item) ? item.map(sort) : item && typeof item === 'object' ? Object.fromEntries(Object.keys(item).sort().map(key => [key, sort((item as Record<string, unknown>)[key])])) : item;
+         return JSON.stringify(sort(value ?? {}));
+        };
+        const effectiveVisualProfile = (profile: Record<string, unknown>) => config.desktop?.visual.mask_selectors
+          ? { ...profile, __umb_mask_policy_v1: `sha256-v1:${createHash('sha256').update(JSON.stringify(config.desktop.visual.mask_selectors)).digest('hex')}` }
+          : profile;
+       const verifyImage = (service: DesktopService, ref: string, sha256: string, bytes: number) => service.readArtifact(ref, sha256, bytes);
+       const captureDimensions = (capture: Record<string, any>) => ({ width: capture.dimensions.width as number, height: capture.dimensions.height as number });
+        desktopImageTool('desktop_baseline_save', 'Capture and save an immutable desktop visual baseline. Requires an affirmative server-side approver callback; approval_attestation is caller-reported intent, not proof of human approval or image inspection.', z.object({ baseline_key: baselineKeySchema, kind: z.enum(['window','webview']).optional(), profile: profileSchema, approval_attestation: z.literal('approved'), replace: z.boolean().optional(), expected_revision: z.number().int().positive().optional() }).strict(), async (a, service) => {
+          if (!options.approver) throw Error('approval_denied: affirmative server-side approval is unavailable; caller attestation alone is not proof of human approval.');
+         const latest = store.getDesktopBaseline(a.baseline_key) as Record<string, any> | null;
+         if (latest && (a.replace !== true || a.expected_revision !== latest.revision)) throw Error('revision_conflict: replacing a baseline requires replace=true and its current expected_revision.');
+         if (!latest && (a.replace === true || a.expected_revision !== undefined)) throw Error('revision_conflict: a new baseline cannot specify replacement confirmation or expected_revision.');
+         const prompt = `Approve capturing and saving desktop baseline ${a.baseline_key}${latest ? ` as replacement revision ${Number(latest.revision) + 1} (current revision ${latest.revision})` : ''}? approval_attestation="approved" is caller-reported intent, not proof of human approval. [y/N] `;
+          if (!await options.approver(prompt)) throw Error('approval_denied: server-side approval was declined.');
+         const kind: CaptureKind = a.kind ?? config.desktop!.window.screenshot_mode;
+          const capture = await captureWithProfile(service, kind, a.profile);
+         const ref = capture.artifact_ref as string, sha256 = capture.sha256 as string, bytes = capture.byte_length as number;
+         try {
+           await verifyImage(service, ref, sha256, bytes);
+           const dimensions = captureDimensions(capture);
+            const saved = store.saveDesktopBaseline({ baselineKey: a.baseline_key, captureKind: kind, profile: effectiveVisualProfile(a.profile), artifact: artifactRecord(ref, sha256, bytes), ...dimensions, approval_attestation: 'approved', ...(a.replace !== undefined ? { replace: a.replace } : {}), ...(a.expected_revision !== undefined ? { expectedRevision: a.expected_revision } : {}) });
+           return { ...saved, bytes: capture.bytes };
+          } catch (error) { await rollbackArtifacts(service, error, [ref]); }
+       });
+       desktopTool('desktop_baseline_read', 'Read a saved desktop baseline and verify that its PNG evidence still matches its recorded hash and length.', z.object({ baseline_key: baselineKeySchema, revision: z.number().int().positive().optional() }).strict(), async (a, service) => {
+         const baseline = store.getDesktopBaseline(a.baseline_key, a.revision) as Record<string, any> | null;
+         if (!baseline) throw Error('Desktop baseline not found.');
+         await verifyImage(service, String(baseline.artifact_ref), String(baseline.artifact_sha256), Number(baseline.artifact_bytes));
+         return baseline;
+       });
+       desktopImageTool('desktop_compare_screenshots', 'Capture a same-kind/profile screenshot, compare it with the latest baseline, and persist before/after/diff evidence. Pixel metrics describe change only and do not prove quality or finding resolution.', z.object({ baseline_key: baselineKeySchema, kind: z.enum(['window','webview']).optional(), profile: profileSchema, threshold: z.number().int().min(0).max(255).optional(), finding_ids: z.array(z.string().min(1).max(100)).max(50).optional() }).strict(), async (a, service) => {
+         const baseline = store.getDesktopBaseline(a.baseline_key) as Record<string, any> | null;
+         if (!baseline) throw Error('Desktop baseline not found.');
+         const kind: CaptureKind = a.kind ?? config.desktop!.window.screenshot_mode;
+          const profile = effectiveVisualProfile(a.profile);
+         if (baseline.capture_kind !== kind || String(baseline.profile_json) !== visualProfileJson(profile)) throw Error('Comparison capture kind and profile must exactly match the latest baseline.');
+         const beforeBytes = await verifyImage(service, String(baseline.artifact_ref), String(baseline.artifact_sha256), Number(baseline.artifact_bytes));
+         let afterRef: string | undefined, diffRef: string | undefined;
+         try {
+            const after = await captureWithProfile(service, kind, profile);
+           afterRef = String(after.artifact_ref);
+           const afterBytes = await verifyImage(service, afterRef, String(after.sha256), Number(after.byte_length));
+           const compared = comparePngs(beforeBytes, afterBytes, { threshold: a.threshold ?? 0 });
+           const generated = await service.saveGeneratedArtifact(compared.diff);
+           diffRef = generated.artifactRef;
+           await verifyImage(service, diffRef, generated.sha256, generated.byteLength);
+             const comparison = store.createDesktopVisualComparison({ baselineKey: a.baseline_key, baselineRevision: Number(baseline.revision), captureKind: kind, profile, after: artifactRecord(afterRef, String(after.sha256), Number(after.byte_length)), diff: artifactRecord(diffRef, generated.sha256, generated.byteLength), metrics: { ...compared.metrics }, findingIds: a.finding_ids });
+           return { comparison, baseline_ref: baseline.artifact_ref, after_ref: afterRef, diff_ref: diffRef, metrics: compared.metrics, imageBundle: [{ name: 'baseline', bytes: beforeBytes }, { name: 'after', bytes: afterBytes }, { name: 'diff', bytes: compared.diff }] };
+          } catch (error) {
+            await rollbackArtifacts(service, error, [afterRef ?? '', diffRef ?? '']);
+         }
+       });
+        desktopTool('desktop_finding_report', 'Record a bounded caller-reported visual finding linked to a verified managed screenshot; UMB does not inspect or author the finding.', z.object({ screen: z.string().min(1).max(200), severity: z.enum(['low','medium','high','critical']), confidence: z.number().min(0).max(1), category: z.string().min(1).max(64), observed_issue: z.string().min(1).max(4000), screenshot_ref: z.string().min(1).max(1024), screenshot_sha256: z.string().regex(/^[a-f0-9]{64}$/i), screenshot_bytes: z.number().int().positive(), region: z.record(z.unknown()).optional(), selector: z.string().max(500).optional(), remediation: z.string().max(2000).optional(), verification_method: z.string().max(2000).optional() }).strict(), async (a, service) => {
+          await verifyImage(service, a.screenshot_ref, a.screenshot_sha256, a.screenshot_bytes);
+          return store.createDesktopVisualFinding({ screen: a.screen, severity: a.severity, confidence: a.confidence, category: a.category, observedIssue: a.observed_issue, screenshot: artifactRecord(a.screenshot_ref, a.screenshot_sha256, a.screenshot_bytes), ...(a.region !== undefined ? { region: a.region } : {}), ...(a.selector !== undefined ? { selector: a.selector } : {}), ...(a.remediation !== undefined ? { remediation: a.remediation } : {}), ...(a.verification_method !== undefined ? { verificationMethod: a.verification_method } : {}) });
+        }, true, false);
+       desktopTool('desktop_finding_list', 'List project-scoped visual findings by optional status and bounded limit.', z.object({ status: z.enum(['open','in_progress','resolved','reopened']).optional(), limit: z.number().int().min(1).max(100).optional() }).strict(), a => store.listDesktopVisualFindings(a));
+       desktopTool('desktop_finding_update', 'Record a caller-reported finding transition using expected-version compare-and-swap. Resolution requires linked, hash-verified comparison evidence and an explicit caller assessment; pixel differences do not prove resolution.', z.object({ id: z.string().min(1).max(100), expected_version: z.number().int().positive(), status: z.enum(['in_progress','resolved','reopened']), note: z.string().max(2000).optional(), assessment: z.string().max(2000).optional(), comparison_id: z.string().min(1).max(100).optional() }).strict(), async (a, service) => {
+         if (a.status === 'resolved') {
+           if (!a.comparison_id || !a.assessment) throw Error('Resolution requires a linked comparison and caller-reported assessment.');
+           const comparison = store.getDesktopComparison(a.comparison_id) as Record<string, any> | null;
+           if (!comparison || !Array.isArray(comparison.finding_ids) || !comparison.finding_ids.includes(a.id)) throw Error('The supplied comparison is not linked to this finding.');
+           const baseline = store.getDesktopBaseline(String(comparison.baseline_key), Number(comparison.baseline_revision)) as Record<string, any> | null;
+           if (!baseline) throw Error('Comparison baseline evidence record is missing.');
+           await verifyImage(service, String(baseline.artifact_ref), String(baseline.artifact_sha256), Number(baseline.artifact_bytes));
+           await verifyImage(service, String(comparison.after_ref), String(comparison.after_sha256), Number(comparison.after_bytes));
+           await verifyImage(service, String(comparison.diff_ref), String(comparison.diff_sha256), Number(comparison.diff_bytes));
+         }
+         return store.updateDesktopVisualFinding({ id: a.id, expectedVersion: a.expected_version, status: a.status, ...(a.note !== undefined ? { note: a.note } : {}), ...(a.assessment !== undefined ? { assessment: a.assessment } : {}), ...(a.comparison_id !== undefined ? { comparisonId: a.comparison_id } : {}) });
+       });
+         desktopImageTool('desktop_review_ui', 'Capture a screenshot and bounded UI evidence for an image-capable agent to review. This tool does not generate subjective visual findings or claim the image was viewed.', z.object({ kind: z.enum(['window','webview']).optional(), screen: z.string().max(200).optional(), design_guidance: z.string().max(4000).optional(), max_nodes: z.number().int().min(1).max(300).optional() }).strict(), async (a, service) => {
+         const kind: CaptureKind = a.kind ?? config.desktop!.window.screenshot_mode;
+         let uiTree: unknown[] = [], structureWarning: string | undefined;
+         try { uiTree = await service.tree(a.max_nodes); } catch { structureWarning = 'WebView structure was unavailable; review the attached image without attributing findings to DOM evidence.'; }
+         return captureDesktop(service, kind, {
+           run_id: randomUUID(), screen: a.screen ?? 'current', design_guidance: a.design_guidance ?? null,
+           ui_tree: uiTree, ...(structureWarning ? { structure_warning: structureWarning } : {}),
+           findings: [], visual_assessment_performed: false,
+             notice: 'UMB collects evidence only. An image-capable agent or human must inspect the attached image and produce any visual findings.',
+            });
+          });
        strictTool('jira_publish_screenshot_table','Publish a screenshot table to one exact issue_key and HTTPS Jira Cloud site origin. Provide headers (2–6 strings) and rows (1–25 arrays of plain-text cells); every row must match header width. Supply either legacy image_path + image_cell or images (1–25 objects with image_path and zero-based image_cell row/column); do not mix forms. Images may share a cell. Paths are relative to configured artifacts.directory and must resolve within .umb-managed. Cells are NFC-normalized, max 500 characters, and allow only Unicode letters/numbers/marks, spaces, and . , : ; ASCII apostrophe and quotation mark, and parentheses; markup punctuation, URLs, controls, and line breaks are rejected. Writes to any Jira project require exact task-specific user authorization naming the exact issue, site, and operation. Dry-run is default; network writes require BOTH write=true and experimental_inline_wiki=true. Inline table rendering is experimental and must be verified.',z.object({issue_key:z.string().min(1).max(25),site:z.string().min(1).max(300),image_path:z.string().min(1).max(1024).optional(),image_cell:z.object({row:z.number().int().min(0).max(24),column:z.number().int().min(0).max(5)}).strict().optional(),images:z.array(z.object({image_path:z.string().min(1).max(1024),image_cell:z.object({row:z.number().int().min(0).max(24),column:z.number().int().min(0).max(5)}).strict()}).strict()).min(1).max(25).optional(),headers:z.array(z.string().max(500)).min(2).max(6),rows:z.array(z.array(z.string().max(500)).max(6)).min(1).max(25),write:z.boolean().default(false),experimental_inline_wiki:z.boolean().default(false)}).strict().refine(a=>Boolean(a.images) !== Boolean(a.image_path && a.image_cell) && (a.images ? !a.image_path && !a.image_cell : Boolean(a.image_path) && Boolean(a.image_cell)),'Provide either images or image_path with image_cell, but not both.'),async a=>publishJiraScreenshotComment(config,options.projectRoot??process.cwd(),{issueKey:a.issue_key,site:a.site,image:a.images?.[0]?.image_path??a.image_path!,images:a.images?.map((image: { image_path: string; image_cell: { row: number; column: number } })=>({image:image.image_path,imageCell:image.image_cell})),tableData:{headers:a.headers,rows:a.rows,imageCell:a.images?.[0]?.image_cell??a.image_cell},write:a.write,experimentalInlineWiki:a.experimental_inline_wiki,structuredResult:true},options.jiraFetch));
      const browserTool = (name: string, description: string, schema: any, fn: (args: any) => unknown | Promise<unknown>) =>
        tool(name, description, schema, args => runBrowser(() => { assertApplicationReady(); return Promise.resolve(fn(args)); }));
@@ -158,7 +444,7 @@ export async function serve(config: Config, store: Store, browser: BrowserContro
     session.transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: randomUUID,
       onsessioninitialized: id => { session.id = id; sessions.set(id, session); armIdle(session); },
-      onsessionclosed: async id => { if (session.timer) clearTimeout(session.timer); session.closed = true; sessions.delete(id); await mcp.close(); }
+      onsessionclosed: async id => { if (session.timer) clearTimeout(session.timer); session.closed = true; sessions.delete(id); try { await session.cleanup?.(); } finally { await mcp.close(); } }
     });
     return session;
   }
@@ -178,9 +464,10 @@ export async function serve(config: Config, store: Store, browser: BrowserContro
       await transport.close();
       if (activeToolCalls > 0) await new Promise<void>(resolve => { toolDrain = resolve; });
       for (;;) { const queued = browserQueue; await queued; if (queued === browserQueue) break; }
+      for (;;) { const queued = desktopQueue; await queued; if (queued === desktopQueue) break; }
       sessions.delete(session.id);
       session.closed = true;
-      await session.server.close();
+      try { await session.cleanup?.(); } finally { await session.server.close(); }
     };
   }
 
@@ -244,8 +531,9 @@ export async function serve(config: Config, store: Store, browser: BrowserContro
     const listenerClosed = new Promise<void>((resolve, reject) => http.close(e => e ? reject(e) : resolve()));
     await knowledgeWatcher?.close();
     if (pendingInitializers > 0) await new Promise<void>(resolve => { initializationDrain = resolve; });
-    if(activePosts>0)await new Promise<void>(resolve=>{postDrain=resolve;});
-    for (;;) { const queued=browserQueue; await queued; if(queued===browserQueue)break; }
+     if(activePosts>0)await new Promise<void>(resolve=>{postDrain=resolve;});
+     for (;;) { const queued=browserQueue; await queued; if(queued===browserQueue)break; }
+     for (;;) { const queued=desktopQueue; await queued; if(queued===desktopQueue)break; }
     const active = [...sessions.values()];
     await Promise.all(active.map(async s => { try { await closeSession(s); } catch (e) { console.error('MCP session shutdown failed', e); } }));
     await listenerClosed;
