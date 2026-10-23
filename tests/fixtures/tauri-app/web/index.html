@@ -19,6 +19,8 @@
       <h1>Counter</h1>
       <output id="count" aria-live="polite">0</output>
       <button type="button" aria-label="Increment counter" data-testid="counter-increment">Increment</button>
+      <button type="button" id="nested-save"><span>Nested Save</span></button>
+      <output id="nested-save-status" aria-live="polite"></output>
       <label>Native placeholder acceptance <input id="native-placeholder" type="text" placeholder="Native placeholder acceptance"></label>
       <label for="native-upload">Upload fixture</label>
       <input id="native-upload" type="file">
@@ -28,6 +30,9 @@
       const count = document.getElementById('count');
       document.querySelector('button').addEventListener('click', () => {
         count.textContent = String(Number(count.textContent) + 1);
+      });
+      document.getElementById('nested-save').addEventListener('click', () => {
+        document.getElementById('nested-save-status').textContent = 'Saved';
       });
       const uploadStatus = document.getElementById('upload-status');
       document.getElementById('native-upload').addEventListener('change', async event => {

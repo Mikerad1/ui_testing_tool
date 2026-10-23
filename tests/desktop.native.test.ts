@@ -134,6 +134,14 @@ test('real Tauri app works through DesktopService and produces a WebView PNG', {
     assert.equal(await service.text('#count'), '0');
     assert.equal(await service.text({ by: 'role', role: 'button', name: 'Increment counter' }), 'Increment');
     assert.equal(await service.text({ by: 'test_id', value: 'counter-increment' }), 'Increment');
+    assert.equal((await service.find('#count')).length, 1, 'CSS candidate lookup remains available');
+    assert.equal((await service.find({ by: 'label', value: '  Upload   fixture  ' })).length, 1, 'native label lookup normalizes whitespace');
+    const nestedTextMatches = await service.find({ by: 'text', value: 'Nested Save' });
+    assert.equal(nestedTextMatches.length, 1);
+    assert.equal(nestedTextMatches[0]?.role, 'span', 'text discovery returns the deepest exact rendered-text match');
+    assert.equal(await service.text({ by: 'text', value: 'Nested Save' }), 'Nested Save', 'text lookup resolves the innermost span when its button ancestor has the same text');
+    await service.click({ by: 'text', value: 'Nested Save' });
+    assert.equal(await service.text('#nested-save-status'), 'Saved', 'the resolved nested text reference clicks its button handler safely');
     let webview;
     try { webview = await service.capture('webview'); }
     catch (error) {

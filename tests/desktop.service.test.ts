@@ -67,14 +67,15 @@ async function uploadHarness(root: string, options: { matches?: number; tagName?
   return { service, calls };
 }
 
-type LocatorNode = { tag: string; role?: string; label?: string; text: string; alt?: string; testId?: string; placeholder?: string; inputType?: string; visible?: boolean; enabled?: boolean; associatedLabels?: { text: string; visible?: boolean }[] };
+type LocatorNode = { tag: string; role?: string; label?: string; text: string; alt?: string; testId?: string; placeholder?: string; inputType?: string; visible?: boolean; enabled?: boolean; ancestorDisabled?: boolean; parent?: number; associatedLabels?: { text: string; visible?: boolean }[] };
 async function locatorHarness(root: string, nodes: LocatorNode[]) {
   const calls: { url: string; method: string; body?: any }[] = [];
-  const matches = (locator: any) => typeof locator === 'string' ? [] : nodes.map((node, index) => ({ node, index })).filter(({ node }) => {
+  const matches = (locator: any) => typeof locator === 'string' ? [] : nodes.map((node, index) => ({ node, index })).filter(({ node, index }) => {
     const role = node.role || ({ A: 'link', BUTTON: 'button', INPUT: 'textbox', TEXTAREA: 'textbox', SELECT: 'combobox' } as Record<string, string>)[node.tag] || node.tag.toLowerCase();
     const name = (node.label || node.text || node.alt || '').trim().slice(0, 300);
     return locator.by === 'role' ? role === locator.role && (locator.name === undefined || name === locator.name)
         : locator.by === 'test_id' ? node.testId === locator.value
+        : locator.by === 'text' ? locator.value.replace(/\s+/g, ' ').trim().length > 0 && node.visible !== false && node.text.replace(/\s+/g, ' ').trim() === locator.value.replace(/\s+/g, ' ').trim() && !nodes.some(child => { for (let parent = child.parent; parent !== undefined; parent = nodes[parent]?.parent) if (parent === index) return child.visible !== false && child.text.replace(/\s+/g, ' ').trim() === locator.value.replace(/\s+/g, ' ').trim(); return false; })
         : locator.by === 'placeholder' ? (node.tag === 'TEXTAREA' || node.tag === 'INPUT' && ['text', 'search', 'url', 'tel', 'email', 'password'].includes(node.inputType ?? 'text')) && node.placeholder === locator.value
           : ['TEXTAREA', 'SELECT'].includes(node.tag) || node.tag === 'INPUT' && node.inputType !== 'hidden' ? (node.associatedLabels ?? []).some(label => label.visible !== false && label.text.replace(/\s+/g, ' ').trim() === locator.value.replace(/\s+/g, ' ').trim()) : false;
   });
@@ -93,9 +94,9 @@ async function locatorHarness(root: string, nodes: LocatorNode[]) {
         if (body.script.includes('return {visible:')) {
           const ref = locator?.['element-6066-11e4-a52e-4f735466cecf'];
           const node = nodes[Number(String(ref).replace('element-', ''))];
-          return response(200, { value: { visible: node?.visible !== false, enabled: node?.enabled !== false } });
+           return response(200, { value: { visible: node?.visible !== false, enabled: node?.enabled !== false && !node?.ancestorDisabled } });
         }
-        const summary = matches(locator).slice(0, body.args[1]).map(({ node, index }) => ({ index, role: node.role || node.tag.toLowerCase(), accessibleName: (node.label || node.text || node.alt || '').trim().slice(0, 300), text: node.text, enabled: node.enabled !== false, visible: node.visible !== false, rect: { x: 0, y: 0, width: 10, height: 10 } }));
+        const summary = matches(locator).slice(0, body.args[1]).map(({ node, index }) => ({ index, role: node.role || node.tag.toLowerCase(), accessibleName: (node.label || node.text || node.alt || '').trim().slice(0, 300), text: node.text, enabled: node.enabled !== false && !node.ancestorDisabled, visible: node.visible !== false, rect: { x: 0, y: 0, width: 10, height: 10 } }));
         return response(200, { value: summary });
       }
       if (url.endsWith('/text')) return response(200, { value: 'resolved text' });
@@ -179,6 +180,10 @@ test('semantic locator validation enforces schema lengths and rejects extra or m
         { by: 'placeholder', value: 'p'.repeat(1001) },
         { by: 'label', value: '' },
         { by: 'label', value: 'l'.repeat(1001) },
+        { by: 'text', value: '' },
+        { by: 'text', value: 't'.repeat(1001) },
+        { by: 'text', value: 'ok', extra: true },
+        { by: 'text', value: 42 },
         { by: 'label', value: 'ok', extra: true },
         { by: 'label', value: 42 },
         { by: 'placeholder', value: 'ok', extra: true },
@@ -188,6 +193,87 @@ test('semantic locator validation enforces schema lengths and rejects extra or m
         [],
       ]) await assert.rejects(service.find(locator as any), /Invalid desktop locator/);
       assert.equal(calls.some(call => call.url.endsWith('/execute/sync')), false);
+    } finally { await service.stop(); }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('text locators normalize whitespace, compare exactly and case-sensitively, and pass hostile values as arguments', async () => {
+  const root = await project();
+  const attack = `Save "x"'); document.body.innerHTML='pwned'//`;
+  try {
+    const { service, calls } = await locatorHarness(root, [
+      { tag: 'DIV', text: '  Save\n   now  ' },
+      { tag: 'DIV', text: 'save now' },
+      { tag: 'DIV', text: 'Save now extra' },
+      { tag: 'DIV', text: attack },
+      { tag: 'DIV', text: 'hidden match', visible: false },
+      { tag: 'DIV', text: '' },
+    ]);
+    try {
+      assert.equal((await service.find({ by: 'text', value: 'Save now' })).length, 1);
+      assert.equal((await service.find({ by: 'text', value: 'save now' })).length, 1);
+      assert.equal((await service.find({ by: 'text', value: 'SAVE NOW' })).length, 0);
+      assert.equal((await service.find({ by: 'text', value: '   ' })).length, 0, 'a query normalized to empty does not select empty containers');
+      assert.equal((await service.find({ by: 'text', value: attack })).length, 1);
+      const locator = { by: 'text' as const, value: attack };
+      await service.text(locator);
+      const resolve = calls.find(call => call.body?.script?.includes("l.by==='text'"))!;
+      assert.deepEqual(resolve.body.args, [locator]);
+      assert.doesNotMatch(resolve.body.script, /pwned|Save "x"/);
+      assert.match(resolve.body.script, /new WeakSet\(\)/);
+      assert.equal((await service.find('div')).length, 0, 'CSS find does not apply semantic text matching');
+    } finally { await service.stop(); }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('text locators return leaf-most equal text and semantic actions reject disabled ancestors before effect', async () => {
+  const root = await project();
+  try {
+    const { service, calls } = await locatorHarness(root, [
+      { tag: 'BUTTON', text: 'Nested Save', parent: undefined },
+      { tag: 'SPAN', text: 'Nested Save', parent: 0 },
+      { tag: 'BUTTON', text: 'Disabled action', ancestorDisabled: true },
+      { tag: 'BUTTON', text: 'Private duplicate text' },
+      { tag: 'BUTTON', text: 'Private duplicate text' },
+    ]);
+    try {
+      const found = await service.find({ by: 'text', value: 'Nested Save' });
+      assert.equal(found.length, 1);
+      assert.equal(found[0]?.role, 'span');
+      assert.deepEqual((await service.find({ by: 'text', value: 'Nested Save' })).map(candidate => candidate.index), [1]);
+      assert.equal((await service.find({ by: 'text', value: 'Disabled action' }))[0]?.enabled, false, 'candidate summary reflects a disabled ancestor');
+      await assert.rejects(service.click({ by: 'text', value: 'Disabled action' }), /visible and enabled/);
+      await assert.rejects(service.click({ by: 'text', value: 'Private duplicate text' }), error => {
+        assert.match(String(error), /exactly one/);
+        assert.doesNotMatch(String(error), /Private duplicate text/);
+        return true;
+      });
+      assert.equal(calls.some(call => /\/element\/.*\/click$/.test(call.url)), false);
+      assert.match(calls.find(call => call.body?.script?.includes('let enabled=true'))!.body.script, /n\.disabled\|\|n\.getAttribute\('aria-disabled'\)/);
+      await service.click({ by: 'text', value: 'Nested Save' });
+      assert.ok(calls.some(call => call.url.endsWith('/element/element-1/click')), 'the unique innermost match is actionable');
+    } finally { await service.stop(); }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('text locator output is capped in DOM order without an unbounded matches accumulator', async () => {
+  const root = await project();
+  try {
+    const { service, calls } = await locatorHarness(root, Array.from({ length: 120 }, (_, index) => ({ tag: 'SPAN', text: 'Repeated target' })));
+    try {
+      const result = await service.find({ by: 'text', value: 'Repeated target' }, 3);
+      assert.deepEqual(result.map(candidate => candidate.index), [0, 1, 2]);
+      await assert.rejects(service.click({ by: 'text', value: 'Repeated target' }), /matches: 2 or more/);
+      const findScript = calls.find(call => call.body?.script?.includes("locator.by==='text'"))!.body.script;
+      const resolveScript = calls.find(call => call.body?.script?.includes("l.by==='text'"))!.body.script;
+      for (const [script, cap] of [[findScript, 'out.length<limit'], [resolveScript, 'refs.length<2']] as const) {
+        assert.match(script, /for\(let i=nodes\.length-1;i>=0;i--\)/, 'the reverse pass marks matching subtrees');
+        assert.match(script, /contains=new WeakSet\(\),leaf=new WeakSet\(\)/);
+        assert.match(script, new RegExp(cap));
+        assert.doesNotMatch(script, /matches=\[\]|matches\.reverse/);
+      }
+      assert.match(findScript, /for\(let index=0;index<nodes\.length&&out\.length<limit;index\+\+\)/, 'summaries are emitted in forward DOM order');
+      assert.match(resolveScript, /for\(let i=0;i<nodes\.length&&refs\.length<2;i\+\+\)/, 'references are emitted in forward DOM order');
     } finally { await service.stop(); }
   } finally { await rm(root, { recursive: true, force: true }); }
 });
