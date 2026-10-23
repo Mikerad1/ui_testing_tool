@@ -127,6 +127,8 @@ test('real Tauri app works through DesktopService and produces a WebView PNG', {
     const tree = await service.tree(50);
     assert.ok(tree.some(node => node.role === 'button' && node.accessibleName === 'Increment counter'), 'native WebView exposes the fixture button');
     assert.equal(await service.text('#count'), '0');
+    assert.equal(await service.text({ by: 'role', role: 'button', name: 'Increment counter' }), 'Increment');
+    assert.equal(await service.text({ by: 'test_id', value: 'counter-increment' }), 'Increment');
     let webview;
     try { webview = await service.capture('webview'); }
     catch (error) {

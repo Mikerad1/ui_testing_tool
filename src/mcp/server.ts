@@ -261,7 +261,11 @@ export async function serve(config: Config, store: Store, browser: BrowserContro
           }
        };
       const noArgs = z.object({}).strict();
-      const desktopSelector = z.string().min(1).max(2000);
+       const desktopSelector = z.union([
+         z.string().min(1).max(2000),
+         z.object({ by: z.literal('role'), role: z.string().min(1).max(100), name: z.string().min(0).max(300).optional() }).strict(),
+         z.object({ by: z.literal('test_id'), value: z.string().min(1).max(1000) }).strict(),
+       ]);
       desktopTool('desktop_capabilities', 'Report OS, display server, driver, binary, WebView, and real-window capture availability. Does not launch processes.', noArgs, (_a, service) => service.capabilities(), false);
       desktopTool('desktop_project_inspect', 'Read-only detection of Tauri/Angular project files and configured build/binary paths. Never executes project commands.', noArgs, (_a, service) => service.inspectProject(), false);
       desktopTool('desktop_session_start', 'Launch a real configured Tauri binary through a managed local tauri-driver WebDriver session. Requires desktop.enabled, an absolute driver path, and a prebuilt binary; does not attach to arbitrary apps.', noArgs, (_a, service) => service.start());
@@ -269,16 +273,16 @@ export async function serve(config: Config, store: Store, browser: BrowserContro
       desktopTool('desktop_session_stop', 'Stop only this MCP session’s managed Tauri WebDriver session and its owned app process tree.', noArgs, (_a, service) => service.stop());
       desktopTool('desktop_session_restart', 'Stop and relaunch the configured Tauri binary in a fresh managed WebDriver session; an explicitly configured build_command runs on start.', noArgs, async (_a, service) => { await service.stop(); return service.start(); });
       desktopTool('desktop_get_ui_tree', 'Return a bounded semantic summary of visible WebView elements; does not expose raw HTML or form values.', z.object({ max_nodes: z.number().int().min(1).max(300).optional() }).strict(), (a, service) => service.tree(a.max_nodes));
-      desktopTool('desktop_find_element', 'Find bounded CSS-selector candidates and return accessible name, text, visibility, enabled state, and geometry.', z.object({ selector: desktopSelector, limit: z.number().int().min(1).max(50).optional() }).strict(), (a, service) => service.find(a.selector, a.limit));
-      desktopTool('desktop_click', 'Click a unique element in the managed Tauri WebView using a CSS selector.', z.object({ selector: desktopSelector }).strict(), (a, service) => service.click(a.selector));
-      desktopTool('desktop_type', 'Type bounded text into a unique WebView element selected by CSS.', z.object({ selector: desktopSelector, text: z.string().max(10000) }).strict(), (a, service) => service.type(a.selector, a.text));
+        desktopTool('desktop_find_element', 'Find bounded CSS, role/name-approximation, or test_id candidates and return approximate name, text, visibility, enabled state, and geometry.', z.object({ selector: desktopSelector, limit: z.number().int().min(1).max(50).optional() }).strict(), (a, service) => service.find(a.selector, a.limit));
+       desktopTool('desktop_click', 'Click a unique element in the managed Tauri WebView using a CSS or semantic locator.', z.object({ selector: desktopSelector }).strict(), (a, service) => service.click(a.selector));
+       desktopTool('desktop_type', 'Type bounded text into a unique WebView element selected by CSS or semantic locator.', z.object({ selector: desktopSelector, text: z.string().max(10000) }).strict(), (a, service) => service.type(a.selector, a.text));
       desktopTool('desktop_keypress', 'Send bounded WebDriver keyboard actions to the managed WebView.', z.object({ keys: z.array(z.string().min(1).max(100)).min(1).max(100) }).strict(), (a, service) => service.keypress(a.keys));
-      desktopTool('desktop_upload', 'Upload one project-relative regular file (at most 20 MiB) to a unique enabled input[type=file] in this already-running managed Tauri WebView. Uses WebDriver file-input send keys; it does not open a chooser or start a session.', z.object({ selector: desktopSelector, project_relative_path: z.string().min(1).max(1024) }).strict(), (a, service) => {
-         if (config.security?.high_risk?.some(rule => rule.action === 'upload' || rule.action === 'any')) throw Error('approval_denied: upload matches a configured high-risk rule, but CSS targets cannot be safely matched to its semantic target and this desktop tool has no approval prompt.');
-         return service.upload(a.selector, a.project_relative_path);
-       });
+       desktopTool('desktop_upload', 'Upload one project-relative regular file (at most 20 MiB) to a unique enabled input[type=file] in this already-running managed Tauri WebView. Uses WebDriver file-input send keys; it does not open a chooser or start a session.', z.object({ selector: desktopSelector, project_relative_path: z.string().min(1).max(1024) }).strict(), (a, service) => {
+           if (config.security?.high_risk?.some(rule => rule.action === 'upload' || rule.action === 'any')) throw Error('approval_denied: configured high-risk upload/any rule blocks desktop upload because no desktop approval prompt is available.');
+          return service.upload(a.selector, a.project_relative_path);
+        });
       desktopTool('desktop_scroll', 'Scroll the WebView or bring a selected element into view.', z.object({ selector: desktopSelector.optional(), x: z.number().int().min(-100000).max(100000).optional(), y: z.number().int().min(-100000).max(100000).optional() }).strict(), (a, service) => service.scroll(a.selector, a.x, a.y));
-       desktopTool('desktop_wait_for', 'Wait up to ten seconds for a CSS selector to become present, visible, hidden, or enabled.', z.object({ selector: desktopSelector, state: z.enum(['present','visible','hidden','enabled']).optional(), timeout_ms: z.number().int().min(0).max(10000).optional() }).strict(), (a, service) => service.waitFor(a.selector, a.state, a.timeout_ms));
+        desktopTool('desktop_wait_for', 'Wait up to ten seconds for a CSS or semantic locator to become present, visible, hidden, or enabled.', z.object({ selector: desktopSelector, state: z.enum(['present','visible','hidden','enabled']).optional(), timeout_ms: z.number().int().min(0).max(10000).optional() }).strict(), (a, service) => service.waitFor(a.selector, a.state, a.timeout_ms));
        const desktopAssertionSchema = z.union([
          z.object({ selector: desktopSelector, assertion: z.enum(['present','visible','hidden','enabled']) }).strict(),
          z.object({ selector: desktopSelector, assertion: z.literal('text'), match: z.enum(['exact','contains']), expected: z.string().max(1000) }).strict(),
@@ -310,7 +314,7 @@ export async function serve(config: Config, store: Store, browser: BrowserContro
           }
        });
        desktopTool('desktop_resize_window', 'Request a native Tauri window size through WebDriver; returns a capability error when the backend/compositor refuses it.', z.object({ width: z.number().int().min(1).max(10000), height: z.number().int().min(1).max(10000) }).strict(), (a, service) => service.resizeWindow(a.width, a.height));
-      desktopTool('desktop_get_element_details', 'Inspect bounded text, geometry, safe attributes, and computed CSS for one CSS-selected element.', z.object({ selector: desktopSelector }).strict(), (a, service) => service.details(a.selector));
+        desktopTool('desktop_get_element_details', 'Inspect bounded text, geometry, safe attributes, and computed CSS for one CSS or semantic-locator-selected element.', z.object({ selector: desktopSelector }).strict(), (a, service) => service.details(a.selector));
        desktopImageTool('desktop_screenshot', 'Capture a PNG of the configured actual X11 app window (kind=window) or the WebDriver WebView (kind=webview). The default is window and never silently falls back. Returns MCP image content when enabled and bounded, plus metadata/artifact reference; Wayland window capture currently fails explicitly.', z.object({ kind: z.enum(['window','webview']).optional() }).strict(), async (a, service) => captureDesktop(service, a.kind ?? config.desktop!.window.screenshot_mode));
        const baselineKeySchema = z.string().min(1).max(120).regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/).refine(value => !value.includes('..') && !value.endsWith('.'));
          const profileSchema = z.record(z.unknown()).default({}).superRefine((profile, context) => {

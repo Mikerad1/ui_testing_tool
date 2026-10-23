@@ -44,7 +44,8 @@ test('desktop_run_workflow enforces owned-session execution, preflight, provenan
   const actions: string[] = [];
   let operationGate = { entered: deferred(), release: deferred() };
   let shouldBlock = false, failClick = false, factoryCalls = 0, startCalls = 0, stopCalls = 0, captureCalls = 0, running = false;
-  const uploads: Array<{ selector: string; projectRelativePath: string }> = [];
+  const uploads: Array<{ selector: any; projectRelativePath: string }> = [];
+  const directTargets: Array<{ operation: string; selector: any }> = [];
   let sessionId: string | undefined;
   let serverStop: (() => Promise<void>) | undefined, transport: StreamableHTTPClientTransport | undefined, client: Client | undefined;
   const workflow = (id: string, body: string) => `schema_version: 1\nkind: workflow\nid: ${id}\nname: ${id}\n${body}`;
@@ -54,21 +55,29 @@ test('desktop_run_workflow enforces owned-session execution, preflight, provenan
     stop: async () => { stopCalls++; running = false; return { stopped: true }; },
     status: async () => { if (!running) throw Error('No managed desktop session is running.'); return { id: 'owned-desktop-session', state: 'running' }; },
     setActionRequestTimeout: (_timeout: number | undefined) => {},
-    find: async (_selector: string) => [{ visible: true, enabled: true, text: 'Ready' }],
+    find: async (selector: any) => {
+      directTargets.push({ operation: 'find', selector });
+      if (selector && typeof selector === 'object' && selector.value === 'missing') return [];
+      if (selector && typeof selector === 'object' && selector.value === 'multiple') return [{ visible: true, enabled: true, text: 'Ready' }, { visible: true, enabled: true, text: 'Ready' }];
+      return [{ visible: true, enabled: true, text: 'Ready' }];
+    },
     click: async (selector: string) => {
-      actions.push(`click:${selector}`);
+      directTargets.push({ operation: 'click', selector });
+      actions.push(`click:${typeof selector === 'string' ? selector : JSON.stringify(selector)}`);
       if (shouldBlock && selector === '#blocked') { operationGate.entered.resolve(); await operationGate.release.promise; }
       if (failClick) throw Error('Fixture click failed with PRIVATE_ACTION_SENTINEL');
     },
-    type: async (selector: string, text: string) => { actions.push(`type:${selector}:${text}`); },
+    type: async (selector: any, text: string) => { directTargets.push({ operation: 'type', selector }); actions.push(`type:${typeof selector === 'string' ? selector : JSON.stringify(selector)}:${text}`); },
     upload: async (selector: string, projectRelativePath: string) => {
       if (!running) throw Error('No managed WebDriver session.');
+      directTargets.push({ operation: 'upload', selector });
       uploads.push({ selector, projectRelativePath });
       return { basename: path.basename(projectRelativePath), byteLength: 12 };
     },
-    scroll: async (_selector?: string, _x?: number, _y?: number) => { actions.push('scroll'); },
-    waitFor: async () => { actions.push('wait'); return true; },
-    text: async () => 'Ready',
+    scroll: async (selector?: any, _x?: number, _y?: number) => { if (selector !== undefined) directTargets.push({ operation: 'scroll', selector }); actions.push('scroll'); },
+    waitFor: async (selector?: any) => { if (selector !== undefined) directTargets.push({ operation: 'waitFor', selector }); actions.push('wait'); return true; },
+    text: async (selector?: any) => { if (selector !== undefined) directTargets.push({ operation: 'text', selector }); return 'Ready'; },
+    details: async (selector: any) => { directTargets.push({ operation: 'details', selector }); return { text: 'Ready' }; },
     capture: async () => {
       captureCalls++;
       const artifactRef = '.umb/artifacts/.umb-managed/desktop/workflow-failure.png';
@@ -162,27 +171,61 @@ steps: [{id: click, action: click, target: {by: css, value: '#blocked'}}]
     const stopped = await call('desktop_run_workflow', { workflow_id: 'portable', expected_session_id: 'owned-desktop-session' });
     assert.equal(stopped.structuredContent.ok, false); assert.equal(countRuns('portable'), stoppedCount);
     await call('desktop_session_start', {});
+    const roleTarget = { by: 'role', role: 'button', name: 'Save' };
+    const testIdTarget = { by: 'test_id', value: 'save-button' };
+    assert.equal((await call('desktop_find_element', { selector: roleTarget })).structuredContent.ok, true);
+    assert.equal((await call('desktop_find_element', { selector: testIdTarget })).structuredContent.ok, true);
+    assert.equal((await call('desktop_click', { selector: roleTarget })).structuredContent.ok, true);
+    assert.equal((await call('desktop_type', { selector: testIdTarget, text: 'hello' })).structuredContent.ok, true);
+    assert.equal((await call('desktop_scroll', { selector: roleTarget, y: 10 })).structuredContent.ok, true);
+    assert.equal((await call('desktop_wait_for', { selector: testIdTarget })).structuredContent.ok, true);
+    assert.equal((await call('desktop_assert', { selector: roleTarget, assertion: 'visible' })).structuredContent.ok, true);
+    assert.equal((await call('desktop_get_element_details', { selector: testIdTarget })).structuredContent.ok, true);
+    for (const target of [roleTarget, testIdTarget]) assert.ok(directTargets.some(item => item.selector === target || JSON.stringify(item.selector) === JSON.stringify(target)), `semantic target passed through: ${JSON.stringify(target)}`);
+    assert.equal((await call('desktop_assert', { selector: { by: 'test_id', value: 'missing' }, assertion: 'present' })).structuredContent.data.assertion.status, 'FAIL');
+    const multipleAssertion = await call('desktop_assert', { selector: { by: 'test_id', value: 'multiple' }, assertion: 'visible' });
+    assert.equal(multipleAssertion.structuredContent.ok, false, 'ambiguous semantic assertion fails safely');
+    const beforeInvalidTargets = directTargets.length;
+    for (const invalidArgs of [
+      {},
+      { selector: { by: 'role' } },
+      { selector: { by: 'role', role: 'button', extra: true } },
+      { selector: { by: 'role', role: 'x'.repeat(101) } },
+      { selector: { by: 'role', role: 'button', name: 'x'.repeat(301) } },
+      { selector: { by: 'test_id', value: '' } },
+      { selector: { by: 'test_id', value: 'x'.repeat(1001) } },
+      { selector: { by: 'test_id', value: 'id', role: 'button' } },
+      { selector: '' },
+      { selector: 'x'.repeat(2001) },
+    ]) {
+      const invalidTarget = await call('desktop_click', invalidArgs);
+      assert.equal(invalidTarget.structuredContent.error.code, 'invalid_input');
+    }
+    assert.equal(directTargets.length, beforeInvalidTargets, 'invalid or ambiguous target shapes do not reach desktop services');
     const successfulUpload = await call('desktop_upload', { selector: '#file', project_relative_path: 'fixtures/upload.txt' });
     assert.equal(successfulUpload.structuredContent.ok, true);
     assert.deepEqual(successfulUpload.structuredContent.data, { basename: 'upload.txt', byteLength: 12 });
     assert.deepEqual(uploads, [{ selector: '#file', projectRelativePath: 'fixtures/upload.txt' }]);
+    const semanticUpload = await call('desktop_upload', { selector: testIdTarget, project_relative_path: 'fixtures/upload.txt' });
+    assert.equal(semanticUpload.structuredContent.ok, true);
+    assert.deepEqual(uploads[1], { selector: testIdTarget, projectRelativePath: 'fixtures/upload.txt' });
     assert.equal(JSON.stringify(successfulUpload).includes(root), false, 'MCP result does not disclose the absolute upload path');
     const invalidUpload = await call('desktop_upload', { selector: '#file', path: 'fixtures/upload.txt' });
     assert.equal(invalidUpload.structuredContent.ok, false);
     assert.equal(invalidUpload.structuredContent.error.code, 'invalid_input');
-    assert.equal(uploads.length, 1, 'invalid schema input cannot call the upload method');
+    assert.equal(uploads.length, 2, 'invalid schema input cannot call the upload method');
     const factoryBeforeDisabled = factoryCalls;
     config.desktop!.enabled = false;
     const disabledUpload = await call('desktop_upload', { selector: '#file', project_relative_path: 'fixtures/upload.txt' });
     config.desktop!.enabled = true;
     assert.equal(disabledUpload.structuredContent.error.code, 'desktop_disabled');
     assert.equal(factoryCalls, factoryBeforeDisabled, 'disabled desktop upload does not construct or start a service');
-    assert.equal(uploads.length, 1);
+    assert.equal(uploads.length, 2);
     for (const action of ['upload', 'any'] as const) {
       config.security = { high_risk: [{ action, target: { by: 'test_id', value: 'fixture' }, description: 'High-risk fixture' }] } as any;
       const deniedUpload = await call('desktop_upload', { selector: '#file', project_relative_path: 'fixtures/upload.txt' });
       assert.equal(deniedUpload.structuredContent.error.code, 'approval_denied');
-      assert.equal(uploads.length, 1, `${action} rule denies before upload side effects`);
+      assert.equal(uploads.length, 2, `${action} rule denies before upload side effects`);
     }
     config.security = undefined;
     const mismatchCount = countRuns('portable');
@@ -232,10 +275,11 @@ steps: [{id: click, action: click, target: {by: css, value: '#blocked'}}]
     assert.doesNotMatch(JSON.stringify(store.getRunReport(authRun)), new RegExp(secret));
 
     failClick = true;
+    const capturesBeforeRuntimeFailure = captureCalls;
     const failed = await call('desktop_run_workflow', { workflow_id: 'runtime-failure', expected_session_id: 'owned-desktop-session' });
     failClick = false;
     assert.equal(failed.structuredContent.data.errorCode, 'action_failed');
-    assert.equal(captureCalls, 1, 'desktop failure capture executes directly inside the held queue');
+    assert.equal(captureCalls, capturesBeforeRuntimeFailure + 1, 'desktop failure capture executes directly inside the held queue');
     assert.equal(failed.structuredContent.data.capture.desktop_screenshot_status, 'captured');
     const failureRun = failed.structuredContent.data.run_id;
     assert.ok((store.getRunReport(failureRun).evidence as any[]).some(item => item.kind === 'workflow_desktop_screenshot' && item.artifact_ref === failed.structuredContent.data.capture.desktop_screenshot));

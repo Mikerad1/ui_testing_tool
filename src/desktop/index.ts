@@ -64,6 +64,7 @@ export interface DesktopElementDetails { text: string; rect: DesktopRect; attrib
 export interface DesktopCapture { kind: CaptureKind; path: string; artifactRef: string; sha256?: string; byteLength?: number; mimeType: 'image/png'; bytes: Buffer; width?: number; height?: number }
 export interface GeneratedDesktopArtifact { path: string; artifactRef: string; sha256: string; byteLength: number; mimeType: 'image/png'; width?: number; height?: number }
 export interface DesktopUploadResult { basename: string; byteLength: number }
+export type DesktopLocator = string | { by: 'role'; role: string; name?: string } | { by: 'test_id'; value: string };
 export interface DesktopCommandResult { code: number | null; stdout: string; stderr: string }
 export interface DesktopAdapters {
   spawn: typeof spawn;
@@ -317,9 +318,9 @@ export class DesktopService {
     return { stopped: true };
   }
 
-  async click(selector: string): Promise<void> { await this.elementAction(selector, 'click', {}); }
-  async type(selector: string, text: string): Promise<void> { if (text.length > 10_000) throw Error('Text input exceeds 10000 characters.'); await this.elementAction(selector, 'value', { text, value: [...text] }); }
-  async upload(selector: string, projectRelativePath: string): Promise<DesktopUploadResult> {
+  async click(selector: DesktopLocator): Promise<void> { await this.elementAction(selector, 'click', {}); }
+  async type(selector: DesktopLocator, text: string): Promise<void> { if (text.length > 10_000) throw Error('Text input exceeds 10000 characters.'); await this.elementAction(selector, 'value', { text, value: [...text] }); }
+  async upload(selector: DesktopLocator, projectRelativePath: string): Promise<DesktopUploadResult> {
     this.requireSession();
     if (typeof projectRelativePath !== 'string' || !projectRelativePath || path.isAbsolute(projectRelativePath)
       || projectRelativePath.includes('\\') || projectRelativePath.split('/').some(part => !part || part === '.' || part === '..')) {
@@ -332,7 +333,7 @@ export class DesktopService {
     if (!info.isFile()) throw Error('Upload must be a regular file no larger than 20 MiB.');
     if (info.size > 20 * 1024 * 1024) throw Error('Upload must be a regular file no larger than 20 MiB.');
     if (/[\r\n]/.test(resolved)) throw Error('Upload path cannot contain CR or LF characters.');
-    const element = await this.findElement(selector);
+    const element = await this.findElement(selector, true);
     const tagName = (await this.request('GET', `/element/${encodeURIComponent(element)}/name`)).value;
     if (typeof tagName !== 'string' || tagName.toLowerCase() !== 'input') throw Error('Upload target must be an input[type=file].');
     const type = (await this.request('GET', `/element/${encodeURIComponent(element)}/attribute/type`)).value;
@@ -342,20 +343,20 @@ export class DesktopService {
     await this.request('POST', `/element/${encodeURIComponent(element)}/value`, { text: resolved, value: [...resolved] });
     return { basename: path.basename(resolved), byteLength: info.size };
   }
-  async text(selector: string): Promise<string> { const e = await this.findElement(selector); return String((await this.request('GET', `/element/${e}/text`)).value ?? ''); }
+  async text(selector: DesktopLocator): Promise<string> { const e = await this.findElement(selector); return String((await this.request('GET', `/element/${e}/text`)).value ?? ''); }
   async tree(maxNodes = 200): Promise<DesktopTreeNode[]> {
     bounded(maxNodes, 1, 300, 'maxNodes');
     const value = await this.request('POST', '/execute/sync', { script: SNAPSHOT_SCRIPT, args: [maxNodes] });
     return (Array.isArray(value.value) ? value.value : []) as DesktopTreeNode[];
   }
-  async details(selector: string): Promise<DesktopElementDetails> {
+  async details(selector: DesktopLocator): Promise<DesktopElementDetails> {
     const e = await this.findElement(selector);
     const result = await this.request('POST', '/execute/sync', { script: `const e=arguments[0],s=getComputedStyle(e),r=e.getBoundingClientRect(),keys=['display','position','visibility','color','backgroundColor','fontSize','fontWeight','lineHeight','overflow','overflowX','overflowY','width','height','paddingTop','paddingRight','paddingBottom','paddingLeft','marginTop','marginRight','marginBottom','marginLeft','gap','alignItems','justifyContent','flexDirection','gridTemplateColumns','gridTemplateRows'];const allow=new Set(['id','class','role','aria-label','title','type','placeholder','name']);const overflow={horizontal:e.scrollWidth>e.clientWidth,vertical:e.scrollHeight>e.clientHeight,clippedHorizontal:(s.overflowX==='hidden'||s.overflowX==='clip')&&e.scrollWidth>e.clientWidth,clippedVertical:(s.overflowY==='hidden'||s.overflowY==='clip')&&e.scrollHeight>e.clientHeight,scrollWidth:e.scrollWidth,scrollHeight:e.scrollHeight,clientWidth:e.clientWidth,clientHeight:e.clientHeight};return {text:(e.innerText||e.textContent||'').slice(0,1000),rect:{x:r.x,y:r.y,width:r.width,height:r.height},attributes:Object.fromEntries([...e.attributes].filter(a=>allow.has(a.name)).slice(0,20).map(a=>[a.name,a.value.slice(0,500)])),styles:Object.fromEntries(keys.map(k=>[k,String(s[k]).slice(0,200)])),overflow};`, args: [{ 'element-6066-11e4-a52e-4f735466cecf': e }] });
     return result.value as DesktopElementDetails;
   }
-  async find(selector: string, limit = 50): Promise<DesktopCandidateSummary[]> {
-    this.requireSession(); bounded(limit, 1, 50, 'limit'); this.validateSelector(selector);
-    const summary = await this.request('POST', '/execute/sync', { script: `const selector=arguments[0],limit=arguments[1],nodes=document.querySelectorAll(selector),out=[];for(let index=0;index<nodes.length&&out.length<limit;index++){const e=nodes[index],r=e.getBoundingClientRect(),s=getComputedStyle(e),visible=s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity)!==0&&r.width>0&&r.height>0;out.push({index,role:e.getAttribute('role')||({A:'link',BUTTON:'button',INPUT:'textbox',TEXTAREA:'textbox',SELECT:'combobox'}[e.tagName]||e.tagName.toLowerCase()),accessibleName:(e.getAttribute('aria-label')||e.innerText||e.getAttribute('alt')||'').trim().slice(0,300),text:(e.innerText||'').trim().slice(0,500),enabled:!e.disabled,visible,rect:{x:r.x,y:r.y,width:r.width,height:r.height}})}return out;`, args: [selector, limit] });
+  async find(selector: DesktopLocator, limit = 50): Promise<DesktopCandidateSummary[]> {
+    this.requireSession(); bounded(limit, 1, 50, 'limit'); if (typeof selector === 'string') this.validateSelector(selector); else this.validateLocator(selector);
+    const summary = await this.request('POST', '/execute/sync', { script: `const locator=arguments[0],limit=arguments[1],roles={A:'link',BUTTON:'button',INPUT:'textbox',TEXTAREA:'textbox',SELECT:'combobox'},nodes=typeof locator==='string'?document.querySelectorAll(locator):document.querySelectorAll('body *'),out=[];for(let index=0;index<nodes.length&&out.length<limit;index++){const e=nodes[index],r=e.getBoundingClientRect(),s=getComputedStyle(e),visible=s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity)!==0&&r.width>0&&r.height>0,role=e.getAttribute('role')||roles[e.tagName]||e.tagName.toLowerCase(),name=(e.getAttribute('aria-label')||e.innerText||e.getAttribute('alt')||'').trim().slice(0,300);if(typeof locator!=='string'&&!(locator.by==='role'?role===locator.role&&(locator.name===undefined||name===locator.name):locator.by==='test_id'&&e.getAttribute('data-testid')===locator.value))continue;out.push({index,role,accessibleName:name,text:(e.innerText||'').trim().slice(0,500),enabled:!e.disabled,visible,rect:{x:r.x,y:r.y,width:r.width,height:r.height}})}return out;`, args: [selector, limit] });
     return Array.isArray(summary.value) ? summary.value as DesktopCandidateSummary[] : [];
   }
   async keypress(keys: string[]): Promise<void> {
@@ -363,13 +364,18 @@ export class DesktopService {
     const actions = keys.flatMap(key => [...key].map(value => [{ type: 'keyDown', value }, { type: 'keyUp', value }])).flat();
     await this.request('POST', '/actions', { actions: [{ type: 'key', id: 'desktop-keyboard', actions }] });
   }
-  async scroll(selector?: string, x = 0, y = 500): Promise<void> {
+  async scroll(selector?: DesktopLocator, x = 0, y = 500): Promise<void> {
     this.requireSession(); bounded(Math.abs(x), 0, 100_000, 'scroll x'); bounded(Math.abs(y), 0, 100_000, 'scroll y');
-    if (selector !== undefined) this.validateSelector(selector);
+    if (selector !== undefined) { if (typeof selector === 'string') this.validateSelector(selector); else this.validateLocator(selector); }
+    if (selector && typeof selector !== 'string') {
+      const element = await this.findElement(selector, true);
+      await this.request('POST', '/execute/sync', { script: 'arguments[0].scrollIntoView({block:"center",inline:"center"});', args: [{ 'element-6066-11e4-a52e-4f735466cecf': element }] });
+      return;
+    }
     await this.request('POST', '/execute/sync', { script: selector ? `const e=document.querySelector(arguments[0]);if(!e)throw new Error('Selector not found');e.scrollIntoView({block:'center',inline:'center'});` : 'window.scrollBy(arguments[0],arguments[1]);', args: selector ? [selector] : [x, y] });
   }
-  async waitFor(selector: string, state: 'present' | 'visible' | 'hidden' | 'enabled' = 'visible', timeoutMs = 5000): Promise<boolean> {
-    this.requireSession(); this.validateSelector(selector); bounded(timeoutMs, 0, 10_000, 'timeoutMs');
+  async waitFor(selector: DesktopLocator, state: 'present' | 'visible' | 'hidden' | 'enabled' = 'visible', timeoutMs = 5000): Promise<boolean> {
+    this.requireSession(); if (typeof selector === 'string') this.validateSelector(selector); else this.validateLocator(selector); bounded(timeoutMs, 0, 10_000, 'timeoutMs');
     const deadline = Date.now() + timeoutMs;
     do {
       const found = await this.find(selector, 1);
@@ -713,8 +719,31 @@ export class DesktopService {
     } finally { if (timer) clearTimeout(timer); }
   }
   private validateSelector(selector: string): void { if (!selector || selector.length > 2000) throw Error('Selector must contain 1–2000 characters.'); }
-  private async findElement(selector: string): Promise<string> {
-    this.requireSession(); this.validateSelector(selector);
+  private validateLocator(locator: Exclude<DesktopLocator, string>): void {
+    if (!locator || typeof locator !== 'object' || Array.isArray(locator) || (Object.getPrototypeOf(locator) !== Object.prototype && Object.getPrototypeOf(locator) !== null)) throw Error('Invalid desktop locator.');
+    const keys = Object.keys(locator);
+    if (locator.by === 'role') {
+      if (keys.some(key => !['by', 'role', 'name'].includes(key)) || !keys.includes('role') || typeof locator.role !== 'string' || !locator.role || locator.role.length > 100
+        || (Object.hasOwn(locator, 'name') && (typeof locator.name !== 'string' || locator.name.length > 300))) throw Error('Invalid desktop locator.');
+    } else if (locator.by === 'test_id') {
+      if (keys.length !== 2 || keys.some(key => !['by', 'value'].includes(key)) || typeof locator.value !== 'string' || !locator.value || locator.value.length > 1000) throw Error('Invalid desktop locator.');
+    } else throw Error('Invalid desktop locator.');
+  }
+  private async findElement(selector: DesktopLocator, requireAction = false): Promise<string> {
+    this.requireSession(); if (typeof selector === 'string') this.validateSelector(selector); else this.validateLocator(selector);
+    if (typeof selector !== 'string') {
+      const result = await this.request('POST', '/execute/sync', { script: `const l=arguments[0],roles={A:'link',BUTTON:'button',INPUT:'textbox',TEXTAREA:'textbox',SELECT:'combobox'},nodes=document.querySelectorAll('body *'),out=[];for(let i=0;i<nodes.length&&out.length<2;i++){const e=nodes[i],role=e.getAttribute('role')||roles[e.tagName]||e.tagName.toLowerCase(),name=(e.getAttribute('aria-label')||e.innerText||e.getAttribute('alt')||'').trim().slice(0,300),matches=l.by==='role'?role===l.role&&(l.name===undefined||name===l.name):l.by==='test_id'&&e.getAttribute('data-testid')===l.value;if(matches)out.push(e)}return out;`, args: [selector] });
+      const matches = Array.isArray(result.value) ? result.value : [];
+      const candidates = await this.find(selector, 5).catch(() => []);
+      if (matches.length !== 1) throw Error(`Locator must match exactly one element (matches: ${matches.length === 0 ? '0' : '2 or more'}); candidates: ${JSON.stringify(candidates.map(({ index, role, accessibleName, enabled, visible }) => ({ index, role, accessibleName, enabled, visible })))}`);
+      const element = matches[0]?.['element-6066-11e4-a52e-4f735466cecf'] ?? matches[0]?.ELEMENT;
+      if (typeof element !== 'string') throw Error('WebDriver did not return an element reference.');
+      if (requireAction) {
+        const state = await this.request('POST', '/execute/sync', { script: `const e=arguments[0],s=getComputedStyle(e),r=e.getBoundingClientRect();return {visible:s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity)!==0&&r.width>0&&r.height>0,enabled:!e.disabled};`, args: [{ 'element-6066-11e4-a52e-4f735466cecf': element }] });
+        if (state.value?.visible !== true || state.value?.enabled !== true) throw Error(`Locator target must be visible and enabled; visible: ${state.value?.visible === true}, enabled: ${state.value?.enabled === true}.`);
+      }
+      return element;
+    }
     const result = await this.request('POST', '/elements', { using: 'css selector', value: selector });
     const matches = Array.isArray(result.value) ? result.value : [];
     if (matches.length !== 1) {
@@ -724,8 +753,8 @@ export class DesktopService {
     const element = matches[0]?.['element-6066-11e4-a52e-4f735466cecf'] ?? matches[0]?.ELEMENT;
     if (typeof element !== 'string') throw Error('WebDriver did not return an element reference.'); return element;
   }
-  private async elementAction(selector: string, action: string, body?: unknown): Promise<void> {
-    const e = await this.findElement(selector); await this.request('POST', `/element/${encodeURIComponent(e)}/${action}`, body);
+  private async elementAction(selector: DesktopLocator, action: string, body?: unknown): Promise<void> {
+    const e = await this.findElement(selector, true); await this.request('POST', `/element/${encodeURIComponent(e)}/${action}`, body);
   }
   private async killDriver(): Promise<void> {
     const driver = this.driver; this.driver = undefined; this.sessionId = undefined;

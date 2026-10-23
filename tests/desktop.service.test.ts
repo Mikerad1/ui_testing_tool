@@ -67,6 +67,120 @@ async function uploadHarness(root: string, options: { matches?: number; tagName?
   return { service, calls };
 }
 
+type LocatorNode = { tag: string; role?: string; label?: string; text: string; alt?: string; testId?: string; visible?: boolean; enabled?: boolean };
+async function locatorHarness(root: string, nodes: LocatorNode[]) {
+  const calls: { url: string; method: string; body?: any }[] = [];
+  const matches = (locator: any) => nodes.map((node, index) => ({ node, index })).filter(({ node }) => {
+    const role = node.role || ({ A: 'link', BUTTON: 'button', INPUT: 'textbox', TEXTAREA: 'textbox', SELECT: 'combobox' } as Record<string, string>)[node.tag] || node.tag.toLowerCase();
+    const name = (node.label || node.text || node.alt || '').trim().slice(0, 300);
+    return locator.by === 'role' ? role === locator.role && (locator.name === undefined || name === locator.name) : node.testId === locator.value;
+  });
+  const service = new DesktopService(config(root), {
+    ...driverFakes, spawn: (() => fakeChild()) as typeof import('node:child_process').spawn,
+    processTree: async () => new Set([4321]), isProcessAlive: () => false, isProcessGroupAlive: () => false,
+    fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input), method = init?.method ?? 'GET', body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      calls.push({ url, method, body });
+      if (url.endsWith('/status')) return response(200, { value: {} });
+      if (url.endsWith('/session')) return response(200, { value: { sessionId: 'locator-session' } });
+      if (url.endsWith('/elements')) return response(200, { value: [{ 'element-6066-11e4-a52e-4f735466cecf': 'css-element' }] });
+      if (url.endsWith('/execute/sync')) {
+        const locator = body.args[0];
+        if (body.script.includes('out.push(e)')) return response(200, { value: matches(locator).slice(0, 2).map(({ index }) => ({ 'element-6066-11e4-a52e-4f735466cecf': `element-${index}` })) });
+        if (body.script.includes('return {visible:')) {
+          const ref = locator?.['element-6066-11e4-a52e-4f735466cecf'];
+          const node = nodes[Number(String(ref).replace('element-', ''))];
+          return response(200, { value: { visible: node?.visible !== false, enabled: node?.enabled !== false } });
+        }
+        const summary = matches(locator).slice(0, body.args[1]).map(({ node, index }) => ({ index, role: node.role || node.tag.toLowerCase(), accessibleName: (node.label || node.text || node.alt || '').trim().slice(0, 300), text: node.text, enabled: node.enabled !== false, visible: node.visible !== false, rect: { x: 0, y: 0, width: 10, height: 10 } }));
+        return response(200, { value: summary });
+      }
+      if (url.endsWith('/text')) return response(200, { value: 'resolved text' });
+      return response(200, { value: null });
+    }) as typeof fetch,
+  });
+  await service.start();
+  return { service, calls };
+}
+
+test('semantic locators use exact case-sensitive role/name and test id arguments and W3C references', async () => {
+  const root = await project();
+  try {
+    const { service, calls } = await locatorHarness(root, [
+      { tag: 'BUTTON', label: `Say "hi"'); document.body.innerHTML='pwned'//`, text: 'Other' },
+      { tag: 'BUTTON', label: 'Increment counter', text: 'Increment', testId: 'counter-increment' },
+      { tag: 'BUTTON', label: 'increment counter', text: 'lowercase' },
+    ]);
+    try {
+      const locator = { by: 'role' as const, role: 'button', name: `Say "hi"'); document.body.innerHTML='pwned'//` };
+      await service.click(locator);
+      const execute = calls.find(call => call.url.endsWith('/execute/sync') && call.body?.script.includes('return out;'))!;
+      assert.deepEqual(execute.body.args, [locator]);
+      assert.equal(execute.body.script.includes(locator.name), false);
+      assert.match(execute.body.script, /out.length<2/);
+      assert.ok(calls.some(call => call.url.endsWith('/element/element-0/click')));
+      const actionability = calls.find(call => call.url.endsWith('/execute/sync') && call.body?.script.includes('return {visible:'))!;
+      assert.deepEqual(actionability.body.args, [{ 'element-6066-11e4-a52e-4f735466cecf': 'element-0' }], 'state check uses the exact returned W3C reference');
+      assert.equal(await service.text({ by: 'role', role: 'button', name: 'Increment counter' }), 'resolved text');
+      assert.equal(await service.text({ by: 'test_id', value: 'counter-increment' }), 'resolved text');
+      assert.equal((await service.find({ by: 'role', role: 'button', name: 'Increment counter' }))[0]?.accessibleName, 'Increment counter');
+      assert.equal((await service.find({ by: 'role', role: 'button', name: 'increment counter' })).length, 1);
+      assert.equal((await service.find({ by: 'role', role: 'button', name: 'INCREMENT COUNTER' })).length, 0);
+    } finally { await service.stop(); }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('semantic mutations fail closed for zero, duplicate, hidden, or disabled matches; CSS remains W3C CSS lookup', async () => {
+  const root = await project();
+  try {
+    for (const nodes of [
+      [{ tag: 'BUTTON', text: 'other' }],
+      [{ tag: 'BUTTON', text: 'Go' }, { tag: 'BUTTON', text: 'Go' }, { tag: 'BUTTON', text: 'Go' }],
+      [{ tag: 'BUTTON', text: 'Go', visible: false }],
+      [{ tag: 'BUTTON', text: 'Go', enabled: false }],
+    ]) {
+      const { service, calls } = await locatorHarness(root, nodes);
+      try {
+        let failure: unknown;
+        try { await service.click({ by: 'role', role: 'button', name: 'Go' }); } catch (error) { failure = error; }
+        assert.match(String(failure), /exactly one|visible and enabled/);
+        if (nodes.length > 1) {
+          assert.match(String(failure), /matches: 2 or more/);
+          assert.doesNotMatch(String(failure), /"text"/);
+        }
+        assert.equal(calls.some(call => /\/element\/.*\/click$/.test(call.url)), false);
+        if (nodes.length === 1 && nodes[0]?.text === 'Go') assert.ok(calls.some(call => call.url.endsWith('/execute/sync') && call.body?.script.includes('return {visible:')), 'unique non-actionable match is checked before action');
+      } finally { await service.stop(); }
+    }
+    const { service, calls } = await locatorHarness(root, [{ tag: 'BUTTON', text: 'Go', visible: false }]);
+    try {
+      await service.click('button.primary');
+      assert.ok(calls.some(call => call.url.endsWith('/elements') && call.body.using === 'css selector' && call.body.value === 'button.primary'));
+      assert.ok(calls.some(call => call.url.endsWith('/element/css-element/click')));
+      await assert.rejects(service.scroll({ by: 'role', role: 'button', name: 'Go' }), /visible and enabled/);
+      assert.equal(calls.some(call => call.body?.script === 'arguments[0].scrollIntoView({block:"center",inline:"center"});'), false);
+    } finally { await service.stop(); }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('semantic locator validation enforces schema lengths and rejects extra or malformed fields', async () => {
+  const root = await project();
+  try {
+    const { service, calls } = await locatorHarness(root, []);
+    try {
+      for (const locator of [
+        { by: 'role', role: 'r'.repeat(101) },
+        { by: 'role', role: 'button', name: 'n'.repeat(301) },
+        { by: 'test_id', value: 'i'.repeat(1001) },
+        { by: 'test_id', value: 'ok', extra: true },
+        { by: 'role', role: 'button', unexpected: true },
+        [],
+      ]) await assert.rejects(service.find(locator as any), /Invalid desktop locator/);
+      assert.equal(calls.some(call => call.url.endsWith('/execute/sync')), false);
+    } finally { await service.stop(); }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('upload sends one bounded local path through W3C element value and returns only metadata', async () => {
   const root = await project();
   try {
@@ -846,8 +960,8 @@ test('bounded semantic APIs use safe summaries and supported W3C actions', async
     assert.equal((await service.resizeWindow(800, 600)).width, 800);
     assert.ok(requests.some(r => r.url.endsWith('/actions')));
     assert.ok(requests.some(r => r.url.endsWith('/window/rect')));
-    const detailsRequest = requests.find(r => r.url.endsWith('/execute/sync') && r.body?.includes('getComputedStyle'))!;
-    assert.doesNotMatch(detailsRequest.body!, /\.value/);
+    const detailsRequest = requests.find(r => r.url.endsWith('/execute/sync') && r.body?.includes("const e=arguments[0],s=getComputedStyle(e)"))!;
+    assert.doesNotMatch(detailsRequest.body!, /['"]value['"]/, 'details never includes an input value attribute');
     await assert.rejects(service.tree(301), /maxNodes/);
     await service.stop();
   } finally { await rm(root, { recursive: true, force: true }); }
