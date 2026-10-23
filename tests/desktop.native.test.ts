@@ -115,10 +115,11 @@ test('real Tauri app works through DesktopService and produces a WebView PNG', {
       if (!response.ok || json.value?.error) throw Error(`Native DOM probe failed: ${json.value?.message ?? response.statusText}`);
       return json.value;
     };
-    await service.click({ by: 'placeholder', value: 'Native placeholder acceptance' });
+    await service.click({ by: 'label', value: 'Native placeholder acceptance' });
     assert.deepEqual(await rawExecute(`const e=document.activeElement;return {tag:e?.tagName,placeholder:e?.getAttribute('placeholder')}`), {
       tag: 'INPUT', placeholder: 'Native placeholder acceptance',
-    }, 'native WebDriver resolves and clicks the exact placeholder locator');
+    }, 'native WebDriver resolves and clicks the associated wrapping label locator');
+    assert.equal((await service.details({ by: 'label', value: 'Upload fixture' })).attributes.type, 'file', 'the explicit for/id label resolves to its native file input');
     await rawExecute(`const e=document.createElement('div');e.className='phase6a-mask-target';e.id='phase6a-mask-target';e.setAttribute('style','position:fixed;left:10px;top:10px;width:60px;height:40px;background:red;color:white');document.body.append(e);const s=document.createElement('style');s.textContent='dialog{display:none!important;opacity:0!important;transform:scale(0)!important;clip-path:inset(50%)!important;visibility:hidden!important;filter:blur(100px)!important;animation:hide 10s infinite!important;transition:opacity 10s!important}dialog div{display:none!important;opacity:0!important;transform:scale(0)!important;clip-path:inset(50%)!important;visibility:hidden!important;filter:blur(100px)!important;animation:hide 10s infinite!important;transition:opacity 10s!important}.phase6a-mask-target{position:fixed!important;background:blue!important}';document.head.append(s);return true`);
     const overlayRuntime = await rawExecute(`const d=document.createElement('dialog');document.body.append(d);let showModal=false,modalSelector=false,error='';try{d.showModal();showModal=d.open;try{document.querySelectorAll('dialog:modal');modalSelector=true}catch(e){error=String(e)}if(d.open)d.close()}catch(e){error=String(e)}d.remove();return {showModal,modalSelector,error}`);
     if (!overlayRuntime.showModal || !overlayRuntime.modalSelector) {

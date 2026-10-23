@@ -67,15 +67,16 @@ async function uploadHarness(root: string, options: { matches?: number; tagName?
   return { service, calls };
 }
 
-type LocatorNode = { tag: string; role?: string; label?: string; text: string; alt?: string; testId?: string; placeholder?: string; inputType?: string; visible?: boolean; enabled?: boolean };
+type LocatorNode = { tag: string; role?: string; label?: string; text: string; alt?: string; testId?: string; placeholder?: string; inputType?: string; visible?: boolean; enabled?: boolean; associatedLabels?: { text: string; visible?: boolean }[] };
 async function locatorHarness(root: string, nodes: LocatorNode[]) {
   const calls: { url: string; method: string; body?: any }[] = [];
-  const matches = (locator: any) => nodes.map((node, index) => ({ node, index })).filter(({ node }) => {
+  const matches = (locator: any) => typeof locator === 'string' ? [] : nodes.map((node, index) => ({ node, index })).filter(({ node }) => {
     const role = node.role || ({ A: 'link', BUTTON: 'button', INPUT: 'textbox', TEXTAREA: 'textbox', SELECT: 'combobox' } as Record<string, string>)[node.tag] || node.tag.toLowerCase();
     const name = (node.label || node.text || node.alt || '').trim().slice(0, 300);
     return locator.by === 'role' ? role === locator.role && (locator.name === undefined || name === locator.name)
-      : locator.by === 'test_id' ? node.testId === locator.value
-        : (node.tag === 'TEXTAREA' || node.tag === 'INPUT' && ['text', 'search', 'url', 'tel', 'email', 'password'].includes(node.inputType ?? 'text')) && node.placeholder === locator.value;
+        : locator.by === 'test_id' ? node.testId === locator.value
+        : locator.by === 'placeholder' ? (node.tag === 'TEXTAREA' || node.tag === 'INPUT' && ['text', 'search', 'url', 'tel', 'email', 'password'].includes(node.inputType ?? 'text')) && node.placeholder === locator.value
+          : ['TEXTAREA', 'SELECT'].includes(node.tag) || node.tag === 'INPUT' && node.inputType !== 'hidden' ? (node.associatedLabels ?? []).some(label => label.visible !== false && label.text.replace(/\s+/g, ' ').trim() === locator.value.replace(/\s+/g, ' ').trim()) : false;
   });
   const service = new DesktopService(config(root), {
     ...driverFakes, spawn: (() => fakeChild()) as typeof import('node:child_process').spawn,
@@ -176,6 +177,10 @@ test('semantic locator validation enforces schema lengths and rejects extra or m
         { by: 'test_id', value: 'i'.repeat(1001) },
         { by: 'placeholder', value: '' },
         { by: 'placeholder', value: 'p'.repeat(1001) },
+        { by: 'label', value: '' },
+        { by: 'label', value: 'l'.repeat(1001) },
+        { by: 'label', value: 'ok', extra: true },
+        { by: 'label', value: 42 },
         { by: 'placeholder', value: 'ok', extra: true },
         { by: 'placeholder', value: 42 },
         { by: 'test_id', value: 'ok', extra: true },
@@ -237,6 +242,53 @@ test('placeholder semantic actions reject duplicates and check visibility and en
           const check = calls.find(call => call.body?.script?.includes('return {visible:'))!;
           assert.deepEqual(check.body.args, [{ 'element-6066-11e4-a52e-4f735466cecf': 'element-0' }]);
         }
+      } finally { await service.stop(); }
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('label locators require a visible associated label and normalize whitespace case-sensitively', async () => {
+  const root = await project();
+  try {
+    const attack = ` Say "hi"'); document.body.innerHTML='pwned'// `;
+    const { service, calls } = await locatorHarness(root, [
+      { tag: 'INPUT', inputType: 'text', text: '', associatedLabels: [{ text: `  ${attack.trim().replace(' ', '   ')}  ` }, { text: attack.trim() }] },
+      { tag: 'INPUT', inputType: 'file', text: '', associatedLabels: [{ text: 'Upload fixture' }] },
+      { tag: 'INPUT', inputType: 'hidden', text: '', associatedLabels: [{ text: 'hidden' }] },
+      { tag: 'INPUT', inputType: 'text', label: attack.trim(), text: '' },
+      { tag: 'INPUT', inputType: 'text', text: '', associatedLabels: [{ text: attack, visible: false }] },
+    ]);
+    try {
+      const locator = { by: 'label' as const, value: attack };
+      await service.click(locator);
+      assert.ok(calls.some(call => call.url.endsWith('/element/element-0/click')));
+      const script = calls.find(call => call.body?.script?.includes('out.push(e)'))!.body.script;
+      assert.deepEqual(calls.find(call => call.body?.script === script)!.body.args, [locator]);
+      assert.equal(script.includes(attack), false);
+      assert.match(script, /e\.labels/);
+      assert.equal((await service.find(locator)).length, 1);
+      assert.equal((await service.find({ by: 'label', value: 'Upload fixture' })).length, 1);
+      assert.equal((await service.find({ by: 'label', value: attack.toLowerCase() })).length, 0);
+      assert.equal((await service.find({ by: 'label', value: attack.trim() })).length, 1, 'multiple associated labels do not duplicate one target');
+      assert.equal((await service.find({ by: 'label', value: 'aria-only name' })).length, 0, 'aria-label alone is not a label association');
+      assert.deepEqual(await service.find('input'), [], 'CSS candidate lookup does not evaluate label-locator matching');
+    } finally { await service.stop(); }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('label actions reject zero, duplicate, and non-actionable matches before effects', async () => {
+  const root = await project();
+  try {
+    for (const nodes of [
+      [{ tag: 'INPUT', inputType: 'text', text: '' }],
+      [{ tag: 'INPUT', inputType: 'text', text: '', associatedLabels: [{ text: 'Go' }] }, { tag: 'INPUT', inputType: 'text', text: '', associatedLabels: [{ text: 'Go' }] }],
+      [{ tag: 'INPUT', inputType: 'text', text: '', associatedLabels: [{ text: 'Go' }], visible: false }],
+      [{ tag: 'INPUT', inputType: 'text', text: '', associatedLabels: [{ text: 'Go' }], enabled: false }],
+    ] as LocatorNode[][]) {
+      const { service, calls } = await locatorHarness(root, nodes);
+      try {
+        await assert.rejects(service.click({ by: 'label', value: 'Go' }), /exactly one|visible and enabled/);
+        assert.equal(calls.some(call => /\/element\/.*\/click$/.test(call.url)), false);
       } finally { await service.stop(); }
     }
   } finally { await rm(root, { recursive: true, force: true }); }
