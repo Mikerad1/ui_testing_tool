@@ -73,7 +73,23 @@ This is a browser/MCP test only. It does not contact Jira. `umb doctor` checks c
 
 Desktop support is an opt-in extension; it does not replace Playwright browser testing. The P0 native path uses a prebuilt Tauri binary and the native `tauri-driver` WebDriver. UMB does not attach to arbitrary existing apps. `desktop_project_inspect` is read-only; it never executes a project command. `desktop_session_start` runs only the optional command explicitly listed in `desktop.build_command` (as an argv vector with no shell), then asks `tauri-driver` to launch the configured binary. If no build command is configured, build the test/debug binary yourself first. Release/production instrumentation is not added to the Tauri app.
 
+Runtime selection defaults to `provider: browser`. The separate attached visual mode uses `provider: desktop` with an operator-supplied loopback WebDriver endpoint and existing session ID under `desktop.automation.endpoint` and `desktop.automation.session_id`. This mode never launches, discovers, or deletes sessions; it supports WebView screenshot capture only (not OS-window capture or browser navigation/actions). Both provider modes register common `visual_*` screenshot, baseline, comparison, finding, and `visual_review` tools. Review bundles contain evidence only and never claim visual assessment. Desktop mode hides unsupported `browser_*`, `test_assert`, `test_run_workflow`, and `application_sign_in` tools; provider-neutral `test_report` remains available. The managed `desktop_*` surface remains a distinct browser-provider feature.
+
+Common visual PNGs are stored below the configured artifact directory at `.umb-managed/desktop`; Store remains the sole record/reference authority. Configured file/count/aggregate/age limits apply, and referenced evidence is protected during cleanup. Image bytes are returned only as bounded MCP image blocks when `desktop.visual.return_mcp_images` is enabled; they are never included in structured metadata or text.
+
+```yaml
+provider: desktop
+desktop:
+  automation:
+    endpoint: http://127.0.0.1:4444
+    session_id: operator-supplied-session-id
+```
+
+The endpoint must be a literal numeric loopback origin. Session IDs are bearer-like and must not be shared or logged.
+
 For Linux native automation, install a compatible Tauri 2 `tauri-driver` and WebKitGTK WebDriver (`webkit2gtk-driver` where your distribution requires it). The default driver path must be provided as an absolute executable path. For real OS-window screenshots on **X11**, also install `wmctrl` and ImageMagick's `import`; the window title must match exactly and its PID must descend from UMB's managed driver process. Linux Wayland currently has no consented portal integration: `kind: window` returns an explicit unsupported/permission error and never captures the whole desktop. `kind: webview` is a distinct WebDriver screenshot and is not a substitute for `kind: window`.
+
+`npm run test:desktop-attach-native` is a separate opt-in attached-client probe. It builds the fixture, launches a fixture session as the test owner, then uses a fresh child process and the configured operator-style endpoint/session ID to capture expected background and button pixels. The test owner alone cleans up its fixture session after the child detaches. This is test-harness cleanup, not adapter lifecycle behavior.
 
 Add an explicit desktop section to the existing `umb.config.yaml` (all paths are relative to the desktop project root unless absolute paths are required):
 

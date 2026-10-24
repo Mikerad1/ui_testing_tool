@@ -9,6 +9,8 @@ import { backfillMemory, MemoryBackfillError } from '../memory/backfill.js';
 import { previewMemoryReindex } from '../memory/reindex-preview.js';
 import { reconcile, validateKnowledge } from '../knowledge/reconcile.js';
 import { PlaywrightBrowserAdapter } from '../browser/controller.js';
+import { DesktopAdapter } from '../browser/desktop-adapter.js';
+import type { BrowserAdapter } from '../browser/adapter.js';
 import { serve } from '../mcp/server.js';
 import { acquireProjectLock } from '../security/project-lock.js';
 import { runDoctor } from './doctor.js';
@@ -133,7 +135,7 @@ knowledge.command('reload').option('--config <path>','Config file','umb.config.y
    }catch(error){console.error(`Workflow export failed: ${(error as Error).message}`);process.exitCode=1;}finally{await learningWriter?.close();store?.close();await lock?.release().catch(()=>{});}
  });
    cli.command('serve').option('--config <path>', 'Config file', 'umb.config.yaml').option('--watch-knowledge','Watch YAML knowledge and reconcile validated changes').option('--no-update-check','Disable the non-blocking release check').action(async o => {
-  let store: Store | undefined, browser: PlaywrightBrowserAdapter | undefined, learningWriter:ReturnType<typeof createLearningWriter>|undefined, stop: (() => Promise<void>) | undefined;
+  let store: Store | undefined, browser: BrowserAdapter | undefined, learningWriter:ReturnType<typeof createLearningWriter>|undefined, stop: (() => Promise<void>) | undefined;
  let lock: Awaited<ReturnType<typeof acquireProjectLock>> | undefined;
   const lifecycle = new ShutdownLifecycle(async () => {
     try { await stop?.(); } finally { try { await learningWriter?.close(); } finally { try { await browser?.close(); } finally { try { store?.close(); } finally { await lock?.release(); } } } }
@@ -151,10 +153,10 @@ knowledge.command('reload').option('--config <path>','Config file','umb.config.y
    await mkdir(path.dirname(db), { recursive: true }); store = await Store.open(db, config.project.id, config.memory.environment ?? 'legacy');learningWriter=await createProjectLearningWriter(store,config,root);
    try{await reconcile(await safePath(root, config.knowledge.path), store,learningWriter);}catch(error){if(!(error instanceof Error&&error.message==='NLP sidecar request failed'))throw error;console.error('Knowledge load deferred; the last valid graph remains active and learning writes are unavailable.');}
    if (lifecycle.stopRequested) throw Error('Shutdown requested during startup');
-  browser = new PlaywrightBrowserAdapter(config, root); await browser.start();
+  browser = config.provider === 'desktop' ? new DesktopAdapter(config, root) : new PlaywrightBrowserAdapter(config, root); await browser.start();
    if (lifecycle.stopRequested) throw Error('Shutdown requested during startup');
    let applicationReady = false;
-   try { await browser.navigate(config.project.base_url, 'domcontentloaded', 2500); applicationReady = true; } catch { /* The configured application may start after UMB. */ }
+   if(config.provider==='browser')try { await browser.navigate(config.project.base_url, 'domcontentloaded', 2500); applicationReady = true; } catch { /* The configured application may start after UMB. */ }
     if (lifecycle.stopRequested) throw Error('Shutdown requested during startup');
      const stopServer=await serve(config, store, browser, { applicationReady, projectRoot:root,knowledgeRoot:await safePath(root,config.knowledge.path),learningWriter,watchKnowledge:Boolean(o.watchKnowledge),approver: async prompt => { if(!process.stdin.isTTY||!process.stdout.isTTY)return false;const rl=createInterface({input:process.stdin,output:process.stdout});try{return (await rl.question(prompt)).trim().toLowerCase()==='y';}finally{rl.close();} } });
      stop=async()=>{try{await stopServer();}finally{await learningWriter?.close();}};
@@ -166,7 +168,7 @@ knowledge.command('reload').option('--config <path>','Config file','umb.config.y
  });
  cli.command('mcp').option('--stdio','Use local subprocess stdio transport').option('--config <path>','Config file','umb.config.yaml').action(async o => {
   if(!o.stdio){console.error('Specify --stdio for the local subprocess transport.');process.exitCode=1;return;}
-   let store:Store|undefined,browser:PlaywrightBrowserAdapter|undefined,learningWriter:ReturnType<typeof createLearningWriter>|undefined,stop:(()=>Promise<void>)|undefined;
+   let store:Store|undefined,browser:BrowserAdapter|undefined,learningWriter:ReturnType<typeof createLearningWriter>|undefined,stop:(()=>Promise<void>)|undefined;
   let lock:Awaited<ReturnType<typeof acquireProjectLock>>|undefined;
    const lifecycle=new ShutdownLifecycle(async()=>{try{await stop?.();}finally{try{await learningWriter?.close();}finally{try{await browser?.close();}finally{try{store?.close();}finally{await lock?.release();}}}}});
   const signal=()=>lifecycle.requestStop();process.on('SIGINT',signal);process.on('SIGTERM',signal);process.stdin.once('end',signal);
@@ -175,9 +177,9 @@ knowledge.command('reload').option('--config <path>','Config file','umb.config.y
    const db=await safePath(root,config.memory.database);lock=await acquireProjectLock(root,config.project.id,config.memory.database);
     await mkdir(path.dirname(db),{recursive:true});store=await Store.open(db,config.project.id,config.memory.environment??'legacy');learningWriter=await createProjectLearningWriter(store,config,root);
     try{await reconcile(await safePath(root,config.knowledge.path),store,learningWriter);}catch(error){if(!(error instanceof Error&&error.message==='NLP sidecar request failed'))throw error;console.error('Knowledge load deferred; the last valid graph remains active and learning writes are unavailable.');}if(lifecycle.stopRequested)throw Error('Shutdown requested during startup');
-    browser=new PlaywrightBrowserAdapter(config,root);await browser.start();if(lifecycle.stopRequested)throw Error('Shutdown requested during startup');
+    browser=config.provider === 'desktop' ? new DesktopAdapter(config,root) : new PlaywrightBrowserAdapter(config,root);await browser.start();if(lifecycle.stopRequested)throw Error('Shutdown requested during startup');
     let applicationReady = false;
-    try { await browser.navigate(config.project.base_url, 'domcontentloaded', 2500); applicationReady = true; } catch { /* The configured application may start after UMB. */ }
+    if(config.provider==='browser')try { await browser.navigate(config.project.base_url, 'domcontentloaded', 2500); applicationReady = true; } catch { /* The configured application may start after UMB. */ }
     if(lifecycle.stopRequested)throw Error('Shutdown requested during startup');
      const stopServer=await serve(config,store,browser,{stdio:true,applicationReady,projectRoot:root,knowledgeRoot:await safePath(root,config.knowledge.path),learningWriter});stop=async()=>{try{await stopServer();}finally{await learningWriter?.close();}};
    lifecycle.markReady();await lifecycle.waitForStopRequest();

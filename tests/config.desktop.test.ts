@@ -11,6 +11,7 @@ test('desktop config is optional and disabled by default', async () => {
   try {
     await writeFile(file, 'version: 1\nproject: {id: demo, name: Demo, base_url: http://127.0.0.1:3000}\n');
     assert.equal((await loadConfig(file)).config.desktop, undefined);
+    assert.equal((await loadConfig(file)).config.provider,'browser');
 
     await writeFile(file, 'version: 1\nproject: {id: demo, name: Demo, base_url: http://127.0.0.1:3000}\ndesktop: {}\n');
     const desktop = (await loadConfig(file)).config.desktop!;
@@ -26,6 +27,20 @@ test('desktop config is optional and disabled by default', async () => {
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('runtime adapter provider requires a literal loopback attach endpoint and operator session id',async()=>{
+  const root=await mkdtemp(path.join(os.tmpdir(),'umb-provider-config-')),file=path.join(root,'umb.config.yaml');
+  const prefix='version: 1\nproject: {id: demo, name: Demo, base_url: http://127.0.0.1:3000}\nprovider: desktop\ndesktop:\n  automation:\n';
+  try{
+    await writeFile(file,`${prefix}    endpoint: http://127.0.0.1:4444\n    session_id: operator-session\n`);
+    assert.equal((await loadConfig(file)).config.provider,'desktop');
+    for(const config of [
+      `${prefix}    endpoint: http://localhost:4444\n    session_id: session\n`,
+      `${prefix}    endpoint: http://127.0.0.1:4444/redirect\n    session_id: session\n`,
+      `${prefix}    endpoint: http://127.0.0.1:4444\n`,
+    ]){await writeFile(file,config);await assert.rejects(loadConfig(file));}
+  }finally{await rm(root,{recursive:true,force:true});}
 });
 
 test('desktop config validates command arrays and rejects unsupported options', async () => {

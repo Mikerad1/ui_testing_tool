@@ -28,7 +28,7 @@ test('real Tauri app works through DesktopService and produces a WebView PNG', {
   const cargo = commandPath('cargo');
   const driverExecutable = commandPath('tauri-driver');
   if (!cargo) throw Error('Install Rust/Cargo, then rerun npm run test:desktop-native.');
-  if (!driverExecutable) throw Error('Install tauri-driver with `cargo install tauri-driver --locked` and ensure ~/.cargo/bin is on PATH.');
+  if (!driverExecutable) throw Error('Install tauri-driver 2.1.0 with `cargo install tauri-driver --locked --version 2.1.0` and ensure ~/.cargo/bin is on PATH.');
   if (!commandPath('WebKitWebDriver')) throw Error('Install WebKitWebDriver (Debian/Ubuntu package: webkit2gtk-driver), then rerun the native acceptance test.');
 
   const manifest = path.join(fixtureRoot, 'src-tauri', 'Cargo.toml');

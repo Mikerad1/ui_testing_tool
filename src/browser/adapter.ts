@@ -50,6 +50,22 @@ export type BrowserFindResult = {
 };
 export type BrowserScreenshot = { artifactPath: string };
 
+export type ScreenshotRequest={fullPage?:boolean;fileName?:string;kind?:'webview'|'window';profile?:Record<string,unknown>};
+export type ScreenshotResult={artifactPath:string;artifactRef:string;sha256:string;bytes:number;width:number;height:number;captureKind:'webview'|'window';image?:Buffer};
+export type RawScreenshotCapture={image:Buffer;width:number;height:number;captureKind:'webview'|'window'};
+export type BaselineRequest={baselineKey:string;captureKind:'webview'|'window';profile?:Record<string,unknown>;approval_attestation:'approved';replace?:boolean;expectedRevision?:number};
+export type BaselineReadRequest={baselineKey:string;revision?:number};
+export type ComparisonRequest={baselineKey:string;captureKind:'webview'|'window';profile?:Record<string,unknown>;threshold?:number;findingIds?:string[]};
+export type FindingsQuery={status?:'open'|'in_progress'|'resolved'|'reopened';limit?:number};
+export type FindingInput={screen:string;severity:'low'|'medium'|'high'|'critical';confidence:number;category:string;observedIssue:string;screenshotRef:string;screenshotSha256:string;screenshotBytes:number;region?:Record<string,unknown>;selector?:string;remediation?:string;verificationMethod?:string};
+export type FindingUpdate={id:string;status:'in_progress'|'resolved'|'reopened';note?:string;assessment?:string;comparisonId?:string};
+export type VisualCapabilities={screenshotKinds:readonly ('webview'|'window')[];baselines:boolean;comparison:boolean;findings:boolean};
+export type BaselineResult=Record<string,unknown>&{image?:Buffer};
+export type ComparisonResult=Record<string,unknown>&{imageBundle?:Array<{name:string;bytes:Buffer}>};
+export type FindingsResult=Record<string,unknown>[];
+export type FindingResult=Record<string,unknown>;
+export interface VisualAdapter { readonly capabilities:VisualCapabilities; takeScreenshot(request:ScreenshotRequest):Promise<ScreenshotResult>; createBaseline(request:BaselineRequest):Promise<BaselineResult>; readBaseline(request:BaselineReadRequest):Promise<BaselineResult>; compareWithBaseline(request:ComparisonRequest):Promise<ComparisonResult>; listFindings(request:FindingsQuery):Promise<FindingsResult>; createFinding(request:FindingInput):Promise<FindingResult>; updateFinding(request:FindingUpdate&{expectedVersion:number}):Promise<FindingResult>; }
+
 declare const capturedBrowserTargetBrand: unique symbol;
 /** Opaque provider-owned reference to the exact visible DOM target captured for approval. */
 export interface CapturedBrowserTarget {
@@ -71,7 +87,7 @@ export type CapturedBrowserApproval = {
 };
 
 /** The MCP/browser-workflow browser contract. No provider object or provider-specific type crosses it. */
-export interface BrowserAdapter {
+export interface BrowserAdapter extends VisualAdapter {
   readonly revision: number;
   start(): Promise<void>;
   close(): Promise<void>;
@@ -88,7 +104,9 @@ export interface BrowserAdapter {
   actionSequence(limit?: number): BrowserActionRecord[];
   assertCondition(condition: BrowserAssertionCondition, target?: BrowserTarget, expected?: string | number, timeoutMs?: number, match?: 'contains' | 'exact'): Promise<BrowserAssertionResult>;
   upload(target: BrowserTarget, projectRelativePath: string): Promise<BrowserStatus>;
-  takeScreenshot(fullPage?: boolean, fileName?: string): Promise<BrowserScreenshot>;
+  takeScreenshot(request:ScreenshotRequest):Promise<ScreenshotResult>;
+  takeScreenshot(fullPage?:boolean,fileName?:string):Promise<BrowserScreenshot>;
+  captureScreenshotBytes(request:ScreenshotRequest):Promise<RawScreenshotCapture>;
   setViewport(width: number, height: number): Promise<BrowserStatus>;
   setActionTimeout(timeoutMs: number): void;
   consoleErrorCount(): number;

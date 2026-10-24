@@ -1,0 +1,26 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {spawnSync,spawn} from 'node:child_process';
+import {mkdtemp,rm} from 'node:fs/promises';
+import {once} from 'node:events';
+import os from 'node:os';
+import path from 'node:path';
+import {fileURLToPath} from 'node:url';
+import {inflateSync} from 'node:zlib';
+import {DesktopService} from '../src/desktop/index.js';
+
+const enabled=process.env.npm_lifecycle_event==='test:desktop-attach-native'||process.env.UMB_RUN_TAURI_ATTACH_NATIVE==='1';
+const fixtureRoot=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'fixtures/tauri-app');
+function command(name:string){const result=spawnSync('which',[name],{encoding:'utf8'});return result.status===0?result.stdout.trim():undefined;}
+function pixel(png:Buffer,x:number,y:number){assert.equal(png.subarray(0,8).toString('hex'),'89504e470d0a1a0a');let offset=8,width=0,height=0,bitDepth=0,colorType=0;const data:Buffer[]=[];while(offset<png.length){const length=png.readUInt32BE(offset),type=png.toString('ascii',offset+4,offset+8),chunk=png.subarray(offset+8,offset+8+length);if(type==='IHDR'){width=chunk.readUInt32BE(0);height=chunk.readUInt32BE(4);bitDepth=chunk[8]!;colorType=chunk[9]!;}if(type==='IDAT')data.push(chunk);offset+=12+length;if(type==='IEND')break;}assert.equal(bitDepth,8);assert.ok(colorType===2||colorType===6);assert.ok(x<width&&y<height);const channels=colorType===6?4:3,stride=width*channels,raw=inflateSync(Buffer.concat(data)),rows=Buffer.alloc(stride*height);let cursor=0;for(let row=0;row<height;row++){const filter=raw[cursor++]!,base=row*stride;for(let i=0;i<stride;i++){const value=raw[cursor++]!,left=i>=channels?rows[base+i-channels]!:0,up=row?rows[base-stride+i]!:0,upperLeft=row&&i>=channels?rows[base-stride+i-channels]!:0;let predictor=0;if(filter===1)predictor=left;else if(filter===2)predictor=up;else if(filter===3)predictor=Math.floor((left+up)/2);else if(filter===4){const p=left+up-upperLeft,pa=Math.abs(p-left),pb=Math.abs(p-up),pc=Math.abs(p-upperLeft);predictor=pa<=pb&&pa<=pc?left:pb<=pc?up:upperLeft;}else assert.equal(filter,0);rows[base+i]=(value+predictor)&255;}}const i=(y*width+x)*channels;return[rows[i],rows[i+1],rows[i+2]];}
+async function runProbe(endpoint:string,session:string,root:string){return await new Promise<{code:number|null;stdout:string;stderr:string}>((resolve,reject)=>{const child=spawn(process.execPath,['--import','tsx','tests/helpers/native-attached-screenshot.ts'],{cwd:path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..'),env:{...process.env,UMB_ATTACH_ENDPOINT:endpoint,UMB_ATTACH_SESSION:session,UMB_ATTACH_ROOT:root},stdio:['ignore','pipe','pipe']});let stdout='',stderr='';child.stdout.setEncoding('utf8').on('data',x=>stdout+=x);child.stderr.setEncoding('utf8').on('data',x=>stderr+=x);child.once('error',reject);child.once('close',code=>resolve({code,stdout,stderr}));});}
+
+test('fresh-process external attachment captures expected fixture pixels and detach preserves session',{skip:!enabled,timeout:600_000},async()=>{
+  if(process.platform!=='linux')throw Error('Attached native fixture currently supports Linux only');
+  const cargo=command('cargo'),driver=command('tauri-driver'),webkit=command('WebKitWebDriver');if(!cargo||!driver||!webkit)throw Error('Requires Cargo, tauri-driver 2.1.0, and WebKitWebDriver');
+  const installed=spawnSync(cargo,['install','--list'],{encoding:'utf8'});if(installed.status!==0||!/^tauri-driver v2\.1\.0:/m.test(installed.stdout))throw Error('Native attach test requires exact tauri-driver 2.1.0');
+  const manifest=path.join(fixtureRoot,'src-tauri','Cargo.toml');const build=spawnSync(cargo,['build','--locked','--manifest-path',manifest],{cwd:fixtureRoot,encoding:'utf8',timeout:540_000});if(build.status!==0)throw Error(`Fixture build failed: ${(build.stderr??'').slice(-3000)}`);
+  const root=await mkdtemp(path.join(os.tmpdir(),'umb-attached-native-')),binary=path.join(fixtureRoot,'src-tauri','target','debug','tauri-acceptance-fixture');let service:DesktopService|undefined;
+  try{service=new DesktopService({projectRoot:root,tauriBinary:binary,driverExecutable:driver,windowTitle:'Tauri Acceptance Fixture',artifactDirectory:'artifacts',readinessTimeoutMs:60_000});const session=await service.start();const probe=await runProbe(session.endpoint,session.id,root);assert.equal(probe.code,0,probe.stderr);const result=JSON.parse(probe.stdout) as {png:string};const png=Buffer.from(result.png,'base64');assert.deepEqual(pixel(png,5,5),[244,246,248],'expected fixture page background pixel');assert.deepEqual(pixel(png,400,318),[36,87,197],'expected fixture blue increment button pixel');assert.equal((await service.status()).state,'running','adapter close must detach without deleting operator session');}
+  finally{await service?.stop();await rm(root,{recursive:true,force:true});}
+});
