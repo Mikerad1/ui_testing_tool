@@ -7,9 +7,13 @@ export type WorkflowExecutableStep = Extract<WorkflowStep, { action: 'navigate' 
 export type WorkflowWaitStep = Extract<WorkflowStep, { action: 'wait' }>;
 export type WorkflowAssertResult = { passed: boolean; observedCount?: number };
 export type WorkflowFailureCaptureMode = 'screenshot' | 'snapshot' | 'console_errors';
-export type WorkflowFailureCapture = { screenshot?: string | null; snapshot?: Record<string, number>; console_errors?: number };
+export type WorkflowFailureCapture = { screenshot?: string | null; screenshot_status?: 'captured' | 'capture_failed' | 'cleanup_failed'; snapshot?: Record<string, number>; console_errors?: number };
 export type WorkflowSessionState = { closed: boolean };
 export type WorkflowDriverRunContext = { workflow: WorkflowDocument; workflowNodeId: string; workflowId: string; runId: string; knowledgeRoot?: string };
+export class WorkflowCapabilityError extends Error {
+  readonly code = 'capability_unavailable' as const;
+  constructor(message = 'Workflow requests an unsupported browser capability') { super(message); this.name = 'WorkflowCapabilityError'; }
+}
 
 /** Backend-neutral operations required by shared deterministic workflow orchestration. */
 export interface WorkflowDriver {
@@ -30,7 +34,7 @@ type Approval = CapturedBrowserApproval;
 type BrowserDriverOptions = {
   store: Store;
   browser: BrowserAdapter;
-  authorize: (action: string, target: BrowserTarget, revision: number) => Promise<Approval | undefined>;
+  authorize: (action: string, target: BrowserTarget | undefined, revision: number) => Promise<Approval | undefined>;
 };
 
 function screenId(value: string) { return value.replace(/^(screen:|role:)/, ''); }
@@ -100,8 +104,28 @@ export function createBrowserWorkflowDriver(options: BrowserDriverOptions): Work
   };
 
   return {
-    beginRun: context => { runContext = context; initialConsoleErrors = browser.consoleErrorCount(); },
-    validateWorkflow: () => {},
+    beginRun: context => { runContext = context; initialConsoleErrors = browser.workflowCapabilities ? 0 : browser.consoleErrorCount(); },
+    validateWorkflow: workflow => {
+      const capabilities = browser.workflowCapabilities;
+      if (!capabilities) return;
+      const reject = (): never => { throw new WorkflowCapabilityError(); };
+      if (workflow.start_screen || workflow.end_screen) reject();
+      for (const mode of workflow.on_failure?.capture ?? []) if (!capabilities.failureCapture.includes(mode as any)) reject();
+      const locatorAllowed = (target: any) => !!target && typeof target === 'object' && 'by' in target && capabilities.locatorStrategies.includes(target.by);
+      for (const check of workflow.preconditions ?? []) {
+        if (check.condition !== 'text' || check.match !== 'exact' || !locatorAllowed(check.target)) reject();
+      }
+      for (const step of workflow.steps) {
+        if (capabilities.minimumStepTimeoutMs !== undefined && step.timeout_ms !== undefined && step.timeout_ms < capabilities.minimumStepTimeoutMs) reject();
+        if (step.action === 'navigate') { if (!capabilities.actions.includes('navigate')) reject(); continue; }
+        if (step.action === 'scroll') { if (!capabilities.actions.includes('scroll')) reject(); continue; }
+        if (step.action === 'click') { if (!capabilities.actions.includes('click') || !locatorAllowed(step.target)) reject(); continue; }
+        if (step.action === 'fill' || step.action === 'type' || step.action === 'press' || step.action === 'select') { if (!capabilities.actions.includes(step.action) || !locatorAllowed(step.target)) reject(); if(step.action==='press'&&capabilities.supportsPressKey&&!capabilities.supportsPressKey(step.key))reject(); continue; }
+        if (step.action === 'wait') { if (!capabilities.waits.includes(step.condition) || step.condition !== 'visible' || !locatorAllowed(step.target)) reject(); continue; }
+        if (step.action === 'assert') { if (step.condition !== 'text' || step.match !== 'exact' || !capabilities.assertions.includes('text:exact') || !locatorAllowed(step.target)) reject(); continue; }
+        reject();
+      }
+    },
     validateSession: session => !session.closed,
     setActionTimeout: timeoutMs => browser.setActionTimeout(timeoutMs),
     routeMatches,
@@ -112,8 +136,8 @@ export function createBrowserWorkflowDriver(options: BrowserDriverOptions): Work
     },
     wait: async (step, variables, timeoutMs) => { await browser.waitFor(step.condition, typeof step.target === 'string' ? substitute(step.target, variables) : resolveTarget(step.target), timeoutMs); },
     execute: async (step, variables, timeoutMs) => {
-      if (step.action === 'navigate') { await browser.navigate(step.path, 'load', timeoutMs); return; }
-      if (step.action === 'scroll') { await browser.scroll(step.direction, step.amount); return; }
+      if (step.action === 'navigate') { if(browser.workflowCapabilities)await options.authorize('navigate',undefined,browser.revision);await browser.navigate(step.path, 'load', timeoutMs); return; }
+      if (step.action === 'scroll') { if(browser.workflowCapabilities)await options.authorize('scroll',undefined,browser.revision);await browser.scroll(step.direction, step.amount); return; }
       const target = resolveTarget(step.target), action = step.action, approval = await options.authorize(action, target, browser.revision);
       try {
         if (approval) await browser.performCaptured(action, approval.handle, action === 'press' ? step.key : action === 'fill' || action === 'type' || action === 'select' ? substitute(step.value, variables) : undefined, 0, approval.guard);
@@ -126,7 +150,17 @@ export function createBrowserWorkflowDriver(options: BrowserDriverOptions): Work
     },
     proposeFallbacks,
     captureFailure: async mode => {
-      if (mode === 'screenshot') { try { return { screenshot: (await browser.takeScreenshot(false)).artifactPath }; } catch { return { screenshot: null }; } }
+      if (mode === 'screenshot') {
+        try {
+          const result = await (browser.workflowCapabilities ? browser.takeScreenshot({ kind: 'webview' }) : browser.takeScreenshot(false));
+          return browser.workflowCapabilities ? { screenshot: result.artifactPath, screenshot_status: 'captured' } : { screenshot: result.artifactPath };
+        } catch (error) {
+          if (!browser.workflowCapabilities) return { screenshot: null };
+          const message = error instanceof Error ? error.message : '';
+          const cleanupFailed = /cleanup_failed|persisted artifact cleanup failed/i.test(message);
+          return { screenshot: null, screenshot_status: cleanupFailed ? 'cleanup_failed' : 'capture_failed' };
+        }
+      }
       if (mode === 'snapshot') {
         try {
           const snapshot = await browser.snapshot({ mode: 'interactive' }) as any, counts: Record<string, number> = {};

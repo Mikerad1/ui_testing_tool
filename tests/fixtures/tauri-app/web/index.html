@@ -25,6 +25,16 @@
       <label for="native-upload">Upload fixture</label>
       <input id="native-upload" type="file">
       <output id="upload-status" aria-live="polite"></output>
+      <section id="native-controls" hidden>
+        <label>Native text <input id="native-text" type="text"></label>
+        <label>Native select
+          <select id="native-select"><option value="first">First</option><option value="second">Second</option></select>
+          <output id="native-select-status"></output>
+        </label>
+        <div id="native-scroll-target">Native scroll target</div>
+        <output id="native-scroll-status"></output>
+        <output id="native-key-status"></output>
+      </section>
     </main>
     <script>
       const count = document.getElementById('count');
@@ -41,6 +51,7 @@
       });
       document.getElementById('nested-save').addEventListener('click', () => {
         document.getElementById('nested-save-status').textContent = 'Saved';
+        document.getElementById('native-controls').hidden = false;
       });
       const uploadStatus = document.getElementById('upload-status');
       document.getElementById('native-upload').addEventListener('change', async event => {
@@ -50,6 +61,16 @@
           return;
         }
         uploadStatus.textContent = `${file.name} | ${file.size} bytes | ${await file.text()}`;
+      });
+      document.getElementById('native-select').addEventListener('change', event => {
+        document.getElementById('native-select-status').textContent = `change:${event.currentTarget.value}`;
+      });
+      document.addEventListener('keydown', event => {
+        document.getElementById('native-key-status').textContent = event.key;
+      });
+      document.getElementById('native-scroll-target').style.marginBottom = '1200px';
+      window.addEventListener('scroll', () => {
+        document.getElementById('native-scroll-status').textContent = String(window.scrollY);
       });
     </script>
   </body>

@@ -28,7 +28,7 @@ export type MemoryReadOptions={trustYamlSeeds?:boolean};
 type RecallNode={id:string;stable_key:string;canonical_key:string;display_name:string;attributes_json:string;origin:string;verification_status:string;confidence:number;conflict_status:string;tombstone:number;updated_at:string};
 const WORKFLOW_ACTIONS=new Set(['navigate','click','fill','press','select','type','keyboard','upload','wait','assert','screenshot','scroll']);
 const WORKFLOW_ERROR_CODES=new Set(['precondition_failed','missing_variable','timeout','approval_denied','revision_conflict','navigation_denied','target_invalid','assertion_failed','action_failed','interrupted']);
-const ASSERTION_CAPTURE_CODES=new Set(['quota_exceeded','capture_failed']);
+const ASSERTION_CAPTURE_CODES=new Set(['quota_exceeded','capture_failed','artifact_rollback_failed']);
 const BROWSER_WORKFLOW_RUN_SQL=(alias:string)=>`CASE WHEN json_valid(${alias}.environment_json)=1 THEN CASE WHEN json_type(${alias}.environment_json)='object' THEN CASE WHEN json_type(${alias}.environment_json,'$.backend') IS NULL THEN 1 WHEN json_type(${alias}.environment_json,'$.backend')='text' AND json_extract(${alias}.environment_json,'$.backend')='browser' THEN 1 ELSE 0 END ELSE 0 END ELSE 0 END=1`;
 const isWorkflowTimestamp=(value:string)=>value.length<=100&&Number.isFinite(Date.parse(value))&&new Date(value).toISOString()===value;
 const SAFE_PRAGMAS=new Set(['foreign_key_check','integrity_check','quick_check','schema_version','user_version']);
@@ -481,9 +481,10 @@ export class Store {
       UNION SELECT screenshot_ref AS ref FROM desktop_visual_findings WHERE project_id=?
       UNION SELECT after_ref AS ref FROM desktop_visual_comparisons WHERE project_id=?
       UNION SELECT diff_ref AS ref FROM desktop_visual_comparisons WHERE project_id=?
-      UNION SELECT artifact_ref AS ref FROM evidence WHERE project_id=? AND kind='workflow_desktop_screenshot' AND artifact_ref IS NOT NULL
-      UNION SELECT artifact_ref AS ref FROM workflow_step_attempts WHERE project_id=? AND artifact_ref IS NOT NULL
-    `).all(this.projectId,this.projectId,this.projectId,this.projectId,this.projectId,this.projectId) as Array<{ref:string}>;
+       UNION SELECT artifact_ref AS ref FROM evidence WHERE project_id=? AND kind='workflow_desktop_screenshot' AND artifact_ref IS NOT NULL
+       UNION SELECT artifact_ref AS ref FROM evidence WHERE project_id=? AND kind='assertion' AND artifact_ref IS NOT NULL
+       UNION SELECT artifact_ref AS ref FROM workflow_step_attempts WHERE project_id=? AND artifact_ref IS NOT NULL
+    `).all(this.projectId,this.projectId,this.projectId,this.projectId,this.projectId,this.projectId,this.projectId) as Array<{ref:string}>;
     return rows.map(row=>row.ref);
   }
   createDesktopVisualComparison(input:DesktopComparisonRecord):Record<string,unknown>{

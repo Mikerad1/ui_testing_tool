@@ -60,6 +60,8 @@ export type FindingsQuery={status?:'open'|'in_progress'|'resolved'|'reopened';li
 export type FindingInput={screen:string;severity:'low'|'medium'|'high'|'critical';confidence:number;category:string;observedIssue:string;screenshotRef:string;screenshotSha256:string;screenshotBytes:number;region?:Record<string,unknown>;selector?:string;remediation?:string;verificationMethod?:string};
 export type FindingUpdate={id:string;status:'in_progress'|'resolved'|'reopened';note?:string;assessment?:string;comparisonId?:string};
 export type VisualCapabilities={screenshotKinds:readonly ('webview'|'window')[];baselines:boolean;comparison:boolean;findings:boolean};
+/** Optional, conservative workflow allow-list for adapters with a restricted execution surface. */
+export type WorkflowCapabilities={actions:readonly string[];waits:readonly string[];assertions:readonly string[];locatorStrategies:readonly BrowserTarget['by'][];failureCapture:readonly ('screenshot'|'snapshot'|'console_errors')[];routeChecks:boolean;minimumStepTimeoutMs?:number;supportsPressKey?:(key:string)=>boolean};
 export type BaselineResult=Record<string,unknown>&{image?:Buffer};
 export type ComparisonResult=Record<string,unknown>&{imageBundle?:Array<{name:string;bytes:Buffer}>};
 export type FindingsResult=Record<string,unknown>[];
@@ -88,6 +90,7 @@ export type CapturedBrowserApproval = {
 
 /** The MCP/browser-workflow browser contract. No provider object or provider-specific type crosses it. */
 export interface BrowserAdapter extends VisualAdapter {
+  readonly workflowCapabilities?:WorkflowCapabilities;
   readonly revision: number;
   start(): Promise<void>;
   close(): Promise<void>;
@@ -105,6 +108,7 @@ export interface BrowserAdapter extends VisualAdapter {
   assertCondition(condition: BrowserAssertionCondition, target?: BrowserTarget, expected?: string | number, timeoutMs?: number, match?: 'contains' | 'exact'): Promise<BrowserAssertionResult>;
   upload(target: BrowserTarget, projectRelativePath: string): Promise<BrowserStatus>;
   takeScreenshot(request:ScreenshotRequest):Promise<ScreenshotResult>;
+  takeScreenshot(request:ScreenshotRequest|boolean,fileName?:string):Promise<ScreenshotResult|BrowserScreenshot>;
   takeScreenshot(fullPage?:boolean,fileName?:string):Promise<BrowserScreenshot>;
   captureScreenshotBytes(request:ScreenshotRequest):Promise<RawScreenshotCapture>;
   setViewport(width: number, height: number): Promise<BrowserStatus>;
