@@ -7,10 +7,11 @@ export class WebDriverClient {
   getTimeout(){return this.timeoutMs;}
   async command(method:string,path:string,body?:unknown,requestTimeoutMs=this.timeoutMs,mutation=false):Promise<any>{
     if(!this.allowed(method,path))throw new DesktopAdapterError('CAPABILITY_UNAVAILABLE','WebDriver method/path is outside the attached-session command allowlist');
+    const signal=AbortSignal.timeout(requestTimeoutMs);
     let response:Response;
-    try { response=await fetch(`${this.endpoint}/session/${encodeURIComponent(this.sessionId)}${path}`,{method,redirect:'error',signal:AbortSignal.timeout(requestTimeoutMs),headers:body===undefined?undefined:{'content-type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)}); }
-    catch { throw new DesktopAdapterError('ATTACHMENT_UNAVAILABLE','loopback WebDriver request failed, timed out, or redirected'); }
-    let text='';try{const reader=response.body?.getReader();if(!reader)throw Error();const chunks:Uint8Array[]=[];let n=0;for(;;){const x=await reader.read();if(x.done)break;n+=x.value.byteLength;if(n>this.maxBytes){await reader.cancel();throw Error();}chunks.push(x.value);}text=Buffer.concat(chunks).toString('utf8');}catch{throw this.uncertain(mutation,'WebDriver response could not be read within bounds');}
+    try { response=await fetch(`${this.endpoint}/session/${encodeURIComponent(this.sessionId)}${path}`,{method,redirect:'error',signal,headers:body===undefined?undefined:{'content-type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)}); }
+    catch { if(signal.aborted&&!mutation)throw new DesktopAdapterError('REQUEST_TIMEOUT','WebDriver request timed out');throw new DesktopAdapterError('ATTACHMENT_UNAVAILABLE','loopback WebDriver request failed, timed out, or redirected'); }
+    let text='',bytesRead=0;try{const reader=response.body?.getReader();if(!reader)throw Error();const chunks:Uint8Array[]=[];for(;;){const x=await reader.read();if(x.done)break;bytesRead+=x.value.byteLength;if(bytesRead>this.maxBytes){await reader.cancel();throw Error();}chunks.push(x.value);}text=Buffer.concat(chunks).toString('utf8');}catch(error){if(signal.aborted&&!mutation)throw new DesktopAdapterError('REQUEST_TIMEOUT','WebDriver response timed out');const reason=error instanceof Error?error.name:'unknown error';throw this.uncertain(mutation,`WebDriver response could not be read within bounds (${bytesRead} bytes, ${reason})`);}
     let envelope:any;try{envelope=JSON.parse(text);}catch{throw this.uncertain(mutation,'WebDriver returned malformed or truncated JSON');}
     const value=envelope?.value;
     const successfulScriptResult=method==='POST'&&path==='/execute/sync'&&response.ok;

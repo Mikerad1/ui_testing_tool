@@ -28,6 +28,10 @@
       <section id="native-controls" hidden>
         <output class="native-wait-duplicate">first hidden match</output>
         <output class="native-wait-duplicate">second hidden match</output>
+        <button type="button" id="native-enable-delay-trigger">Trigger delayed enable</button>
+        <button type="button" id="native-enabled-delayed" disabled>Enable after delay</button>
+        <button type="button" id="native-enabled-never" disabled>Remain disabled</button>
+        <div hidden><button type="button" id="native-enabled-hidden">Hidden but enabled</button></div>
         <div id="native-wait-hidden-container" hidden><output id="native-wait-hidden">hidden but attached</output></div>
         <output id="native-detach-one">remove-me</output>
         <button type="button" id="remove-native-detach-one">Remove one target</button>
@@ -66,6 +70,12 @@
             document.body.append(target);
           }, 100);
         }
+      });
+      document.getElementById('native-enable-delay-trigger').addEventListener('click', () => {
+        const target = document.getElementById('native-enabled-delayed');
+        target.disabled = true;
+        window.nativeEnabledTransitionDueAt = performance.now() + 2000;
+        setTimeout(() => { target.disabled = false; }, 2000);
       });
       document.getElementById('remove-native-detach-one').addEventListener('click', () => {
         document.getElementById('native-detach-one')?.remove();
