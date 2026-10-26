@@ -6,7 +6,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { Config } from '../config/config.js';
 import { safePath } from '../config/config.js';
@@ -39,6 +39,36 @@ type Session = { id: string; server: McpServer; transport: any; timer?: NodeJS.T
 const MAX_BODY = 1024 * 1024;
 const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60_000;
 const MAX_MEMORY_SEARCH_CALL_RESULT_BYTES=48*1024;
+const DESKTOP_TEST_ASSERT_COMMON_PROPERTIES = {
+  target: { type: 'object', properties: { by: { const: 'css' }, value: { type: 'string', minLength: 1, maxLength: 1000, pattern: '\\S' } }, required: ['by', 'value'], additionalProperties: false },
+  timeout_ms: { type: 'integer', minimum: 1, maximum: 30000 },
+  subject_node_id: { type: 'string', minLength: 1, maxLength: 64 },
+} as const;
+const DESKTOP_TEST_ASSERT_JSON_SCHEMA = {
+  type: 'object',
+  oneOf: [
+    {
+      type: 'object',
+      properties: {
+        condition: { const: 'text' },
+        ...DESKTOP_TEST_ASSERT_COMMON_PROPERTIES,
+        expected: { type: 'string', maxLength: 1000 },
+        match: { const: 'exact' },
+      },
+      required: ['condition', 'target', 'expected', 'match'],
+      additionalProperties: false,
+    },
+    {
+      type: 'object',
+      properties: {
+        condition: { const: 'present' },
+        ...DESKTOP_TEST_ASSERT_COMMON_PROPERTIES,
+      },
+      required: ['condition', 'target'],
+      additionalProperties: false,
+    },
+  ],
+} as const;
 function sanitizeErrorMessage(message:string){return message.replace(/\b(?:https?|wss?):\/\/[^\s"'<>]+/gi,token=>{const suffix=token.match(/[),.;]+$/)?.[0]??'',candidate=suffix?token.slice(0,-suffix.length):token;try{const url=new URL(candidate);url.username='';url.password='';url.search='';url.hash='';return `${url.origin}${url.pathname}${suffix}`;}catch{return candidate.replace(/^([a-z][a-z\d+.-]*:\/\/)[^/@\s]+@/i,'$1').replace(/[?#].*$/,'')+suffix;}}).slice(0,500);}
 function hasArtifactCleanupFailure(error: unknown, seen = new Set<unknown>()): boolean {
   if (error === null || typeof error !== 'object' || seen.has(error)) return false;
@@ -181,6 +211,10 @@ export async function serve(config: Config, store: Store, browser: BrowserAdapte
     (mcp.server as any).setRequestHandler = (schema: unknown, handler: (request: any, extra: any) => Promise<any> | any) =>
       setRequestHandler(schema as any, async (request: any, extra: any) => {
         const result = await handler(request, extra);
+        if (schema === ListToolsRequestSchema && config.provider === 'desktop' && Array.isArray(result?.tools)) {
+          // The SDK only publishes object-shaped Zod inputs; keep runtime Zod validation and publish the discriminated contract here.
+          return { ...result, tools: result.tools.map((item: any) => item.name === 'test_assert' ? { ...item, inputSchema: DESKTOP_TEST_ASSERT_JSON_SCHEMA } : item) };
+        }
         if (schema !== CallToolRequestSchema || !result?.isError || result.structuredContent) return result;
         const text = result.content?.find((item: any) => item.type === 'text')?.text ?? 'Invalid tool input';
         if (!/input validation error/i.test(text)) return result;
@@ -487,8 +521,8 @@ export async function serve(config: Config, store: Store, browser: BrowserAdapte
        tool('memory_get_node', 'Read a trusted knowledge node, including saved MCP learnings', { id: z.string().max(100) }, a => store.getTrustedNode(a.id,{trustYamlSeeds:config.memory.trust_yaml_seeds}));
         tool('memory_save','Save an agent learning to this project and environment. A successful save is immediately persistent and available through normal memory retrieval.',{content:z.string().min(1).max(20000),title:z.string().min(1).max(500).optional()},a=>{if(!config.memory.persistent_learning_writes)throw Error('Persistent learning writes are disabled for this project; set memory.persistent_learning_writes: true in umb.config.yaml and restart UMB.');if(!options.learningWriter)throw Error('NLP sidecar request failed');return options.learningWriter.save(a.content,a.title);});
       const testAssertInputSchema=z.object({condition:z.enum(['visible','hidden','enabled','text','url_matches','count','value','present']),target:target.optional(),expected:z.union([z.string().max(1000),z.number()]).optional(),match:z.enum(['contains','exact']).optional(),timeout_ms:z.number().int().min(1).max(30000).optional(),subject_node_id:z.string().min(1).max(64).optional()});
-      const desktopTestAssertSchema=testAssertInputSchema.strict().refine(a=>a.condition==='text'&&a.target?.by==='css'&&typeof a.target.value==='string'&&a.target.value.trim().length>0&&typeof a.expected==='string'&&a.match==='exact','Desktop assertions require exact text against a CSS target.');
-      tool('test_assert','Evaluate and record a safe browser assertion; on PASS returns the evidence identity (evidence_id, run_id, subject_node_id); failed assertions omit evidence_ref.',config.provider==='desktop'?desktopTestAssertSchema:testAssertInputSchema.refine(a=>config.provider!=='desktop'||(a.condition==='text'&&a.target?.by==='css'&&typeof a.target.value==='string'&&a.target.value.trim().length>0&&typeof a.expected==='string'&&a.match==='exact'),'Desktop assertions require exact text against a CSS target.'),a=>runBrowser(async()=>{assertApplicationReady();if(config.provider==='desktop'&&!(a.condition==='text'&&a.target?.by==='css'&&typeof a.target.value==='string'&&a.target.value.trim().length>0&&typeof a.expected==='string'&&a.match==='exact'))throw Error('Desktop assertions require exact text against a CSS target.');const subject=a.subject_node_id??store.applicationSubject()?.id;if(!subject||!store.get(subject))throw Error('Assertion subject must belong to this project');const result=await browser.assertCondition(a.condition,a.target,a.expected,a.timeout_ms??5000,a.match??'contains');let artifact:string|undefined,capture:{status:'captured'|'failed';code?:'quota_exceeded'|'capture_failed'|'artifact_rollback_failed'}|undefined;let safeSummary:Record<string,number>={};let actions:unknown[]=[];if(!result.passed){try{artifact=(await (config.provider==='desktop'?browser.takeScreenshot({kind:'webview'}):browser.takeScreenshot(false))).artifactPath;capture={status:'captured'};}catch(error){capture={status:'failed',code:hasArtifactCleanupFailure(error)?'artifact_rollback_failed':/quota|limit/i.test(String(error))?'quota_exceeded':'capture_failed'};}if(config.provider!=='desktop')try{const snapshot=await browser.snapshot({mode:'interactive'}) as any;for(const element of snapshot.elements??[])safeSummary[element.role??'unknown']=(safeSummary[element.role??'unknown']??0)+1;}catch{}actions=browser.actionSequence(30).map((x:any)=>({action:x.action,at:x.at,target_by:x.target_by,revision:x.revision}));}const record=store.recordAssertion({session_id:session.id,subject_node_id:subject,passed:result.passed,observed_count:result.observedCount,artifact_ref:artifact,actions});const evidence=record.evidence as any;if(!result.passed)store.addAssertionDiagnostics({runId:record.id,evidenceId:evidence.id,roleCounts:safeSummary,capture:capture!});return{status:result.passed?'PASS':'FAIL',run_id:record.id,passed:result.passed,observed_count:result.observedCount,capture,artifact_ref:artifact??null,evidence_refs:result.passed?[{evidence_id:evidence.id,run_id:record.id,subject_node_id:subject}]:[]};}));
+       const desktopTestAssertSchema=z.object({condition:z.enum(['text','present']),target:z.object({by:z.literal('css'),value:z.string().min(1).max(1000).regex(/\S/)}).strict(),expected:z.string().max(1000).optional(),match:z.literal('exact').optional(),timeout_ms:z.number().int().min(1).max(30000).optional(),subject_node_id:z.string().min(1).max(64).optional()}).strict();
+       tool('test_assert','Evaluate and record a safe browser assertion; on PASS returns the evidence identity (evidence_id, run_id, subject_node_id); failed assertions omit evidence_ref.',config.provider==='desktop'?desktopTestAssertSchema:testAssertInputSchema,a=>runBrowser(async()=>{assertApplicationReady();if(config.provider==='desktop'&&!((a.condition==='text'&&a.target?.by==='css'&&typeof a.target.value==='string'&&a.target.value.trim().length>0&&typeof a.expected==='string'&&a.match==='exact')||(a.condition==='present'&&a.target?.by==='css'&&typeof a.target.value==='string'&&a.target.value.trim().length>0&&!Object.hasOwn(a,'expected')&&!Object.hasOwn(a,'match'))))throw Error('Desktop assertions require exact text or present against a CSS target.');const subject=a.subject_node_id??store.applicationSubject()?.id;if(!subject||!store.get(subject))throw Error('Assertion subject must belong to this project');const result=await browser.assertCondition(a.condition,a.target,a.expected,a.timeout_ms??5000,a.match??'contains');let artifact:string|undefined,capture:{status:'captured'|'failed';code?:'quota_exceeded'|'capture_failed'|'artifact_rollback_failed'}|undefined;let safeSummary:Record<string,number>={};let actions:unknown[]=[];if(!result.passed){try{artifact=(await (config.provider==='desktop'?browser.takeScreenshot({kind:'webview'}):browser.takeScreenshot(false))).artifactPath;capture={status:'captured'};}catch(error){capture={status:'failed',code:hasArtifactCleanupFailure(error)?'artifact_rollback_failed':/quota|limit/i.test(String(error))?'quota_exceeded':'capture_failed'};}if(config.provider!=='desktop')try{const snapshot=await browser.snapshot({mode:'interactive'}) as any;for(const element of snapshot.elements??[])safeSummary[element.role??'unknown']=(safeSummary[element.role??'unknown']??0)+1;}catch{}actions=browser.actionSequence(30).map((x:any)=>({action:x.action,at:x.at,target_by:x.target_by,revision:x.revision}));}const record=store.recordAssertion({session_id:session.id,subject_node_id:subject,passed:result.passed,observed_count:result.observedCount,artifact_ref:artifact,actions});const evidence=record.evidence as any;if(!result.passed)store.addAssertionDiagnostics({runId:record.id,evidenceId:evidence.id,roleCounts:safeSummary,capture:capture!});return{status:result.passed?'PASS':'FAIL',run_id:record.id,passed:result.passed,observed_count:result.observedCount,capture,artifact_ref:artifact??null,evidence_refs:result.passed?[{evidence_id:evidence.id,run_id:record.id,subject_node_id:subject}]:[]};}));
      tool('test_report','Read a project-scoped safe test report',{run_id:z.string().min(1).max(100)},a=>store.getRunReport(a.run_id));
       tool('memory_neighbors','List neighbors connected by live project knowledge, including saved MCP learnings',{id:z.string().min(1).max(100),limit:z.number().int().min(1).max(200).optional()},a=>store.neighbors(a.id,a.limit,{trustYamlSeeds:config.memory.trust_yaml_seeds}));
       tool('memory_path','Find a bounded directed path over live NAVIGATES_TO memory edges, including saved MCP learnings',{from_id:z.string().min(1).max(100),to_id:z.string().min(1).max(100),max_depth:z.number().int().min(0).max(10).optional()},a=>store.path(a.from_id,a.to_id,a.max_depth,{trustYamlSeeds:config.memory.trust_yaml_seeds}));

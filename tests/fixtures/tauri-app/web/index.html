@@ -33,6 +33,7 @@
         <button type="button" id="native-hide-delay-trigger">Trigger delayed hide</button>
         <output id="native-hidden-delayed" hidden>Hide after delay</output>
         <button type="button" id="native-enable-delay-trigger">Trigger delayed enable</button>
+        <button type="button" id="native-present-delay-trigger">Trigger delayed present</button>
         <button type="button" id="native-enabled-delayed" disabled>Enable after delay</button>
         <button type="button" id="native-enabled-never" disabled>Remain disabled</button>
         <div hidden><button type="button" id="native-enabled-hidden">Hidden but enabled</button></div>
@@ -80,6 +81,14 @@
         target.disabled = true;
         window.nativeEnabledTransitionDueAt = performance.now() + 2000;
         setTimeout(() => { target.disabled = false; }, 2000);
+      });
+      document.getElementById('native-present-delay-trigger').addEventListener('click', () => {
+        setTimeout(() => {
+          const target = document.createElement('output');
+          target.id = 'native-present-delayed';
+          target.hidden = true;
+          document.body.append(target);
+        }, 900);
       });
       document.getElementById('native-hide-delay-trigger').addEventListener('click', () => {
         const target = document.getElementById('native-hidden-delayed');
