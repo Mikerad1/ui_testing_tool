@@ -26,8 +26,12 @@
       <input id="native-upload" type="file">
       <output id="upload-status" aria-live="polite"></output>
       <section id="native-controls" hidden>
-        <output class="native-wait-duplicate">first hidden match</output>
-        <output class="native-wait-duplicate">second hidden match</output>
+        <div id="native-wait-duplicate-container" hidden>
+          <output class="native-wait-duplicate">first hidden match</output>
+          <output class="native-wait-duplicate">second hidden match</output>
+        </div>
+        <button type="button" id="native-hide-delay-trigger">Trigger delayed hide</button>
+        <output id="native-hidden-delayed" hidden>Hide after delay</output>
         <button type="button" id="native-enable-delay-trigger">Trigger delayed enable</button>
         <button type="button" id="native-enabled-delayed" disabled>Enable after delay</button>
         <button type="button" id="native-enabled-never" disabled>Remain disabled</button>
@@ -76,6 +80,12 @@
         target.disabled = true;
         window.nativeEnabledTransitionDueAt = performance.now() + 2000;
         setTimeout(() => { target.disabled = false; }, 2000);
+      });
+      document.getElementById('native-hide-delay-trigger').addEventListener('click', () => {
+        const target = document.getElementById('native-hidden-delayed');
+        target.hidden = false;
+        window.nativeHiddenTransitionDueAt = performance.now() + 2000;
+        setTimeout(() => { target.hidden = true; }, 2000);
       });
       document.getElementById('remove-native-detach-one').addEventListener('click', () => {
         document.getElementById('native-detach-one')?.remove();
