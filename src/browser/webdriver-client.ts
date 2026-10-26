@@ -7,7 +7,7 @@ export class WebDriverClient {
   getTimeout(){return this.timeoutMs;}
   async command(method:string,path:string,body?:unknown,requestTimeoutMs=this.timeoutMs,mutation=false):Promise<any>{
     if(!this.allowed(method,path))throw new DesktopAdapterError('CAPABILITY_UNAVAILABLE','WebDriver method/path is outside the attached-session command allowlist');
-    const signal=AbortSignal.timeout(requestTimeoutMs);
+    const signal=AbortSignal.timeout(Math.ceil(requestTimeoutMs));
     let response:Response;
     try { response=await fetch(`${this.endpoint}/session/${encodeURIComponent(this.sessionId)}${path}`,{method,redirect:'error',signal,headers:body===undefined?undefined:{'content-type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)}); }
     catch { if(signal.aborted&&!mutation)throw new DesktopAdapterError('REQUEST_TIMEOUT','WebDriver request timed out');throw new DesktopAdapterError('ATTACHMENT_UNAVAILABLE','loopback WebDriver request failed, timed out, or redirected'); }

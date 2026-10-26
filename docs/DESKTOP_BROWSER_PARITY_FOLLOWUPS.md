@@ -3,6 +3,8 @@
 **Status date:** 2026-10-26
 
 **Baseline:** `feature/desktop-visual-testing` at `d69672b` (`feat: expose safe desktop snapshot and URL wait`)
+
+**Checklist introduced:** commit `9efebc0`; first follow-up is in progress.
 **Scope:** safe capability parity for an attached `DesktopAdapter` backed by an operator-owned loopback WebDriver session. This list is not a commitment to full `BrowserAdapter` parity.
 
 ## How to maintain this list
@@ -21,22 +23,25 @@
 
 ## Next actionable work
 
-### 1. Resolve assertion failure-capture privacy boundary — **BLOCKED / design and safety review required**
+### 1. Resolve assertion failure-capture privacy boundary — **COMPLETE**
 
-The desktop `test_assert` failure path can persist and return a screenshot artifact. WebView screenshots have no general PII-redaction guarantee, so exposing more assertion predicates can reveal visible user data even when the assertion implementation itself returns only pass/count.
+The previous desktop `test_assert` failure path could persist and return a screenshot artifact. WebView screenshots have no general PII-redaction guarantee, so exposing more assertion predicates could reveal visible user data even when the assertion implementation itself returns only pass/count.
 
-- [ ] Choose and document a safe failure-output boundary before expanding assertion conditions. Consider a non-capturing desktop assertion result or another demonstrably safe policy; do not assume screenshots are redacted.
-- [ ] Add tests proving a failed sensitive-value assertion cannot persist or return a screenshot/image/artifact reference or expose the observed value in results/errors. Cover cleanup and failure behavior.
-- [ ] Obtain a separate safety/feasibility review for the chosen boundary. Keep BrowserProvider behavior and YAML assertion capabilities unchanged unless separately approved.
+- [x] Choose and document the boundary: failed **direct desktop MCP `test_assert` calls are unconditionally non-capturing**, regardless of `desktop.visual.capture_on_failure`. Return `capture.status='disabled'` and `artifact_ref:null`; preserve failed run/evidence and bounded metadata; skip desktop capture diagnostics. This removes the screenshot blocker only for this direct MCP path. Oracle feasibility review: PASS (`ses_e8887c070ffeCmXhAYmjgNlF9Z`).
+- [x] Add tests proving failed `present` and exact-text assertions cannot dispatch a screenshot or return an image/artifact reference; verify the sensitive expected sentinel is absent from response/report metadata, failed evidence persists with null artifact, and persistence failure is sanitized without capture. Focused MCP tests 13/13; full suite 465 passed / 13 skipped; typecheck, lint, build, and diff checks pass.
+- [x] Obtain narrow Oracle implementation review: PASS for this failure-capture boundary only (`ses_e8887c070ffeCmXhAYmjgNlF9Z`). BrowserProvider behavior, managed `desktop_assert`, and YAML limits remain unchanged. This does not approve additional assertion conditions.
+- [ ] Optional test hardening (non-blocking review note): exercise nonempty action history to verify the 30-item projection, and return a sensitive observed-text sentinel from a fake adapter to verify it is never echoed or persisted.
 
-### 2. Re-evaluate additional desktop assertion predicates — **HOLD until item 1 passes**
+### 2. Re-evaluate additional desktop assertion predicates — **`url_matches` PASS; count held; value unavailable**
 
-Consider each predicate independently; do not expand all assertions as a single parity claim.
+The screenshot blocker is resolved for direct desktop MCP `test_assert`, so predicates were reviewed independently. Oracle feasibility review (`ses_e8887c070ffeCmXhAYmjgNlF9Z`) gave `url_matches` a **PASS for feasibility**, `count` a **HOLD** pending an explicit cardinality-disclosure decision and bound, and `value` a **NO** under the general desktop API because it is a boolean oracle for guessed values (including hidden/password-like fields). A separate narrow implementation review PASS approves only the bounded desktop `url_matches` branch.
 
-- [ ] `url_matches`: strict no-target branch, bounded nonblank substring, compare only the sanitized URL, return only safe status/count, and prove query/fragment/credential secrets are absent from outputs/errors.
-- [ ] `count`: strict CSS target and bounded non-negative expected count; exact cardinality/polling/deadline semantics; return no page text or values.
-- [ ] `value`: strict CSS target, bounded expected value and explicit exact/contains semantics; compare locally and never return the observed value. Treat it as a boolean oracle and retain screenshot/output protections from item 1.
-- [ ] For every predicate selected: test schema/pre-dispatch rejection, exact read-only routes, bounded polling/deadline, no revision/history/context/lifecycle side effects, test-owned native behavior on the named runtime, and obtain its own narrow Oracle implementation PASS.
+- [x] Implement only the desktop `url_matches` branch: strict no-target/no-match input with bounded nonblank expected substring, compare against sanitized URL, return only boolean/count, and add fake W3C coverage for URL-only reads, bounded polling, input rejection, and secret exclusion.
+- [x] Complete MCP and test-owned native acceptance for the published schema, pre-dispatch rejection, disabled failure capture, same-origin path changes, state/session preservation, and no screenshot. Focused MCP/adapter tests: 58/58; full suite: 468 passed / 13 skipped / 0 failed; native attached acceptance: 1/1, including `mcp-url-assert` on tauri-driver 2.1.0/current tested Tauri-WebKit; typecheck, lint, build, and diff checks pass.
+- [x] Obtain narrow Oracle implementation review: PASS for direct desktop MCP `url_matches` only (`ses_e8887c070ffeCmXhAYmjgNlF9Z`). No approval for `count`, `value`, BrowserProvider changes, YAML expansion, or broader parity. Changes remain uncommitted.
+- [ ] `count` stays **HOLD** until exact cardinality disclosure is explicitly accepted and a result/expected-count bound is selected; only then request a new safety review.
+- [x] `value` is **NO** for a generic CSS API under the current policy; do not implement. Reconsider only if a future proposal includes an independently reviewed allowlist of safe test-owned fields and mitigates the boolean oracle.
+- [x] For `url_matches`, complete strict schema/pre-dispatch rejection, exact read-only routes, bounded polling/deadline, no revision/history/context/lifecycle side effects, test-owned native behavior on the named runtime, and its own narrow Oracle implementation PASS. Any future predicate requires the same separate evidence and review.
 
 ### 3. Keyboard chord/modifier support — **HOLD**
 
