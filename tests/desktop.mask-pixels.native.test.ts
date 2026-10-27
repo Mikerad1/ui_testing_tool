@@ -169,7 +169,7 @@ test('real Tauri WebView and X11 mask pixels persist and match MCP image bytes',
     });
     client = new Client({ name: 'desktop-mask-pixel-acceptance', version: '1.0.0' });
     await client.connect(transport);
-    const started = await client.callTool({ name: 'desktop_session_start', arguments: {} }) as any;
+    const started = await client.callTool({ name: 'ui_session_start', arguments: {} }) as any;
     assert.equal(started.structuredContent.ok, true, JSON.stringify(started.structuredContent));
     assert.ok(service, 'real DesktopService is created by the production MCP factory');
 
@@ -186,7 +186,7 @@ test('real Tauri WebView and X11 mask pixels persist and match MCP image bytes',
     assert.ok(targetRect.width >= 90 && controlRect.width >= 90 && targetRect.height >= 70 && controlRect.height >= 70);
 
     for (const kind of ['webview', 'window'] as const) {
-      const result = await client.callTool({ name: 'desktop_screenshot', arguments: { kind } }) as any;
+      const result = await client.callTool({ name: 'ui_screenshot', arguments: { kind } }) as any;
       assert.equal(result.structuredContent.ok, true, JSON.stringify(result.structuredContent));
       const data = result.structuredContent.data;
       assert.equal(data.capture_type, kind);

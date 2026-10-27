@@ -86,5 +86,5 @@ test('BrowserController remains a compatibility alias and browser consumers stay
     assert.doesNotMatch(source, /BrowserController/);
   }
   const server = await readFile(new URL('../src/mcp/server.ts', import.meta.url), 'utf8');
-  assert.match(server, /browser:\s*BrowserAdapter/);
+  assert.match(server, /browserAdapter:\s*BrowserAdapter\s*\|\s*undefined/);
 });

@@ -13,6 +13,8 @@ async function fixture(fn: (cwd: string, home: string) => Promise<void>): Promis
 }
 
 test('skill instructions hold phase boundaries and actual tool names', () => {
+  for(const example of ['ui_navigate','ui_snapshot','ui_find','ui_click','ui_fill','ui_screenshot'])assert.ok(CODEX_SKILL.includes(`\`${example}\``),`${example} appears as a concrete UI tool example`);
+  assert.doesNotMatch(CODEX_SKILL,/\bbrowser_[a-z_]+\b/,'legacy browser MCP names are absent from skill instructions');
   for (const required of [
     'Require an explicit `issue_key` for every task', 'never infer, search, list, discover, select another issue', 'fall back to cached context or another key',
     "user's separately configured Jira MCP", 'only with tools it actually exposes', 'stop and ask/report the limitation', 'Never add a UMB Jira reader, API, or tool',
@@ -22,7 +24,7 @@ test('skill instructions hold phase boundaries and actual tool names', () => {
     'combine criteria from the available sources without inventing or changing semantics', 'After checking all available sources, if no AC content remains, stop and report', 'stable, report-local AC IDs',
     'tables, or ADF', 'ambiguous, contradictory, API-only, and non-UI-testable ACs', 'observable assertion(s), evidence, and status', 'unsupported ACs explicitly',
     'Before browser navigation', 'memory_context', 'memory_search', 'memory_get_node', 'potentially stale', 'validate against the live app', 'never mix project or environment context',
-    'only configured browser and assertion/report tools actually available', 'Do not claim unavailable tools or implement a planner/runner',
+    'only configured UI and assertion/report tools actually available', 'Do not claim unavailable tools or implement a planner/runner',
     'semantic/accessibility locators', 'Refresh snapshots after state changes', 'Navigation or screenshots alone are not test results',
     'at least one positive', 'meaningful negative/boundary case', 'isolated approved test accounts/data', 'Never run destructive/write tests against production',
     '`passed`, `failed`, `blocked`, `skipped`, and `not_applicable`', 'all required cases executed successfully', 'continue only independent safe cases',

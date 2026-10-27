@@ -31,11 +31,12 @@ test('desktop_run_workflow enforces owned-session execution, preflight, provenan
   process.env[secretEnv] = secret;
   const config: Config = {
     version: 1,
+    provider: 'desktop',
     project: { id: `desktop-workflow-${process.pid}`, name: 'Desktop workflow', base_url: 'http://127.0.0.1:1' },
     server: { host: '127.0.0.1', port, auth: { mode: 'none' } },
     browser: { headless: true, viewport: { width: 800, height: 600 }, allowed_origins: [] },
     application_auth: { mode: 'workflow', workflow_id: 'auth-safe' },
-    desktop: { enabled: true, root, automation: {}, window: { screenshot_mode: 'webview' }, visual: { capture_on_failure: true } },
+    desktop: { mode: 'managed', enabled: true, root, automation: {}, window: { screenshot_mode: 'webview' }, visual: { capture_on_failure: true } },
     artifacts: { directory: './.umb/artifacts', max_file_bytes: 100000, max_total_bytes: 100000, max_count: 50 },
     memory: { database: path.join(root, 'memory.sqlite') },
     knowledge: { path: knowledge },
@@ -90,7 +91,6 @@ test('desktop_run_workflow enforces owned-session execution, preflight, provenan
     pruneUnreferencedArtifacts: async () => {},
     removeArtifact: async (ref: string) => { await rm(path.join(root, ref), { force: true }); },
   } as any;
-  const browser = { revision: 7, setActionTimeout: () => {}, status: async () => ({ url: 'fixture' }), page: { url: () => 'http://127.0.0.1:1/' } } as any;
   try {
     await writeFile(path.join(knowledge, 'application.yaml'), 'schema_version: 1\nid: app\nname: App\nkind: application\nstart_screen: home\n');
     await writeFile(path.join(knowledge, 'home.yaml'), 'schema_version: 1\nid: home\nname: Home\nkind: screen\n');
@@ -140,7 +140,7 @@ steps: [{id: click, action: click, target: {by: css, value: '#button'}}]
 steps: [{id: click, action: click, target: {by: css, value: '#blocked'}}]
 `);
     await reconcile(knowledge, store, testWriter(store));
-    serverStop = await serve(config, store, browser, { projectRoot: root, knowledgeRoot: knowledge, desktopServiceFactory: () => { factoryCalls++; return service; } });
+    serverStop = await serve(config, store, undefined, { projectRoot: root, knowledgeRoot: knowledge, desktopServiceFactory: () => { factoryCalls++; return service; } });
     transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), {
       fetch: async (input, init) => {
         const response = await fetch(input, { ...init, headers: { ...Object.fromEntries(new Headers(init?.headers)), accept: 'application/json, text/event-stream' } });
@@ -162,21 +162,21 @@ steps: [{id: click, action: click, target: {by: css, value: '#blocked'}}]
     const encoded = (result: any) => JSON.stringify({ structuredContent: result.structuredContent, content: result.content });
 
     const absentBefore = countRuns('portable');
-    const absent = await call('desktop_run_workflow', { workflow_id: 'portable', expected_session_id: 'owned-desktop-session' });
+    const absent = await call('ui_run_workflow', { workflow_id: 'portable', expected_session_id: 'owned-desktop-session' });
     assert.equal(absent.structuredContent.ok, false);
     assert.equal(factoryCalls, 0); assert.equal(startCalls, 0); assert.equal(countRuns('portable'), absentBefore);
-    const start = await call('desktop_session_start', {});
+    const start = await call('ui_session_start', {});
     assert.equal(start.structuredContent.ok, true); assert.equal(factoryCalls, 1); assert.equal(startCalls, 1);
-    await call('desktop_session_stop', {});
+    await call('ui_session_stop', {});
     const stoppedCount = countRuns('portable');
-    const stoppedUpload = await call('desktop_upload', { selector: 'input[type=file]', project_relative_path: 'fixtures/upload.txt' });
+    const stoppedUpload = await call('ui_upload', { selector: 'input[type=file]', project_relative_path: 'fixtures/upload.txt' });
     assert.equal(stoppedUpload.structuredContent.ok, false);
     assert.equal(stoppedUpload.structuredContent.error.code, 'desktop_session_not_running');
     assert.equal(startCalls, 1, 'desktop_upload never starts a session');
     assert.deepEqual(uploads, []);
-    const stopped = await call('desktop_run_workflow', { workflow_id: 'portable', expected_session_id: 'owned-desktop-session' });
+    const stopped = await call('ui_run_workflow', { workflow_id: 'portable', expected_session_id: 'owned-desktop-session' });
     assert.equal(stopped.structuredContent.ok, false); assert.equal(countRuns('portable'), stoppedCount);
-    await call('desktop_session_start', {});
+    await call('ui_session_start', {});
     const roleTarget = { by: 'role', role: 'button', name: 'Save' };
     const testIdTarget = { by: 'test_id', value: 'save-button' };
     const placeholderTarget = { by: 'placeholder', value: 'Search' };
@@ -188,53 +188,53 @@ steps: [{id: click, action: click, target: {by: css, value: '#blocked'}}]
     const maximumLabelTarget = { by: 'label', value: 'x'.repeat(1000) };
     const minimumPlaceholderTarget = { by: 'placeholder', value: 'x' };
     const maximumPlaceholderTarget = { by: 'placeholder', value: 'x'.repeat(1000) };
-    assert.equal((await call('desktop_find_element', { selector: roleTarget })).structuredContent.ok, true);
-    assert.equal((await call('desktop_find_element', { selector: testIdTarget })).structuredContent.ok, true);
-    assert.equal((await call('desktop_find_element', { selector: placeholderTarget })).structuredContent.ok, true);
-    assert.equal((await call('desktop_find_element', { selector: labelTarget })).structuredContent.ok, true);
-    assert.equal((await call('desktop_find_element', { selector: textTarget })).structuredContent.ok, true);
-    assert.equal((await call('desktop_find_element', { selector: minimumTextTarget })).structuredContent.ok, true);
-    assert.equal((await call('desktop_find_element', { selector: maximumTextTarget })).structuredContent.ok, true);
-    assert.equal((await call('desktop_find_element', { selector: minimumLabelTarget })).structuredContent.ok, true);
-    assert.equal((await call('desktop_find_element', { selector: maximumLabelTarget })).structuredContent.ok, true);
-    assert.equal((await call('desktop_find_element', { selector: minimumPlaceholderTarget })).structuredContent.ok, true);
-    assert.equal((await call('desktop_find_element', { selector: maximumPlaceholderTarget })).structuredContent.ok, true);
-    assert.equal((await call('desktop_click', { selector: roleTarget })).structuredContent.ok, true);
-    assert.equal((await call('desktop_type', { selector: testIdTarget, text: 'hello' })).structuredContent.ok, true);
-    assert.equal((await call('desktop_click', { selector: placeholderTarget })).structuredContent.ok, true);
-    assert.equal((await call('desktop_type', { selector: placeholderTarget, text: 'query' })).structuredContent.ok, true);
-    assert.equal((await call('desktop_upload', { selector: placeholderTarget, project_relative_path: 'fixtures/upload.txt' })).structuredContent.ok, true);
-    assert.equal((await call('desktop_scroll', { selector: placeholderTarget, y: 10 })).structuredContent.ok, true);
-    assert.equal((await call('desktop_wait_for', { selector: placeholderTarget })).structuredContent.ok, true);
-    assert.equal((await call('desktop_assert', { selector: placeholderTarget, assertion: 'visible' })).structuredContent.ok, true);
-    assert.equal((await call('desktop_assert', { selector: placeholderTarget, assertion: 'text', match: 'contains', expected: 'Ready' })).structuredContent.ok, true);
-    assert.equal((await call('desktop_get_element_details', { selector: placeholderTarget })).structuredContent.ok, true);
-    assert.equal((await call('desktop_scroll', { selector: roleTarget, y: 10 })).structuredContent.ok, true);
-    assert.equal((await call('desktop_wait_for', { selector: testIdTarget })).structuredContent.ok, true);
-    assert.equal((await call('desktop_assert', { selector: roleTarget, assertion: 'visible' })).structuredContent.ok, true);
-    assert.equal((await call('desktop_get_element_details', { selector: testIdTarget })).structuredContent.ok, true);
-    assert.equal((await call('desktop_click', { selector: labelTarget })).structuredContent.ok, true);
-    assert.equal((await call('desktop_type', { selector: labelTarget, text: 'labeled' })).structuredContent.ok, true);
-    assert.equal((await call('desktop_upload', { selector: labelTarget, project_relative_path: 'fixtures/upload.txt' })).structuredContent.ok, true);
-    assert.equal((await call('desktop_scroll', { selector: labelTarget, y: 10 })).structuredContent.ok, true);
-    assert.equal((await call('desktop_wait_for', { selector: labelTarget })).structuredContent.ok, true);
-    assert.equal((await call('desktop_assert', { selector: labelTarget, assertion: 'visible' })).structuredContent.ok, true);
-    assert.equal((await call('desktop_assert', { selector: labelTarget, assertion: 'text', match: 'contains', expected: 'Ready' })).structuredContent.ok, true);
-    assert.equal((await call('desktop_get_element_details', { selector: labelTarget })).structuredContent.ok, true);
-    assert.equal((await call('desktop_click', { selector: textTarget })).structuredContent.ok, true);
-    assert.equal((await call('desktop_type', { selector: textTarget, text: 'text locator' })).structuredContent.ok, true);
-    assert.equal((await call('desktop_upload', { selector: textTarget, project_relative_path: 'fixtures/upload.txt' })).structuredContent.ok, true);
-    assert.equal((await call('desktop_scroll', { selector: textTarget, y: 10 })).structuredContent.ok, true);
-    assert.equal((await call('desktop_wait_for', { selector: textTarget })).structuredContent.ok, true);
-    assert.equal((await call('desktop_assert', { selector: textTarget, assertion: 'visible' })).structuredContent.ok, true);
-    assert.equal((await call('desktop_assert', { selector: textTarget, assertion: 'text', match: 'contains', expected: 'Ready' })).structuredContent.ok, true);
-    assert.equal((await call('desktop_get_element_details', { selector: textTarget })).structuredContent.ok, true);
+    assert.equal((await call('ui_find', { selector: roleTarget })).structuredContent.ok, true);
+    assert.equal((await call('ui_find', { selector: testIdTarget })).structuredContent.ok, true);
+    assert.equal((await call('ui_find', { selector: placeholderTarget })).structuredContent.ok, true);
+    assert.equal((await call('ui_find', { selector: labelTarget })).structuredContent.ok, true);
+    assert.equal((await call('ui_find', { selector: textTarget })).structuredContent.ok, true);
+    assert.equal((await call('ui_find', { selector: minimumTextTarget })).structuredContent.ok, true);
+    assert.equal((await call('ui_find', { selector: maximumTextTarget })).structuredContent.ok, true);
+    assert.equal((await call('ui_find', { selector: minimumLabelTarget })).structuredContent.ok, true);
+    assert.equal((await call('ui_find', { selector: maximumLabelTarget })).structuredContent.ok, true);
+    assert.equal((await call('ui_find', { selector: minimumPlaceholderTarget })).structuredContent.ok, true);
+    assert.equal((await call('ui_find', { selector: maximumPlaceholderTarget })).structuredContent.ok, true);
+    assert.equal((await call('ui_click', { selector: roleTarget })).structuredContent.ok, true);
+    assert.equal((await call('ui_type', { selector: testIdTarget, text: 'hello' })).structuredContent.ok, true);
+    assert.equal((await call('ui_click', { selector: placeholderTarget })).structuredContent.ok, true);
+    assert.equal((await call('ui_type', { selector: placeholderTarget, text: 'query' })).structuredContent.ok, true);
+    assert.equal((await call('ui_upload', { selector: placeholderTarget, project_relative_path: 'fixtures/upload.txt' })).structuredContent.ok, true);
+    assert.equal((await call('ui_scroll', { selector: placeholderTarget, y: 10 })).structuredContent.ok, true);
+    assert.equal((await call('ui_wait_for', { selector: placeholderTarget })).structuredContent.ok, true);
+    assert.equal((await call('ui_assert', { selector: placeholderTarget, assertion: 'visible' })).structuredContent.ok, true);
+    assert.equal((await call('ui_assert', { selector: placeholderTarget, assertion: 'text', match: 'contains', expected: 'Ready' })).structuredContent.ok, true);
+    assert.equal((await call('ui_element_details', { selector: placeholderTarget })).structuredContent.ok, true);
+    assert.equal((await call('ui_scroll', { selector: roleTarget, y: 10 })).structuredContent.ok, true);
+    assert.equal((await call('ui_wait_for', { selector: testIdTarget })).structuredContent.ok, true);
+    assert.equal((await call('ui_assert', { selector: roleTarget, assertion: 'visible' })).structuredContent.ok, true);
+    assert.equal((await call('ui_element_details', { selector: testIdTarget })).structuredContent.ok, true);
+    assert.equal((await call('ui_click', { selector: labelTarget })).structuredContent.ok, true);
+    assert.equal((await call('ui_type', { selector: labelTarget, text: 'labeled' })).structuredContent.ok, true);
+    assert.equal((await call('ui_upload', { selector: labelTarget, project_relative_path: 'fixtures/upload.txt' })).structuredContent.ok, true);
+    assert.equal((await call('ui_scroll', { selector: labelTarget, y: 10 })).structuredContent.ok, true);
+    assert.equal((await call('ui_wait_for', { selector: labelTarget })).structuredContent.ok, true);
+    assert.equal((await call('ui_assert', { selector: labelTarget, assertion: 'visible' })).structuredContent.ok, true);
+    assert.equal((await call('ui_assert', { selector: labelTarget, assertion: 'text', match: 'contains', expected: 'Ready' })).structuredContent.ok, true);
+    assert.equal((await call('ui_element_details', { selector: labelTarget })).structuredContent.ok, true);
+    assert.equal((await call('ui_click', { selector: textTarget })).structuredContent.ok, true);
+    assert.equal((await call('ui_type', { selector: textTarget, text: 'text locator' })).structuredContent.ok, true);
+    assert.equal((await call('ui_upload', { selector: textTarget, project_relative_path: 'fixtures/upload.txt' })).structuredContent.ok, true);
+    assert.equal((await call('ui_scroll', { selector: textTarget, y: 10 })).structuredContent.ok, true);
+    assert.equal((await call('ui_wait_for', { selector: textTarget })).structuredContent.ok, true);
+    assert.equal((await call('ui_assert', { selector: textTarget, assertion: 'visible' })).structuredContent.ok, true);
+    assert.equal((await call('ui_assert', { selector: textTarget, assertion: 'text', match: 'contains', expected: 'Ready' })).structuredContent.ok, true);
+    assert.equal((await call('ui_element_details', { selector: textTarget })).structuredContent.ok, true);
     for (const target of [roleTarget, testIdTarget, placeholderTarget, labelTarget, textTarget]) assert.ok(directTargets.some(item => item.selector === target || JSON.stringify(item.selector) === JSON.stringify(target)), `semantic target passed through: ${JSON.stringify(target)}`);
     for (const operation of ['find', 'click', 'type', 'upload', 'scroll', 'waitFor', 'text', 'details']) assert.ok(directTargets.some(item => item.operation === operation && JSON.stringify(item.selector) === JSON.stringify(placeholderTarget)), `placeholder target passed through ${operation}`);
     for (const operation of ['find', 'click', 'type', 'upload', 'scroll', 'waitFor', 'text', 'details']) assert.ok(directTargets.some(item => item.operation === operation && JSON.stringify(item.selector) === JSON.stringify(labelTarget)), `label target passed through ${operation}`);
     for (const operation of ['find', 'click', 'type', 'upload', 'scroll', 'waitFor', 'text', 'details']) assert.ok(directTargets.some(item => item.operation === operation && JSON.stringify(item.selector) === JSON.stringify(textTarget)), `text target passed through ${operation}`);
-    assert.equal((await call('desktop_assert', { selector: { by: 'test_id', value: 'missing' }, assertion: 'present' })).structuredContent.data.assertion.status, 'FAIL');
-    const multipleAssertion = await call('desktop_assert', { selector: { by: 'test_id', value: 'multiple' }, assertion: 'visible' });
+    assert.equal((await call('ui_assert', { selector: { by: 'test_id', value: 'missing' }, assertion: 'present' })).structuredContent.data.assertion.status, 'FAIL');
+    const multipleAssertion = await call('ui_assert', { selector: { by: 'test_id', value: 'multiple' }, assertion: 'visible' });
     assert.equal(multipleAssertion.structuredContent.ok, false, 'ambiguous semantic assertion fails safely');
     const beforeInvalidTargets = directTargets.length;
     for (const invalidArgs of [
@@ -263,47 +263,62 @@ steps: [{id: click, action: click, target: {by: css, value: '#blocked'}}]
       { selector: '' },
       { selector: 'x'.repeat(2001) },
     ]) {
-      const invalidTarget = await call('desktop_click', invalidArgs);
+      const invalidTarget = await call('ui_click', invalidArgs);
       assert.equal(invalidTarget.structuredContent.error.code, 'invalid_input');
     }
     assert.equal(directTargets.length, beforeInvalidTargets, 'invalid or ambiguous target shapes do not reach desktop services');
-    const successfulUpload = await call('desktop_upload', { selector: '#file', project_relative_path: 'fixtures/upload.txt' });
+    const successfulUpload = await call('ui_upload', { selector: '#file', project_relative_path: 'fixtures/upload.txt' });
     assert.equal(successfulUpload.structuredContent.ok, true);
     assert.deepEqual(successfulUpload.structuredContent.data, { basename: 'upload.txt', byteLength: 12 });
     assert.deepEqual(uploads[3], { selector: '#file', projectRelativePath: 'fixtures/upload.txt' });
-    const semanticUpload = await call('desktop_upload', { selector: testIdTarget, project_relative_path: 'fixtures/upload.txt' });
+    const semanticUpload = await call('ui_upload', { selector: testIdTarget, project_relative_path: 'fixtures/upload.txt' });
     assert.equal(semanticUpload.structuredContent.ok, true);
     assert.deepEqual(uploads[4], { selector: testIdTarget, projectRelativePath: 'fixtures/upload.txt' });
     assert.equal(JSON.stringify(successfulUpload).includes(root), false, 'MCP result does not disclose the absolute upload path');
-    const invalidUpload = await call('desktop_upload', { selector: '#file', path: 'fixtures/upload.txt' });
+    const invalidUpload = await call('ui_upload', { selector: '#file', path: 'fixtures/upload.txt' });
     assert.equal(invalidUpload.structuredContent.ok, false);
     assert.equal(invalidUpload.structuredContent.error.code, 'invalid_input');
     assert.equal(uploads.length, 5, 'invalid schema input cannot call the upload method');
     const factoryBeforeDisabled = factoryCalls;
     config.desktop!.enabled = false;
-    const disabledUpload = await call('desktop_upload', { selector: '#file', project_relative_path: 'fixtures/upload.txt' });
+    const disabledUpload = await call('ui_upload', { selector: '#file', project_relative_path: 'fixtures/upload.txt' });
     config.desktop!.enabled = true;
     assert.equal(disabledUpload.structuredContent.error.code, 'desktop_disabled');
     assert.equal(factoryCalls, factoryBeforeDisabled, 'disabled desktop upload does not construct or start a service');
     assert.equal(uploads.length, 5);
     for (const action of ['upload', 'any'] as const) {
       config.security = { high_risk: [{ action, target: { by: 'test_id', value: 'fixture' }, description: 'High-risk fixture' }] } as any;
-      const deniedUpload = await call('desktop_upload', { selector: '#file', project_relative_path: 'fixtures/upload.txt' });
+      const deniedUpload = await call('ui_upload', { selector: '#file', project_relative_path: 'fixtures/upload.txt' });
       assert.equal(deniedUpload.structuredContent.error.code, 'approval_denied');
       assert.equal(uploads.length, 5, `${action} rule denies before upload side effects`);
     }
     config.security = undefined;
     const mismatchCount = countRuns('portable');
-    const mismatch = await call('desktop_run_workflow', { workflow_id: 'portable', expected_session_id: 'not-this-session' });
+    const mismatch = await call('ui_run_workflow', { workflow_id: 'portable', expected_session_id: 'not-this-session' });
     assert.equal(mismatch.structuredContent.ok, false); assert.equal(countRuns('portable'), mismatchCount); assert.equal(startCalls, 2);
+    const testMismatch = await call('test_run_workflow', { workflow_id: 'portable', expected_session_id: 'not-this-session' });
+    assert.equal(testMismatch.isError, true); assert.match(testMismatch.structuredContent.error.message, /identity mismatch/i);
+    assert.equal(countRuns('portable'), mismatchCount, 'test_run_workflow checks exact session identity before creating a run');
 
-    const invalid = await call('desktop_run_workflow', { workflow_id: 'portable' });
+    const invalid = await call('ui_run_workflow', { workflow_id: 'portable' });
     assert.equal(invalid.structuredContent.ok, false); assert.equal(invalid.structuredContent.error.code, 'invalid_input');
     assert.equal('state_revision' in invalid.structuredContent, false); assert.equal(encoded(invalid).includes('state_revision'), false);
-    const success = await call('desktop_run_workflow', { workflow_id: 'portable', expected_session_id: 'owned-desktop-session', role: 'operator', environment: 'staging' });
+    const success = await call('ui_run_workflow', { workflow_id: 'portable', expected_session_id: 'owned-desktop-session', role: 'operator', environment: 'staging' });
     assert.equal(success.structuredContent.ok, true, JSON.stringify(success));
     assert.equal(success.structuredContent.data.status, 'passed', JSON.stringify(success));
     assert.equal('state_revision' in success.structuredContent, false); assert.equal(encoded(success).includes('state_revision'), false);
+    assert.deepEqual(actions.slice(-4), ['click:#button', 'type:#input:hello', 'scroll', 'wait']);
+    const genericSuccess = await call('ui_run_workflow', { workflow_id: 'portable', expected_session_id: 'owned-desktop-session', role: 'operator', environment: 'staging' });
+    assert.equal(genericSuccess.structuredContent.ok, true, JSON.stringify(genericSuccess));
+    assert.equal(genericSuccess.structuredContent.data.status, success.structuredContent.data.status);
+    assert.equal(genericSuccess.structuredContent.data.workflow_id, success.structuredContent.data.workflow_id);
+    assert.equal('state_revision' in genericSuccess.structuredContent, false); assert.equal(encoded(genericSuccess).includes('state_revision'), false);
+    assert.deepEqual(actions.slice(-4), ['click:#button', 'type:#input:hello', 'scroll', 'wait']);
+    const testWorkflow = await call('test_run_workflow', { workflow_id: 'portable', expected_session_id: 'owned-desktop-session', role: 'operator', environment: 'staging' });
+    assert.equal(testWorkflow.structuredContent.ok, true, JSON.stringify(testWorkflow));
+    assert.equal(testWorkflow.structuredContent.data.status, 'passed');
+    assert.equal(testWorkflow.structuredContent.data.workflow_id, success.structuredContent.data.workflow_id);
+    assert.equal('state_revision' in testWorkflow.structuredContent, false);
     assert.deepEqual(actions.slice(-4), ['click:#button', 'type:#input:hello', 'scroll', 'wait']);
     const successRun = workflowRun('portable')!;
     assert.equal((store.getRunReport(successRun) as any).run.backend, 'tauri');
@@ -313,8 +328,10 @@ steps: [{id: click, action: click, target: {by: css, value: '#blocked'}}]
 
     for (const workflowId of ['late-unsupported', 'unsupported-route', 'unsupported-capture', 'unsupported-target', 'unsupported-placeholder-target', 'unsupported-label-target', 'unsupported-text-target', 'unsupported-condition']) {
       const beforeRuns = countRuns(workflowId), beforeActions = actions.length, beforeTargets = directTargets.length;
-      const rejected = await call('desktop_run_workflow', { workflow_id: workflowId, expected_session_id: 'owned-desktop-session' });
+      const rejected = await call('ui_run_workflow', { workflow_id: workflowId, expected_session_id: 'owned-desktop-session' });
       assert.equal(rejected.structuredContent.data.errorCode, 'precondition_failed', workflowId);
+      const testRejected = await call('test_run_workflow', { workflow_id: workflowId, expected_session_id: 'owned-desktop-session' });
+      assert.equal(testRejected.structuredContent.data.errorCode, 'precondition_failed', `test_run_workflow ${workflowId}`);
       assert.equal(countRuns(workflowId), beforeRuns, `${workflowId} is rejected before run creation`);
       assert.equal(actions.length, beforeActions, `${workflowId} is rejected before action effects`);
       assert.equal(directTargets.length, beforeTargets, `${workflowId} is rejected before desktop service calls`);
@@ -324,7 +341,7 @@ steps: [{id: click, action: click, target: {by: css, value: '#blocked'}}]
     for (const [workflowId, action] of [['risky-click', 'click'], ['risky-any', 'any']] as const) {
       config.security = { high_risk: [{ action, target: { by: 'test_id', value: 'fixture' }, description: 'High-risk fixture' }] } as any;
       const beforeRuns = countRuns(workflowId), beforeActions = actions.length;
-      const denied = await call('desktop_run_workflow', { workflow_id: workflowId, expected_session_id: 'owned-desktop-session' });
+      const denied = await call('ui_run_workflow', { workflow_id: workflowId, expected_session_id: 'owned-desktop-session' });
       assert.equal(denied.structuredContent.data.errorCode, 'approval_denied');
       assert.equal(countRuns(workflowId), beforeRuns); assert.equal(actions.length, beforeActions);
       assert.doesNotMatch(encoded(denied), /sensitive-payload|PRIVATE_ACTION_SENTINEL/);
@@ -332,7 +349,7 @@ steps: [{id: click, action: click, target: {by: css, value: '#blocked'}}]
     config.security = undefined;
 
     const capturesBeforeAuth = captureCalls;
-    const auth = await call('desktop_run_workflow', { workflow_id: 'auth-safe', expected_session_id: 'owned-desktop-session' });
+    const auth = await call('ui_run_workflow', { workflow_id: 'auth-safe', expected_session_id: 'owned-desktop-session' });
     assert.equal(auth.structuredContent.data.status, 'passed');
     assert.deepEqual(Object.keys(auth.structuredContent.data).sort(), ['run_id', 'status']);
     assert.equal(captureCalls, capturesBeforeAuth); assert.doesNotMatch(encoded(auth), new RegExp(secret));
@@ -342,7 +359,7 @@ steps: [{id: click, action: click, target: {by: css, value: '#blocked'}}]
 
     failClick = true;
     const capturesBeforeRuntimeFailure = captureCalls;
-    const failed = await call('desktop_run_workflow', { workflow_id: 'runtime-failure', expected_session_id: 'owned-desktop-session' });
+    const failed = await call('ui_run_workflow', { workflow_id: 'runtime-failure', expected_session_id: 'owned-desktop-session' });
     failClick = false;
     assert.equal(failed.structuredContent.data.errorCode, 'action_failed');
     assert.equal(captureCalls, capturesBeforeRuntimeFailure + 1, 'desktop failure capture executes directly inside the held queue');
@@ -351,13 +368,12 @@ steps: [{id: click, action: click, target: {by: css, value: '#blocked'}}]
     assert.ok((store.getRunReport(failureRun).evidence as any[]).some(item => item.kind === 'workflow_desktop_screenshot' && item.artifact_ref === failed.structuredContent.data.capture.desktop_screenshot));
     assert.equal('state_revision' in failed.structuredContent, false); assert.equal(encoded(failed).includes('state_revision'), false);
     assert.doesNotMatch(encoded(failed), /PRIVATE_ACTION_SENTINEL/);
-    const browserResult = await call('test_run_workflow', { workflow_id: 'missing-browser-workflow', expected_revision: 7 });
-    assert.equal(browserResult.structuredContent.state_revision, 7);
+    assert.equal((await client!.listTools()).tools.filter(item=>item.name==='test_run_workflow').length,1,'managed test workflow is registered once independently of ui_run_workflow');
 
     shouldBlock = true;
-    const blocked = call('desktop_run_workflow', { workflow_id: 'blocked', expected_session_id: 'owned-desktop-session' });
+    const blocked = call('ui_run_workflow', { workflow_id: 'blocked', expected_session_id: 'owned-desktop-session' });
     await operationGate.entered.promise;
-    const competing = call('desktop_click', { selector: '#competing' });
+    const competing = call('ui_click', { selector: '#competing' });
     await delay(40);
     assert.equal(actions.includes('click:#competing'), false, 'desktop calls cannot interleave while the workflow holds the queue');
     shouldBlock = false;
@@ -368,7 +384,7 @@ steps: [{id: click, action: click, target: {by: css, value: '#blocked'}}]
 
     operationGate = { entered: deferred(), release: deferred() };
     shouldBlock = true;
-    const closeRun = call('desktop_run_workflow', { workflow_id: 'blocked', expected_session_id: 'owned-desktop-session' });
+    const closeRun = call('ui_run_workflow', { workflow_id: 'blocked', expected_session_id: 'owned-desktop-session' });
     void closeRun.catch(() => undefined);
     await operationGate.entered.promise;
     const stopsBeforeClose = stopCalls;

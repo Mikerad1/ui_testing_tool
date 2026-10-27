@@ -18,8 +18,8 @@ async function freePort(): Promise<number> {
  const server = createNetServer(); server.listen(0, '127.0.0.1'); await once(server, 'listening');
  const port = (server.address() as import('node:net').AddressInfo).port; await new Promise<void>(resolve => server.close(() => resolve())); return port;
 }
-function child(config: string, _cwd: string): { process: ChildProcess; stderr: () => string; stdout: () => string } {
- const proc = spawn(process.execPath, [path.join(repo, 'dist/src/cli/index.js'), 'serve', '--config', config], { cwd: repo, env: { ...process.env, UMB_MCP_TOKEN: 'test-token' }, stdio: ['ignore', 'pipe', 'pipe'] });
+function child(config: string, _cwd: string, env:Record<string,string>={}): { process: ChildProcess; stderr: () => string; stdout: () => string } {
+ const proc = spawn(process.execPath, [path.join(repo, 'dist/src/cli/index.js'), 'serve', '--config', config], { cwd: repo, env: { ...process.env, UMB_MCP_TOKEN: 'test-token', ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
  let out = '', err = ''; proc.stdout?.on('data', b => { out += b.toString(); }); proc.stderr?.on('data', b => { err += b.toString(); });
  return { process: proc, stderr: () => err, stdout: () => out };
 }
@@ -243,17 +243,17 @@ test('serve remains available until the configured frontend starts, then refresh
   });
   client = new Client({ name: 'late-frontend-http-test', version: '1.0.0' });
   await client.connect(transport);
-  const status = await client.callTool({ name: 'browser_status', arguments: {} });
+  const status = await client.callTool({ name: 'ui_status', arguments: {} });
   assert.equal((status as any).structuredContent.data.application_ready, false);
-  const failed = await client.callTool({ name: 'browser_refresh', arguments: {} });
+  const failed = await client.callTool({ name: 'ui_refresh', arguments: {} });
   assert.equal(failed.isError, true);
-  assert.match((failed as any).structuredContent.error.message, /start the application.*browser_refresh/i);
-  const stillUnavailable = await client.callTool({ name: 'browser_status', arguments: {} });
+  assert.match((failed as any).structuredContent.error.message, /start the application.*ui_refresh/i);
+  const stillUnavailable = await client.callTool({ name: 'ui_status', arguments: {} });
   assert.equal((stillUnavailable as any).structuredContent.data.application_ready, false);
   app.listen(appPort, '127.0.0.1'); await once(app, 'listening');
-  const refreshed = await client.callTool({ name: 'browser_refresh', arguments: {} });
+  const refreshed = await client.callTool({ name: 'ui_refresh', arguments: {} });
   assert.equal((refreshed as any).structuredContent.data.application_ready, true);
-  const ready = await client.callTool({ name: 'browser_status', arguments: {} });
+  const ready = await client.callTool({ name: 'ui_status', arguments: {} });
   assert.equal((ready as any).structuredContent.data.application_ready, true);
  } finally {
   await client?.close().catch(() => undefined);
@@ -262,4 +262,21 @@ test('serve remains available until the configured frontend starts, then refresh
   if (app.listening) await new Promise<void>(resolve => app.close(() => resolve()));
   await rm(root, { recursive: true, force: true });
  }
+});
+
+test('managed CLI startup serves MCP without a BrowserAdapter and never implicitly starts the disabled service',{timeout:60000},async()=>{
+ const root=await mkdtemp(path.join(os.tmpdir(),'umb-managed-cli-')),port=await freePort(),config=path.join(root,'umb.config.yaml');await mkdir(path.join(root,'knowledge'));
+ await writeFile(config,`version: 1\nprovider: desktop\nproject: {id: managed-cli, name: Managed CLI, base_url: tauri://localhost}\nserver:\n  host: 127.0.0.1\n  port: ${port}\n  auth: {mode: token, token_env: UMB_MCP_TOKEN}\ndesktop:\n  mode: managed\n  enabled: false\n  root: .\nknowledge: {path: ./knowledge}\nmemory: {database: ./.umb/memory.sqlite}\n`);
+ const running=child(config,root,{PLAYWRIGHT_BROWSERS_PATH:path.join(root,'no-playwright-browsers')});let client:Client|undefined,transport:StreamableHTTPClientTransport|undefined;
+  try{await waitReady(running,'managed CLI startup');transport=new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`),{requestInit:{headers:{authorization:'Bearer test-token'}},fetch:(input,init)=>fetch(input,{...init,headers:{...Object.fromEntries(new Headers(init?.headers)),accept:'application/json, text/event-stream'}})});client=new Client({name:'managed-cli-routing',version:'1'});await client.connect(transport);const names=new Set((await client.listTools()).tools.map(tool=>tool.name));assert.equal(names.has('ui_session_start'),true);assert.equal([...names].some(name=>name.startsWith('ui_')),true);assert.equal([...names].some(name=>name.startsWith('browser_')),false);assert.equal([...names].some(name=>name.startsWith('desktop_')),false);const status=await client.callTool({name:'ui_session_status',arguments:{}}) as any;assert.equal(status.isError,true);assert.equal(status.structuredContent.error.code,'desktop_disabled');const start=await client.callTool({name:'ui_session_start',arguments:{}}) as any;assert.equal(start.isError,true);assert.equal(start.structuredContent.error.code,'desktop_disabled');}
+ finally{await client?.close().catch(()=>undefined);await transport?.close().catch(()=>undefined);if(running.process.exitCode===null)await exitChild(running,'managed CLI cleanup');await rm(root,{recursive:true,force:true});}
+});
+
+test('attached CLI selects only the operator adapter and never creates or deletes the remote session',{timeout:60000},async()=>{
+ const root=await mkdtemp(path.join(os.tmpdir(),'umb-attached-cli-')),port=await freePort(),driver=createServer((req,res)=>{const route=req.url??'',method=req.method??'';if(route==='/session/operator-session/url')res.writeHead(200,{'content-type':'application/json'}).end(JSON.stringify({value:'tauri://localhost/'}));else if(route==='/session/operator-session/title')res.writeHead(200,{'content-type':'application/json'}).end(JSON.stringify({value:'operator'}));else if(route==='/session/operator-session/execute/sync')res.writeHead(200,{'content-type':'application/json'}).end(JSON.stringify({value:false}));else res.writeHead(404,{'content-type':'application/json'}).end(JSON.stringify({value:{error:'unknown command'}}));});driver.listen(0,'127.0.0.1');await once(driver,'listening');const driverPort=(driver.address() as import('node:net').AddressInfo).port,config=path.join(root,'umb.config.yaml');await mkdir(path.join(root,'knowledge'));
+ await writeFile(config,`version: 1\nprovider: desktop\nproject: {id: attached-cli, name: Attached CLI, base_url: tauri://localhost}\nserver:\n  host: 127.0.0.1\n  port: ${port}\n  auth: {mode: token, token_env: UMB_MCP_TOKEN}\nbrowser:\n  allowed_origins: [tauri://localhost]\ndesktop:\n  mode: attached\n  enabled: false\n  automation: {endpoint: http://127.0.0.1:${driverPort}, session_id: operator-session}\nknowledge: {path: ./knowledge}\nmemory: {database: ./.umb/memory.sqlite}\n`);
+ const requests:string[]=[];driver.on('request',(req)=>requests.push(`${req.method} ${req.url}`));const running=child(config,root,{PLAYWRIGHT_BROWSERS_PATH:path.join(root,'no-playwright-browsers')});let client:Client|undefined,transport:StreamableHTTPClientTransport|undefined;
+ try{await waitReady(running,'attached CLI startup');assert.deepEqual(requests,[],'DesktopAdapter startup is lazy and does not create/attach by POST');transport=new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`),{requestInit:{headers:{authorization:'Bearer test-token'}},fetch:(input,init)=>fetch(input,{...init,headers:{...Object.fromEntries(new Headers(init?.headers)),accept:'application/json, text/event-stream'}})});client=new Client({name:'attached-cli-routing',version:'1'});await client.connect(transport);const ready=await client.callTool({name:'ui_refresh',arguments:{}}) as any;assert.equal(ready.isError,undefined,JSON.stringify(ready.structuredContent));}
+ finally{await client?.close().catch(()=>undefined);await transport?.close().catch(()=>undefined);if(running.process.exitCode===null)await exitChild(running,'attached CLI cleanup');await new Promise<void>(resolve=>driver.close(()=>resolve()));await rm(root,{recursive:true,force:true});}
+ assert.equal(requests.some(request=>request==='POST /session'),false,'attach/shutdown never creates a session');assert.equal(requests.some(request=>request.startsWith('DELETE ')),false,'attach/shutdown never deletes operator-owned resources');
 });

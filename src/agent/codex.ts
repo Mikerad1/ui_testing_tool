@@ -30,8 +30,8 @@ description: Use UMB to test a user-specified issue against observable UI behavi
 
 - Before browser navigation, read relevant existing UMB memory/context/search tools (\`memory_context\`, \`memory_search\`, \`memory_get_node\`)
   using app/project/environment and feature/AC terms. Treat results as potentially stale and validate against the live app; never mix project or environment context.
-- Use only configured browser and assertion/report tools actually available: e.g. \`browser_navigate\`, \`browser_snapshot\`, \`browser_find\`,
-  \`browser_click\`, \`browser_fill\`, \`browser_screenshot\`, \`test_assert\`, and \`test_report\`. Do not claim unavailable tools or implement a planner/runner.
+- Use only configured UI and assertion/report tools actually available: e.g. \`ui_navigate\`, \`ui_snapshot\`, \`ui_find\`,
+  \`ui_click\`, \`ui_fill\`, \`ui_screenshot\`, \`test_assert\`, and \`test_report\`. Do not claim unavailable tools or implement a planner/runner.
 - Prefer semantic/accessibility locators and stable routes. Refresh snapshots after state changes. Navigation or screenshots alone are not test results.
 - For each UI-testable AC, plan at least one positive and, where applicable, meaningful negative/boundary case; record why a case is not applicable. Use isolated approved test accounts/data.
 - If environment or permission is unclear, or an action is destructive, stop and obtain explicit authorization. Never run destructive/write tests against production.

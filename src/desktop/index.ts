@@ -309,6 +309,20 @@ export class DesktopService {
     return { id: this.sessionId, state: 'running', endpoint: this.endpoint(), startedAt: this.startedAt! };
   }
 
+  /** Read the current URL from an already-running managed session; never starts or attaches to a session. */
+  async currentUrl(): Promise<string> {
+    this.requireSession();
+    const result = await this.request('GET', '/url');
+    if (typeof result?.value !== 'string' || result.value.length > 4096) throw Error('Managed WebDriver returned an invalid current URL.');
+    let url: URL;
+    try { url = new URL(result.value); } catch { throw Error('Managed WebDriver returned an invalid current URL.'); }
+    url.username = '';
+    url.password = '';
+    url.search = '';
+    url.hash = '';
+    return url.toString();
+  }
+
   async unhandledRejections(after = 0, limit = 100): Promise<DesktopUnhandledRejectionEvents> {
     if (this.config.diagnostics?.unhandledRejections !== true) throw Error('Unhandled rejection diagnostics are disabled; configure desktop.diagnostics.unhandled_rejections: true.');
     bounded(after, 0, Number.MAX_SAFE_INTEGER, 'after');

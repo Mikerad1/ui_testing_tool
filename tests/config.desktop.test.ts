@@ -29,16 +29,39 @@ test('desktop config is optional and disabled by default', async () => {
   }
 });
 
-test('runtime adapter provider requires a literal loopback attach endpoint and operator session id',async()=>{
+test('desktop mode is explicit and enforces attached/managed ownership configuration',async()=>{
   const root=await mkdtemp(path.join(os.tmpdir(),'umb-provider-config-')),file=path.join(root,'umb.config.yaml');
-  const prefix='version: 1\nproject: {id: demo, name: Demo, base_url: http://127.0.0.1:3000}\nprovider: desktop\ndesktop:\n  automation:\n';
+  const prefix='version: 1\nproject: {id: demo, name: Demo, base_url: http://127.0.0.1:3000}\nprovider: desktop\n';
+  const attached=`${prefix}desktop:\n  mode: attached\n  automation:\n    endpoint: http://127.0.0.1:4444\n    session_id: operator-session\n`;
+  const managed=`${prefix}desktop:\n  mode: managed\n`;
   try{
-    await writeFile(file,`${prefix}    endpoint: http://127.0.0.1:4444\n    session_id: operator-session\n`);
-    assert.equal((await loadConfig(file)).config.provider,'desktop');
+    await writeFile(file,attached);
+    assert.equal((await loadConfig(file)).config.desktop?.mode,'attached');
+    await writeFile(file,managed);
+    assert.equal((await loadConfig(file)).config.desktop?.mode,'managed');
+    await writeFile(file,`${prefix}desktop:\n  mode: managed\n  enabled: true\n  automation:\n    driver_path: /opt/tauri-driver\n    binary_path: target/demo\n`);
+    assert.equal((await loadConfig(file)).config.desktop?.enabled,true);
+    await writeFile(file,'version: 1\nproject: {id: demo, name: Demo, base_url: http://127.0.0.1:3000}\n');
+    assert.equal((await loadConfig(file)).config.provider,'browser');
     for(const config of [
-      `${prefix}    endpoint: http://localhost:4444\n    session_id: session\n`,
-      `${prefix}    endpoint: http://127.0.0.1:4444/redirect\n    session_id: session\n`,
-      `${prefix}    endpoint: http://127.0.0.1:4444\n`,
+      `${prefix}desktop: {}\n`,
+      `${prefix}desktop: {mode: invalid}\n`,
+      `${prefix}desktop:\n  mode: attached\n  automation: {endpoint: http://127.0.0.1:4444}\n`,
+      `${prefix}desktop:\n  mode: attached\n  automation: {session_id: operator-session}\n`,
+      `${prefix}desktop:\n  mode: attached\n  enabled: true\n  automation: {endpoint: http://127.0.0.1:4444, session_id: operator-session}\n`,
+      `${prefix}desktop:\n  mode: attached\n  automation: {endpoint: http://127.0.0.1:4444, session_id: operator-session, binary_path: target/demo}\n`,
+      `${prefix}desktop:\n  mode: attached\n  build_command: {command: cargo}\n  automation: {endpoint: http://127.0.0.1:4444, session_id: operator-session}\n`,
+      `${prefix}desktop:\n  mode: managed\n  automation: {endpoint: http://127.0.0.1:4444, session_id: operator-session}\n`,
+      `${prefix}desktop: {mode: managed, enabled: true}\n`,
+      `${prefix}desktop:\n  mode: managed\n  enabled: true\n  automation: {driver_path: /opt/tauri-driver}\n`,
+      `${prefix}desktop:\n  mode: managed\n  enabled: true\n  automation: {binary_path: target/demo}\n`,
+      `version: 1\nproject: {id: demo, name: Demo, base_url: http://127.0.0.1:3000}\ndesktop: {mode: managed}\n`,
+      `version: 1\nproject: {id: demo, name: Demo, base_url: http://127.0.0.1:3000}\ndesktop: {enabled: true}\n`,
+    ]){await writeFile(file,config);await assert.rejects(loadConfig(file));}
+    await writeFile(file,`${prefix}desktop:\n  mode: attached\n  automation:\n    endpoint: http://localhost:4444\n    session_id: session\n`);
+    await assert.rejects(loadConfig(file),/loopback origin/);
+    for(const config of [
+      `${prefix}desktop:\n  mode: attached\n  automation:\n    endpoint: http://127.0.0.1:4444/redirect\n    session_id: session\n`,
     ]){await writeFile(file,config);await assert.rejects(loadConfig(file));}
   }finally{await rm(root,{recursive:true,force:true});}
 });
@@ -48,7 +71,7 @@ test('desktop config validates command arrays and rejects unsupported options', 
   const file = path.join(root, 'umb.config.yaml');
   const prefix = 'version: 1\nproject: {id: demo, name: Demo, base_url: http://127.0.0.1:3000}\n';
   try {
-    await writeFile(file, `${prefix}desktop:\n  enabled: true\n  automation:\n    binary_path: src-tauri/target/debug/demo\n  build_command:\n    command: cargo\n    args: [tauri, build, --debug]\n`);
+    await writeFile(file, `${prefix}provider: desktop\ndesktop:\n  mode: managed\n  enabled: true\n  automation:\n    driver_path: /opt/tauri-driver\n    binary_path: src-tauri/target/debug/demo\n  build_command:\n    command: cargo\n    args: [tauri, build, --debug]\n`);
     const configured = (await loadConfig(file)).config.desktop!;
     assert.equal(configured.enabled, true);
     assert.deepEqual(configured.build_command?.args, ['tauri', 'build', '--debug']);

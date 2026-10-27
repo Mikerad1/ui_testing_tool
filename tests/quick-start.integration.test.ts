@@ -35,9 +35,9 @@ test('no-Jira browser quick-start tools record a passing assertion under a tempo
     client=new Client({name:'umb-quick-start-fixture',version:'1.0.0'});
     await client.connect(transport);
     const call=async(name:string,args:Record<string,unknown>={})=>client!.callTool({name,arguments:args});
-    const status=await call('browser_status');assert.equal((status as any).structuredContent.ok,true);
-    const nav=await call('browser_navigate',{url:config.project.base_url,wait_until:'domcontentloaded',timeout_ms:10000});assert.notEqual(nav.isError,true,JSON.stringify(nav));
-    const snapshot=await call('browser_snapshot');assert.notEqual(snapshot.isError,true,JSON.stringify(snapshot));
+    const status=await call('ui_status');assert.equal((status as any).structuredContent.ok,true);
+    const nav=await call('ui_navigate',{url:config.project.base_url,wait_until:'domcontentloaded',timeout_ms:10000});assert.notEqual(nav.isError,true,JSON.stringify(nav));
+    const snapshot=await call('ui_snapshot');assert.notEqual(snapshot.isError,true,JSON.stringify(snapshot));
     const assertion=await call('test_assert',{condition:'url_matches',expected:`127.0.0.1:${appPort}`});
     assert.notEqual(assertion.isError,true,JSON.stringify(assertion));
     const data=(assertion as any).structuredContent.data;

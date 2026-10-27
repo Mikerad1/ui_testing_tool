@@ -101,7 +101,7 @@ try {
   for(let i=0;i<100;i++){
     const elapsedStart=performance.now();
     try {
-      const response:any=await client.callTool({name:'browser_click',arguments:{target:{by:'test_id',value:'counter'},expected_revision:expectedRevision}});
+      const response:any=await client.callTool({name:'ui_click',arguments:{target:{by:'test_id',value:'counter'},expected_revision:expectedRevision}});
       const envelope=response.structuredContent as any;
       if(response.isError||!envelope?.ok||envelope.error)throw Error(JSON.stringify(envelope??response));
       expectedRevision=Number(envelope.state_revision);if(!Number.isInteger(expectedRevision))throw Error('missing state_revision');
@@ -116,7 +116,7 @@ try {
   if(fk.length)failures.push(`SQLite foreign_key_check returned ${fk.length} rows`);
   result.benchmarks.control_plane_startup={config_load_ms:configMs,store_open_migrate_ms:storeMs,mcp_listener_startup_ms:listenerMs};
   result.benchmarks.chromium={launch_ms:launchMs,navigation_ms:navigationMs,compact_snapshot:summary(snapshots)};
-  result.benchmarks.mcp_session={commands:100,tool:'browser_click',sequential:true,per_call:summary(commandSamples),total_elapsed_ms:commandSamples.reduce((a,b)=>a+b,0),failure_count:commandErrors,validation:{final_counter:Number(counter),expected_counter:100,integrity_check:integrity.integrity_check,foreign_key_check_rows:fk.length,passed:counter==='100'&&integrity.integrity_check==='ok'&&fk.length===0&&commandErrors===0}};
+  result.benchmarks.mcp_session={commands:100,tool:'ui_click',sequential:true,per_call:summary(commandSamples),total_elapsed_ms:commandSamples.reduce((a,b)=>a+b,0),failure_count:commandErrors,validation:{final_counter:Number(counter),expected_counter:100,integrity_check:integrity.integrity_check,foreign_key_check_rows:fk.length,passed:counter==='100'&&integrity.integrity_check==='ok'&&fk.length===0&&commandErrors===0}};
 
   if(!quick){
     graphStore=new Store(path.join(temp,'graph.sqlite'),'graph');const ids:string[]=[];

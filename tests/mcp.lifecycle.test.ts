@@ -29,16 +29,16 @@ async function fixture(idleTimeoutMs = 45) {
   await new Promise<void>(resolve => probe.close(() => resolve()));
   const config: Config = {
     version: 1,
-    project: { id: `lifecycle-${process.pid}`, name: 'Lifecycle', base_url: 'http://127.0.0.1:1' },
+     provider: 'desktop',
+     project: { id: `lifecycle-${process.pid}`, name: 'Lifecycle', base_url: 'http://127.0.0.1:1' },
     server: { host: '127.0.0.1', port, auth: { mode: 'none' } },
     browser: { headless: true, viewport: { width: 800, height: 600 }, allowed_origins: [] },
     memory: { database: path.join(root, 'memory.sqlite') },
     knowledge: { path: path.join(root, 'knowledge') },
-    desktop: { enabled: true, root: '.', automation: {}, window: {}, visual: {} },
+     desktop: { mode: 'managed', enabled: true, root: '.', automation: {}, window: {}, visual: {} },
   } as Config;
   const store = new Store(config.memory.database, config.project.id);
-  let browserStatus: (() => Promise<void>) | undefined;
-  const browser = { revision: 0, status: async () => { await browserStatus?.(); return { url: 'fixture' }; } } as any;
+  let sessionStatus: (() => Promise<void>) | undefined, running=false;
   let stopServer: (() => Promise<void>) | undefined;
   let client: Client | undefined;
   let transport: StreamableHTTPClientTransport | undefined;
@@ -46,13 +46,15 @@ async function fixture(idleTimeoutMs = 45) {
   let capability: (() => Promise<void>) | undefined;
   const desktopFactoryCalls = { value: 0 };
   try {
-    stopServer = await serve(config, store, browser, {
+     stopServer = await serve(config, store, undefined, {
       idleTimeoutMs,
       desktopServiceFactory: () => {
         desktopFactoryCalls.value++;
         return {
           capabilities: async () => { await capability?.(); return { available: true }; },
-          stop: async () => { stopCalls++; },
+          start: async () => { running=true; return{id:'owned',state:'running'}; },
+          status: async () => { await sessionStatus?.(); if(!running)throw Error('No managed desktop session is running.');return{id:'owned',state:'running'}; },
+          stop: async () => { stopCalls++;running=false; },
         } as any;
       },
     });
@@ -65,7 +67,7 @@ async function fixture(idleTimeoutMs = 45) {
       client, transport, store, root, desktopFactoryCalls,
       get stopCalls() { return stopCalls; },
       setCapability(value: () => Promise<void>) { capability = value; },
-      setBrowserStatus(value: () => Promise<void>) { browserStatus = value; },
+       setSessionStatus(value: () => Promise<void>) { sessionStatus = value; },
       shutdown: async () => { await stopServer?.(); },
       cleanup: async () => {
         await client?.close().catch(() => undefined);
@@ -86,10 +88,11 @@ test('any active session tool suspends idle expiry and final completion rearms o
   const f = await fixture(200);
   const entered = deferred(), release = deferred();
   try {
-    await f.client.callTool({ name: 'desktop_capabilities', arguments: {} });
+    await f.client.callTool({ name: 'ui_capabilities', arguments: {} });
     assert.equal(f.desktopFactoryCalls.value, 1);
-    f.setBrowserStatus(async () => { entered.resolve(); await release.promise; });
-    const active = f.client.callTool({ name: 'browser_status', arguments: {} });
+    await f.client.callTool({name:'ui_session_start',arguments:{}});
+    f.setSessionStatus(async () => { entered.resolve(); await release.promise; });
+    const active = f.client.callTool({ name: 'ui_session_status', arguments: {} });
     await entered.promise;
     await delay(350);
     assert.equal(f.stopCalls, 0, 'idle timeout does not stop service while any session tool is active');
@@ -106,7 +109,8 @@ test('transport close marks session closed and serializes single-flight stop beh
   const entered = deferred(), release = deferred();
   try {
     f.setCapability(async () => { entered.resolve(); await release.promise; });
-    const active = f.client.callTool({ name: 'desktop_capabilities', arguments: {} });
+    await f.client.callTool({name:'ui_session_start',arguments:{}});
+    const active = f.client.callTool({ name: 'ui_capabilities', arguments: {} });
     void active.catch(() => undefined); // transport closure intentionally interrupts the client's pending request
     await entered.promise;
     const transportClose = Promise.resolve().then(() => f.transport.close()).catch(() => undefined);

@@ -153,12 +153,13 @@ knowledge.command('reload').option('--config <path>','Config file','umb.config.y
    await mkdir(path.dirname(db), { recursive: true }); store = await Store.open(db, config.project.id, config.memory.environment ?? 'legacy');learningWriter=await createProjectLearningWriter(store,config,root);
    try{await reconcile(await safePath(root, config.knowledge.path), store,learningWriter);}catch(error){if(!(error instanceof Error&&error.message==='NLP sidecar request failed'))throw error;console.error('Knowledge load deferred; the last valid graph remains active and learning writes are unavailable.');}
    if (lifecycle.stopRequested) throw Error('Shutdown requested during startup');
-  browser = config.provider === 'desktop' ? new DesktopAdapter(config, root) : new PlaywrightBrowserAdapter(config, root); await browser.start();
+   if(config.provider==='browser'){browser=new PlaywrightBrowserAdapter(config,root);await browser.start();}
+   else if(config.desktop?.mode==='attached'){browser=new DesktopAdapter(config,root);await browser.start();}
    if (lifecycle.stopRequested) throw Error('Shutdown requested during startup');
    let applicationReady = false;
-   if(config.provider==='browser')try { await browser.navigate(config.project.base_url, 'domcontentloaded', 2500); applicationReady = true; } catch { /* The configured application may start after UMB. */ }
+     if(config.provider==='browser')try { await browser!.navigate(config.project.base_url, 'domcontentloaded', 2500); applicationReady = true; } catch { /* The configured application may start after UMB. */ }
     if (lifecycle.stopRequested) throw Error('Shutdown requested during startup');
-     const stopServer=await serve(config, store, browser, { applicationReady, projectRoot:root,knowledgeRoot:await safePath(root,config.knowledge.path),learningWriter,watchKnowledge:Boolean(o.watchKnowledge),approver: async prompt => { if(!process.stdin.isTTY||!process.stdout.isTTY)return false;const rl=createInterface({input:process.stdin,output:process.stdout});try{return (await rl.question(prompt)).trim().toLowerCase()==='y';}finally{rl.close();} } });
+      const stopServer=await serve(config, store, browser, { applicationReady, projectRoot:root,knowledgeRoot:await safePath(root,config.knowledge.path),learningWriter,watchKnowledge:Boolean(o.watchKnowledge),approver: async prompt => { if(!process.stdin.isTTY||!process.stdout.isTTY)return false;const rl=createInterface({input:process.stdin,output:process.stdout});try{return (await rl.question(prompt)).trim().toLowerCase()==='y';}finally{rl.close();} } });
      stop=async()=>{try{await stopServer();}finally{await learningWriter?.close();}};
   lifecycle.markReady();
   console.error(`UMB project ${config.project.id} listening at http://${config.server.host}:${config.server.port}/mcp`);
@@ -177,9 +178,11 @@ knowledge.command('reload').option('--config <path>','Config file','umb.config.y
    const db=await safePath(root,config.memory.database);lock=await acquireProjectLock(root,config.project.id,config.memory.database);
     await mkdir(path.dirname(db),{recursive:true});store=await Store.open(db,config.project.id,config.memory.environment??'legacy');learningWriter=await createProjectLearningWriter(store,config,root);
     try{await reconcile(await safePath(root,config.knowledge.path),store,learningWriter);}catch(error){if(!(error instanceof Error&&error.message==='NLP sidecar request failed'))throw error;console.error('Knowledge load deferred; the last valid graph remains active and learning writes are unavailable.');}if(lifecycle.stopRequested)throw Error('Shutdown requested during startup');
-    browser=config.provider === 'desktop' ? new DesktopAdapter(config,root) : new PlaywrightBrowserAdapter(config,root);await browser.start();if(lifecycle.stopRequested)throw Error('Shutdown requested during startup');
+     if(config.provider==='browser'){browser=new PlaywrightBrowserAdapter(config,root);await browser.start();}
+     else if(config.desktop?.mode==='attached'){browser=new DesktopAdapter(config,root);await browser.start();}
+     if(lifecycle.stopRequested)throw Error('Shutdown requested during startup');
     let applicationReady = false;
-    if(config.provider==='browser')try { await browser.navigate(config.project.base_url, 'domcontentloaded', 2500); applicationReady = true; } catch { /* The configured application may start after UMB. */ }
+    if(config.provider==='browser')try { await browser!.navigate(config.project.base_url, 'domcontentloaded', 2500); applicationReady = true; } catch { /* The configured application may start after UMB. */ }
     if(lifecycle.stopRequested)throw Error('Shutdown requested during startup');
      const stopServer=await serve(config,store,browser,{stdio:true,applicationReady,projectRoot:root,knowledgeRoot:await safePath(root,config.knowledge.path),learningWriter});stop=async()=>{try{await stopServer();}finally{await learningWriter?.close();}};
    lifecycle.markReady();await lifecycle.waitForStopRequest();

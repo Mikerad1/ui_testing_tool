@@ -13,9 +13,10 @@ const root = path.resolve(process.argv[2]!);
 const fixtureMode = process.argv[3];
 const png = createRgbaPng();
 const config = {
+  provider: 'desktop',
   project: { id: 'desktop-image', name: 'desktop-image', base_url: 'http://127.0.0.1:3000' },
   server: { host: '127.0.0.1', port: 7317, auth: { mode: 'token', token_env: 'UMB_MCP_TOKEN' } },
-  desktop: { enabled: true, framework: 'tauri', root: '.', automation: { provider: 'tauri-driver', ready_timeout_seconds: 1 }, window: { title: 'Fixture Window', screenshot_mode: 'window' }, visual: { return_mcp_images: true, ...(fixtureMode === 'mask-policy' ? { mask_selectors: ['.private'] } : {}), ...(['retention','retention-query-failure'].includes(fixtureMode ?? '') ? { retain_artifacts_max_age_days: 1 } : {}), ...(['assert-capture','assert-capture-failure','assert-rollback-failure','assert-service-cleanup-failure','assert-partial-cleanup-failure'].includes(fixtureMode ?? '') ? { capture_on_failure: true } : {}) }, navigation: { allowed_origins: fixtureMode === 'navigation' ? ['https://allowed.example', 'tauri://localhost'] : [] }, ...(fixtureMode === 'unhandled-rejections' ? { diagnostics: { unhandled_rejections: true, capacity: 2 } } : {}) },
+  desktop: { mode: 'managed', enabled: true, framework: 'tauri', root: '.', automation: { provider: 'tauri-driver', ready_timeout_seconds: 1 }, window: { title: 'Fixture Window', screenshot_mode: 'window' }, visual: { return_mcp_images: true, ...(fixtureMode === 'mask-policy' ? { mask_selectors: ['.private'] } : {}), ...(['retention','retention-query-failure'].includes(fixtureMode ?? '') ? { retain_artifacts_max_age_days: 1 } : {}), ...(['assert-capture','assert-capture-failure','assert-rollback-failure','assert-service-cleanup-failure','assert-partial-cleanup-failure'].includes(fixtureMode ?? '') ? { capture_on_failure: true } : {}) }, navigation: { allowed_origins: fixtureMode === 'navigation' ? ['https://allowed.example', 'tauri://localhost'] : [] }, ...(fixtureMode === 'unhandled-rejections' ? { diagnostics: { unhandled_rejections: true, capacity: 2 } } : {}) },
   artifacts: { directory: './.umb/artifacts', redact_sensitive: true, max_file_bytes: 100000, max_total_bytes: 1000000, max_count: 10, max_age_days: 30 },
   memory: { database: './memory.sqlite', environment: 'local', persistent_learning_writes: fixtureMode === 'memory-learning', trust_yaml_seeds: false, sensitive_paths: [], sensitive_values_env: fixtureMode === 'memory-learning' ? ['DESKTOP_MEMORY_SECRET'] : [] },
   knowledge: { path: root },
@@ -118,7 +119,7 @@ if (fixtureMode === 'mask-policy') {
 }
 const learningWriter = fixtureMode === 'memory-learning' ? testLearningWriter(store, { sensitiveValuesEnv: ['DESKTOP_MEMORY_SECRET'], env: process.env }) : undefined;
 if (fixtureMode === 'retention-query-failure') store.listDesktopArtifactReferences = () => { throw new Error('Fixture reference query failure.'); };
-const stop = await serve(config, store, { revision: 0 } as any, {
+const stop = await serve(config, store, undefined, {
   stdio: true,
   projectRoot: root,
   knowledgeRoot: root,
